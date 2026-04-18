@@ -1,0 +1,964 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AppShell } from "@/components/layout/AppShell";
+import {
+  listStatements,
+  listStatementTransactions,
+  Statement,
+  Transaction,
+} from "@/lib/api";
+
+/** =========================
+ * Helpers
+ * ========================= */
+function fmtMoney(n: number) {
+  const v = Number(n || 0);
+  const sign = v < 0 ? "-" : "";
+  return `${sign}$${Math.abs(v).toFixed(2)}`;
+}
+
+function safeTime(s?: string | null) {
+  const t = new Date(s ?? "").getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function parseDateLoose(s?: string | null): Date | null {
+  if (!s) return null;
+
+  // YYYY-MM-DD or YYYY/MM/DD
+  let m = /^(\d{4})[-\/](\d{2})[-\/](\d{2})/.exec(s);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+
+  // MM/DD/YYYY
+  m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(s);
+  if (m) return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return d;
+
+  return null;
+}
+
+function monthKeyFromDate(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function monthLabel(key: string) {
+  const m = /^(\d{4})-(\d{2})$/.exec(key);
+  if (!m) return key;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, 1);
+  return d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function amountAbs(t: Transaction) {
+  return Math.abs(Number(t.amount) || 0);
+}
+
+/** =========================
+ * Categories + rules (same key you used on dashboard)
+ * ========================= */
+type Category =
+  | "Uncategorized"
+  | "Housing"
+  | "Utilities"
+  | "Groceries"
+  | "Dining"
+  | "Fuel"
+  | "Transport"
+  | "Insurance"
+  | "Medical"
+  | "Personal Care"
+  | "Subscriptions"
+  | "Shopping"
+  | "Debt Payment"
+  | "Fees & Interest"
+  | "Income"
+  | "Loan"
+  | "Entertainment"
+  | "Travel"
+  | "Education"
+  | "Gifts/Donations"
+  | "Kids/Family"
+  | "Business"
+  | "Taxes"
+  | "Other";
+
+const CATEGORY_OPTIONS: Category[] = [
+  "Uncategorized",
+  "Housing",
+  "Utilities",
+  "Groceries",
+  "Dining",
+  "Fuel",
+  "Transport",
+  "Insurance",
+  "Medical",
+  "Personal Care",
+  "Subscriptions",
+  "Shopping",
+  "Debt Payment",
+  "Fees & Interest",
+  "Income",
+  "Loan",
+  "Entertainment",
+  "Travel",
+  "Education",
+  "Gifts/Donations",
+  "Kids/Family",
+  "Business",
+  "Taxes",
+  "Other",
+];
+
+const RULES_KEY = "accountantbot_category_rules_v1";
+
+function loadRules(): Record<string, Category> {
+  try {
+    const s = localStorage.getItem(RULES_KEY);
+    if (!s) return {};
+    return JSON.parse(s);
+  } catch {
+    return {};
+  }
+}
+
+function saveRules(rules: Record<string, Category>) {
+  localStorage.setItem(RULES_KEY, JSON.stringify(rules));
+}
+
+function signatureFor(t: Transaction): string {
+  const raw = `${(t as any).merchant ?? ""} ${t.description ?? ""}`
+    .trim()
+    .toLowerCase();
+  return (
+    raw.replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim() || "unknown"
+  );
+}
+
+function defaultCategoryFor(t: Transaction): Category {
+  const text = `${t.description ?? ""} ${(t as any).merchant ?? ""}`.toLowerCase();
+
+  if (text.includes("pymt") || text.includes("payment")) return "Debt Payment";
+
+  if (
+    text.includes("interest") ||
+    text.includes("late fee") ||
+    text.includes("annual fee") ||
+    text.includes("fee")
+  )
+    return "Fees & Interest";
+
+  return "Uncategorized";
+}
+
+function categoryFor(t: Transaction, rules: Record<string, Category>): Category {
+  const sig = signatureFor(t);
+  return rules[sig] ?? (t.category as Category) ?? defaultCategoryFor(t);
+}
+
+function isCreditLike(t: Transaction) {
+  const a = Number(t.amount);
+  const text = `${t.description ?? ""} ${(t as any).merchant ?? ""}`.toLowerCase();
+  return (
+    a < 0 ||
+    text.includes("pymt") ||
+    text.includes("payment") ||
+    text.includes("refund") ||
+    text.includes("reversal") ||
+    text.includes("credit")
+  );
+}
+
+type TxRow = Transaction & {
+  _statement?: Statement;
+  _date?: Date | null;
+  _monthKey?: string;
+  _computedCategory?: Category;
+};
+
+type SortKey = "date_desc" | "date_asc" | "amount_desc" | "amount_asc";
+
+/** =========================
+ * Page
+ * ========================= */
+export default function TransactionsPage() {
+  const [statements, setStatements] = useState<Statement[]>([]);
+  const [rows, setRows] = useState<TxRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  // UI state
+  const [q, setQ] = useState("");
+  const [onlySpends, setOnlySpends] = useState(true);
+  const [monthFilter, setMonthFilter] = useState<string>(""); // "" means all
+  const [cardFilter, setCardFilter] = useState<string>(""); // "" means all
+  const [categoryFilter, setCategoryFilter] = useState<Category | "">("");
+  const [sort, setSort] = useState<SortKey>("date_desc");
+  const [minAmt, setMinAmt] = useState<string>("");
+  const [maxAmt, setMaxAmt] = useState<string>("");
+
+  // Details drawer/modal
+  const [active, setActive] = useState<TxRow | null>(null);
+
+  // Category rules
+  const [rules, setRules] = useState<Record<string, Category>>({});
+
+  // Pagination (kept simple)
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 60;
+
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    if (mounted.current) return;
+    mounted.current = true;
+    // load rules once client-side
+    setRules(loadRules());
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    setErr(null);
+
+    (async () => {
+      try {
+        const st = await listStatements();
+        setStatements(st);
+
+        // fetch txns for all statements
+        const all = await Promise.all(
+          st.map(async (s) => {
+            try {
+              const tx = await listStatementTransactions(s.id);
+              return tx.map((t) => {
+                const d = parseDateLoose((t as any).posted_date ?? (t as any).date);
+                const mk = d ? monthKeyFromDate(d) : "";
+                const computed = categoryFor(t, loadRules()); // fresh rules on render
+                const row: TxRow = {
+                  ...(t as any),
+                  _statement: s,
+                  _date: d,
+                  _monthKey: mk,
+                  _computedCategory: computed,
+                };
+                return row;
+              });
+            } catch {
+              return [] as TxRow[];
+            }
+          })
+        );
+
+        // flatten
+        const flat = all.flat();
+
+        // default month filter = current month if user wants (we keep ALL by default)
+        setRows(flat);
+      } catch (e: any) {
+        setErr(e?.message || "Failed to load transactions");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  // Card list for dropdown
+  const cardOptions = useMemo(() => {
+    const map = new Map<string, { key: string; label: string }>();
+    for (const s of statements) {
+      const key =
+        (s.account_label ?? "Account") +
+        "|" +
+        (s.card_last4 ?? s.card_name ?? s.statement_code);
+
+      if (!map.has(key)) {
+        const label =
+          `${s.account_label ?? "Account"}` +
+          (s.card_name ? ` • ${s.card_name}` : "") +
+          (s.card_last4 ? ` • ${s.card_last4}` : "");
+        map.set(key, { key, label });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [statements]);
+
+  // Month list for dropdown
+  const monthOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) {
+      if (r._monthKey) set.add(r._monthKey);
+    }
+    return Array.from(set.values()).sort((a, b) => a.localeCompare(b));
+  }, [rows]);
+
+  // Filter + sort
+  const filtered = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+    const min = minAmt.trim() ? Number(minAmt) : null;
+    const max = maxAmt.trim() ? Number(maxAmt) : null;
+
+    const out = rows
+      .filter((r) => {
+        if (onlySpends && isCreditLike(r)) return false;
+
+        if (monthFilter && r._monthKey !== monthFilter) return false;
+
+        if (cardFilter) {
+          const key =
+            (r._statement?.account_label ?? "Account") +
+            "|" +
+            (r._statement?.card_last4 ??
+              r._statement?.card_name ??
+              r._statement?.statement_code);
+          if (key !== cardFilter) return false;
+        }
+
+        if (categoryFilter && r._computedCategory !== categoryFilter) return false;
+
+        const amt = amountAbs(r);
+        if (min !== null && !(amt >= min)) return false;
+        if (max !== null && !(amt <= max)) return false;
+
+        if (!qq) return true;
+        const text =
+          `${r.description ?? ""} ${(r as any).merchant ?? ""} ${r._statement?.account_label ?? ""} ${r._statement?.card_last4 ?? ""} ${r._statement?.card_name ?? ""}`
+            .toLowerCase()
+            .trim();
+        return text.includes(qq);
+      })
+      .sort((a, b) => {
+        const da = a._date ? a._date.getTime() : 0;
+        const db = b._date ? b._date.getTime() : 0;
+        const aa = amountAbs(a);
+        const ab = amountAbs(b);
+
+        switch (sort) {
+          case "date_asc":
+            return da - db;
+          case "date_desc":
+            return db - da;
+          case "amount_asc":
+            return aa - ab;
+          case "amount_desc":
+            return ab - aa;
+          default:
+            return db - da;
+        }
+      });
+
+    return out;
+  }, [rows, q, onlySpends, monthFilter, cardFilter, categoryFilter, sort, minAmt, maxAmt]);
+
+  // Reset pagination when filters change
+  useEffect(() => {
+    setPage(1);
+  }, [q, onlySpends, monthFilter, cardFilter, categoryFilter, sort, minAmt, maxAmt]);
+
+  const paged = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, page]);
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  }, [filtered.length]);
+
+  /** =========================
+   * Top-row KPIs
+   * ========================= */
+  const kpis = useMemo(() => {
+    const spends = filtered.filter((t) => !isCreditLike(t));
+    const credits = filtered.filter((t) => isCreditLike(t));
+
+    const spendTotal = spends.reduce((s, t) => s + amountAbs(t), 0);
+    const creditTotal = credits.reduce((s, t) => s + amountAbs(t), 0);
+
+    const net = spendTotal - creditTotal;
+
+    // biggest spend
+    let biggest: TxRow | null = null;
+    let biggestAmt = 0;
+    for (const t of spends) {
+      const a = amountAbs(t);
+      if (a > biggestAmt) {
+        biggestAmt = a;
+        biggest = t;
+      }
+    }
+
+    return {
+      spendTotal,
+      creditTotal,
+      net,
+      count: filtered.length,
+      biggest,
+      biggestAmt,
+    };
+  }, [filtered]);
+
+  /** =========================
+   * Actions
+   * ========================= */
+  function updateRuleForRow(row: TxRow, cat: Category) {
+    const sig = signatureFor(row);
+    const next = { ...rules, [sig]: cat };
+    setRules(next);
+    saveRules(next);
+
+    // Update rows in memory so UI updates immediately (no API write needed)
+    setRows((prev) =>
+      prev.map((r) => {
+        if (signatureFor(r) === sig) {
+          return { ...r, _computedCategory: cat };
+        }
+        return r;
+      })
+    );
+
+    // Also update active if open
+    setActive((a) => {
+      if (!a) return a;
+      if (signatureFor(a) === sig) return { ...a, _computedCategory: cat };
+      return a;
+    });
+  }
+
+  function exportCsv() {
+    // export current FILTERED view (not just current page)
+    const headers = [
+      "date",
+      "description",
+      "amount",
+      "category",
+      "card",
+      "card_last4",
+      "statement_period",
+      "statement_code",
+    ];
+
+    const lines = filtered.map((r) => {
+      const d = r._date ? r._date.toISOString().slice(0, 10) : "";
+      const desc = (r.description ?? "").replace(/"/g, '""');
+      const amt = Number(r.amount ?? 0);
+      const cat = (r._computedCategory ?? "Uncategorized").replace(/"/g, '""');
+      const card = (r._statement?.card_name ?? r._statement?.account_label ?? "").replace(/"/g, '""');
+      const last4 = (r._statement?.card_last4 ?? "").replace(/"/g, '""');
+      const period = (r._statement?.statement_period ?? "").replace(/"/g, '""');
+      const code = (r._statement?.statement_code ?? "").replace(/"/g, '""');
+
+      return [
+        d,
+        `"${desc}"`,
+        amt,
+        `"${cat}"`,
+        `"${card}"`,
+        `"${last4}"`,
+        `"${period}"`,
+        `"${code}"`,
+      ].join(",");
+    });
+
+    const csv = [headers.join(","), ...lines].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `transactions_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <AppShell>
+      <div className="space-y-5">
+        {/* Header */}
+        <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-lg font-semibold">Transactions</div>
+              <div className="mt-1 text-sm text-zinc-400">
+                One place to search + filter across all cards with low cognitive load.
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={exportCsv}
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                title="Export filtered view to CSV"
+              >
+                Export CSV
+              </button>
+              <Link
+                href="/statements"
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                title="Go to statements"
+              >
+                Statements
+              </Link>
+            </div>
+          </div>
+        </div>
+
+        {/* Loading / error */}
+        {loading && (
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5 text-sm text-zinc-400">
+            Loading transactions…
+          </div>
+        )}
+        {err && (
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5 text-sm text-red-400">
+            Error: {err}
+          </div>
+        )}
+
+        {!loading && !err && (
+          <>
+            {/* =========================
+             * Top Row (KPIs)
+             * ========================= */}
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+                <div className="text-xs text-zinc-400">Spend (filtered view)</div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                  {fmtMoney(kpis.spendTotal)}
+                </div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  Purchases only (excludes credits/refunds)
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+                <div className="text-xs text-zinc-400">Credits / Payments</div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                  {fmtMoney(kpis.creditTotal)}
+                </div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  Payments, refunds, reversals
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+                <div className="text-xs text-zinc-400">Net (Spend - Credits)</div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                  {fmtMoney(kpis.net)}
+                </div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  Quick reality check for the view
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+                <div className="text-xs text-zinc-400">Transactions</div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                  {kpis.count}
+                </div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  After filters
+                </div>
+              </div>
+            </div>
+
+            {/* =========================
+             * Second Row (Controls)
+             * ========================= */}
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="grid gap-3 lg:grid-cols-12">
+                {/* Search */}
+                <div className="lg:col-span-4">
+                  <div className="text-xs text-zinc-400">Search</div>
+                  <input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder="merchant, description, card…"
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-white/20"
+                  />
+                </div>
+
+                {/* Month */}
+                <div className="lg:col-span-2">
+                  <div className="text-xs text-zinc-400">Month</div>
+                  <select
+                    value={monthFilter}
+                    onChange={(e) => setMonthFilter(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                  >
+                    <option value="">All</option>
+                    {monthOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {monthLabel(m)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Card */}
+                <div className="lg:col-span-3">
+                  <div className="text-xs text-zinc-400">Card</div>
+                  <select
+                    value={cardFilter}
+                    onChange={(e) => setCardFilter(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                  >
+                    <option value="">All</option>
+                    {cardOptions.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Category */}
+                <div className="lg:col-span-2">
+                  <div className="text-xs text-zinc-400">Category</div>
+                  <select
+                    value={categoryFilter}
+                    onChange={(e) => setCategoryFilter(e.target.value as any)}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                  >
+                    <option value="">All</option>
+                    {CATEGORY_OPTIONS.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Sort + toggles */}
+                <div className="lg:col-span-1">
+                  <div className="text-xs text-zinc-400">Sort</div>
+                  <select
+                    value={sort}
+                    onChange={(e) => setSort(e.target.value as SortKey)}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-2 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                  >
+                    <option value="date_desc">Date ↓</option>
+                    <option value="date_asc">Date ↑</option>
+                    <option value="amount_desc">Amt ↓</option>
+                    <option value="amount_asc">Amt ↑</option>
+                  </select>
+                </div>
+
+                {/* Amount range */}
+                <div className="lg:col-span-4">
+                  <div className="mt-3 grid grid-cols-2 gap-3 lg:mt-0 lg:grid-cols-2">
+                    <div>
+                      <div className="text-xs text-zinc-400">Min $</div>
+                      <input
+                        value={minAmt}
+                        onChange={(e) => setMinAmt(e.target.value)}
+                        inputMode="decimal"
+                        placeholder="0"
+                        className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-white/20"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-xs text-zinc-400">Max $</div>
+                      <input
+                        value={maxAmt}
+                        onChange={(e) => setMaxAmt(e.target.value)}
+                        inputMode="decimal"
+                        placeholder="∞"
+                        className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-white/20"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-8">
+                  <div className="mt-3 flex flex-wrap items-center gap-3 lg:mt-0 lg:justify-end">
+                    <label className="flex items-center gap-2 text-xs text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={onlySpends}
+                        onChange={(e) => setOnlySpends(e.target.checked)}
+                        className="h-4 w-4 accent-white"
+                      />
+                      Spend only
+                    </label>
+
+                    <button
+                      onClick={() => {
+                        setQ("");
+                        setOnlySpends(true);
+                        setMonthFilter("");
+                        setCardFilter("");
+                        setCategoryFilter("");
+                        setSort("date_desc");
+                        setMinAmt("");
+                        setMaxAmt("");
+                      }}
+                      className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                      title="Reset filters"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 text-xs text-zinc-500">
+                Tip: click a row to open details. Changing category saves a “rule” so future imports auto-classify similar merchants/descriptions.
+              </div>
+            </div>
+
+            {/* =========================
+             * Main Area (Table)
+             * ========================= */}
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-zinc-100">
+                  Results
+                </div>
+                <div className="text-xs text-zinc-400">
+                  {filtered.length} rows • page {page}/{totalPages}
+                </div>
+              </div>
+
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="text-xs text-zinc-400">
+                    <tr className="border-b border-white/10">
+                      <th className="py-3 pr-4">date</th>
+                      <th className="py-3 pr-4">description</th>
+                      <th className="py-3 pr-4">category</th>
+                      <th className="py-3 pr-4">card</th>
+                      <th className="py-3 pr-4 text-right">amount</th>
+                      <th className="py-3 pr-0 text-right">open</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-zinc-200">
+                    {paged.map((r) => {
+                      const d = r._date
+                        ? r._date.toLocaleDateString(undefined, {
+                            year: "numeric",
+                            month: "short",
+                            day: "2-digit",
+                          })
+                        : "—";
+
+                      const cat = r._computedCategory ?? "Uncategorized";
+                      const cardLabel =
+                        (r._statement?.card_name ?? r._statement?.account_label ?? "—") +
+                        (r._statement?.card_last4 ? ` • ${r._statement?.card_last4}` : "");
+
+                      const amt = Number(r.amount || 0);
+                      const isCredit = isCreditLike(r);
+
+                      return (
+                        <tr
+                          key={`${(r as any).id ?? ""}-${r._statement?.id ?? ""}-${r.description ?? ""}-${amt}`}
+                          className="border-b border-white/5 hover:bg-white/5"
+                        >
+                          <td className="py-3 pr-4 text-zinc-300">{d}</td>
+
+                          <td className="py-3 pr-4">
+                            <div className="text-zinc-100">{r.description ?? "—"}</div>
+                            <div className="mt-1 text-xs text-zinc-500">
+                              {isCredit ? "Credit/Payment" : "Spend"} •{" "}
+                              {(r as any).txn_type ?? "—"}
+                            </div>
+                          </td>
+
+                          <td className="py-3 pr-4">
+                            <select
+                              value={cat}
+                              onChange={(e) =>
+                                updateRuleForRow(r, e.target.value as Category)
+                              }
+                              className="w-full rounded-xl border border-white/10 bg-[#0B0F14] px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-white/20"
+                              title="Change category (saves as rule)"
+                            >
+                              {CATEGORY_OPTIONS.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+
+                          <td className="py-3 pr-4 text-zinc-300">
+                            {cardLabel}
+                          </td>
+
+                          <td className="py-3 pr-4 text-right font-mono text-zinc-200">
+                            {fmtMoney(amt)}
+                          </td>
+
+                          <td className="py-3 pr-0 text-right">
+                            <button
+                              onClick={() => setActive(r)}
+                              className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
+                            >
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {filtered.length === 0 && (
+                      <tr>
+                        <td className="py-6 text-zinc-400" colSpan={6}>
+                          No results. Try clearing filters.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination */}
+              <div className="mt-4 flex items-center justify-between">
+                <div className="text-xs text-zinc-500">
+                  Showing {(page - 1) * PAGE_SIZE + 1}–
+                  {Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10 disabled:opacity-40"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10 disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* =========================
+             * Details Modal (low cognitive load)
+             * ========================= */}
+            {active && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-zinc-100">
+                        Transaction Details
+                      </div>
+                      <div className="mt-1 truncate text-xs text-zinc-400">
+                        {(active._statement?.card_name ?? active._statement?.account_label ?? "—")}
+                        {active._statement?.card_last4 ? ` • ${active._statement?.card_last4}` : ""}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => setActive(null)}
+                      className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="mt-4 space-y-3">
+                    <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                      <div className="text-xs text-zinc-400">Description</div>
+                      <div className="mt-1 text-sm text-zinc-100">
+                        {active.description ?? "—"}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                        <div className="text-xs text-zinc-400">Date</div>
+                        <div className="mt-1 text-sm text-zinc-100">
+                          {active._date
+                            ? active._date.toLocaleDateString(undefined, {
+                                year: "numeric",
+                                month: "short",
+                                day: "2-digit",
+                              })
+                            : "—"}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                        <div className="text-xs text-zinc-400">Amount</div>
+                        <div className="mt-1 text-sm font-mono text-zinc-100">
+                          {fmtMoney(Number(active.amount || 0))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                        <div className="text-xs text-zinc-400">Type</div>
+                        <div className="mt-1 text-sm text-zinc-100">
+                          {isCreditLike(active) ? "Credit/Payment" : "Spend"} •{" "}
+                          {(active as any).txn_type ?? "—"}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                        <div className="text-xs text-zinc-400">Category</div>
+                        <div className="mt-2">
+                          <select
+                            value={active._computedCategory ?? "Uncategorized"}
+                            onChange={(e) =>
+                              updateRuleForRow(active, e.target.value as Category)
+                            }
+                            className="w-full rounded-xl border border-white/10 bg-[#0E141C] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                          >
+                            {CATEGORY_OPTIONS.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="mt-2 text-[11px] text-zinc-500">
+                            This saves a rule for similar merchants/descriptions.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                      <div className="text-xs text-zinc-400">Statement Context</div>
+                      <div className="mt-1 text-sm text-zinc-100">
+                        {active._statement?.statement_period ?? "—"}
+                      </div>
+                      <div className="mt-2 text-xs text-zinc-500">
+                        Statement code:{" "}
+                        <span className="font-mono text-zinc-300">
+                          {active._statement?.statement_code ?? "—"}
+                        </span>
+                      </div>
+                      {active._statement?.statement_code && (
+                        <div className="mt-3">
+                          <Link
+                            href={`/statements/${encodeURIComponent(
+                              active._statement.statement_code
+                            )}`}
+                            className="inline-flex rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                          >
+                            Open Statement →
+                          </Link>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </AppShell>
+  );
+}
