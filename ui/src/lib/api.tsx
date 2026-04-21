@@ -1,6 +1,6 @@
 // src/lib/api.tsx
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 
 /* =========================
    Statements / Credit Card
@@ -368,4 +368,49 @@ export async function getOsState(params: { user_id: string; window_days?: number
   qs.set("user_id", params.user_id);
   if (params.window_days) qs.set("window_days", String(params.window_days));
   return apiGet<any>(`/os/state?${qs.toString()}`);
+}
+
+/* =========================
+           Debts
+========================= */
+
+export type Debt = {
+  id: number;
+  user_id: string;
+  kind?: string | null;
+  lender?: string | null;
+  name: string;
+  last4?: string | null;
+  apr?: number | null;
+  balance: number;
+  credit_limit?: number | null;
+  minimum_due?: number | null;
+  due_day?: number | null;
+  due_date?: string | null;
+  statement_day?: number | null;
+  active?: boolean | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function listDebts(params: { user_id: string }): Promise<Debt[]> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiGet<Debt[]>(`/debts?${q}`);
+}
+
+export async function createDebt(
+  payload: Omit<Debt, "id" | "created_at" | "updated_at">,
+  params: { user_id: string }
+): Promise<Debt> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiPost<Debt>(`/debts?${q}`, payload);
+}
+
+export async function updateDebt(
+  debt_id: string | number,
+  patch: Partial<Omit<Debt, "id" | "user_id" | "created_at" | "updated_at">>,
+  params: { user_id: string }
+): Promise<Debt> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiPatch<Debt>(`/debts/${debt_id}?${q}`, patch);
 }

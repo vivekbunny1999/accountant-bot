@@ -86,7 +86,20 @@ class ProfileIn(BaseModel):
 
 from sqlalchemy import text
 
+def _cors_origins_from_env() -> list[str]:
+    raw = os.getenv("CORS_ORIGINS", "*").strip()
+    if not raw:
+        return ["*"]
+    if raw == "*":
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+def _is_sqlite_engine() -> bool:
+    return engine.dialect.name == "sqlite"
+
 def ensure_statement_card_columns():
+    if not _is_sqlite_engine():
+        return
     with engine.connect() as conn:
         cols = conn.execute(text("PRAGMA table_info(statements);")).fetchall()
         names = [c[1] for c in cols]
@@ -104,7 +117,7 @@ ensure_statement_card_columns()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for MVP
+    allow_origins=_cors_origins_from_env(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -449,6 +462,8 @@ def ensure_cash_columns():
     If you already have cash tables, ensure new columns exist (SQLite ALTER TABLE safe pattern).
     If tables don't exist yet, Base.metadata.create_all will create them once models are imported.
     """
+    if not _is_sqlite_engine():
+        return
     with engine.connect() as conn:
         # cash_accounts table
         tables = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table';")).fetchall()
@@ -2998,6 +3013,51 @@ def _iso_to_date(s: str):
     except Exception:
         return None
 
+def _next_monthly_due_from_day(day: int, today: date = None):
+    """
+    Compute the next monthly occurrence for a day-of-month anchor.
+    Clamps to the month's last valid day (e.g. 31 -> 30/28 when needed).
+    """
+    if not day:
+        return None
+
+    today = today or date.today()
+    try:
+        day = int(day)
+    except Exception:
+        return None
+
+    if day < 1:
+        return None
+
+    y, m = today.year, today.month
+    for i in range(0, 24):
+        mm = m + i
+        yy = y + (mm - 1) // 12
+        mm_mod = ((mm - 1) % 12) + 1
+        last = monthrange(yy, mm_mod)[1]
+        candidate = date(yy, mm_mod, min(day, last))
+        if candidate >= today:
+            return candidate
+
+    return None
+
+def _resolve_debt_due_date_for_planning(d, today: date = None):
+    """
+    Prefer the explicit due_date when it's still upcoming.
+    If that imported statement due_date is stale or missing, fall back to the
+    recurring due_day so planning doesn't undercount debt minimums.
+    """
+    today = today or date.today()
+    due = _iso_to_date(getattr(d, "due_date", None))
+    if due and due >= today:
+        return due
+
+    if getattr(d, "due_day", None):
+        return _next_monthly_due_from_day(d.due_day, today=today)
+
+    return due
+
 def _to_float(x, default=0.0):
     try:
         if x is None:
@@ -3017,12 +3077,14 @@ def _normalize_merchant_local(s: str) -> str:
 
 def _latest_statement_per_card(db: Session, user_id: str):
     """
-    Return latest Statement per (account_label + card_last4) based on statement_period end date.
+    Return latest Statement per (card_name + card_last4) based on statement_period end date.
+    Falls back to account_label when card_name is missing so older rows still group safely.
     """
     rows = db.query(Statement).filter(Statement.user_id == user_id).all()
     by_key = {}
     for st in rows:
-        key = (st.account_label or "Card", getattr(st, "card_last4", None) or "")
+        card_name = getattr(st, "card_name", None) or st.account_label or "Card"
+        key = (card_name, getattr(st, "card_last4", None) or "")
         end_dt = _parse_statement_end_date(st.statement_period) or datetime.min
         prev = by_key.get(key)
         if not prev:
@@ -3590,7 +3652,7 @@ def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
     for d in debts:
         if d.minimum_due is None:
             continue
-        due = _iso_to_date(d.due_date)
+        due = _resolve_debt_due_date_for_planning(d, today=today)
         if due and today <= due <= horizon:
             items.append({
                 "type": "debt_minimum",
