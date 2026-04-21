@@ -1,6 +1,6 @@
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 
@@ -31,3 +31,30 @@ engine = create_engine(DATABASE_URL, **engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def is_sqlite() -> bool:
+    return engine.dialect.name == "sqlite"
+
+
+def ensure_column(table: str, col_name: str, col_sql: str) -> bool:
+    """
+    Small additive schema helper for legacy databases.
+    Works for both SQLite and Postgres by using SQLAlchemy inspection instead of PRAGMA.
+    """
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if table not in table_names:
+        return False
+
+    col_names = {col["name"] for col in inspector.get_columns(table)}
+    if col_name in col_names:
+        return False
+
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_sql}"))
+    return True
+
+
+def initialize_database() -> None:
+    Base.metadata.create_all(bind=engine)

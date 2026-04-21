@@ -414,3 +414,42 @@ export async function updateDebt(
   const q = new URLSearchParams({ user_id: params.user_id }).toString();
   return apiPatch<Debt>(`/debts/${debt_id}?${q}`, patch);
 }
+
+/* =========================
+           Plaid
+========================= */
+
+export type PlaidLinkTokenResponse = {
+  link_token: string;
+  expiration?: string | null;
+  request_id?: string | null;
+};
+
+export type PlaidAccountSummary = {
+  account_id: string;
+  name: string;
+  mask?: string | null;
+  type?: string | null;
+  subtype?: string | null;
+};
+
+export type PlaidExchangeResponse = {
+  ok: boolean;
+  item_id: string;
+  request_id?: string | null;
+  institution_name?: string | null;
+  accounts: PlaidAccountSummary[];
+  persisted: boolean;
+};
+
+export async function createPlaidLinkToken(body: { user_id: string }): Promise<PlaidLinkTokenResponse> {
+  return apiPost<PlaidLinkTokenResponse>("/plaid/link-token", body);
+}
+
+export async function exchangePlaidPublicToken(body: {
+  user_id: string;
+  public_token: string;
+  institution_name?: string | null;
+}): Promise<PlaidExchangeResponse> {
+  return apiPost<PlaidExchangeResponse>("/plaid/exchange-public-token", body);
+}

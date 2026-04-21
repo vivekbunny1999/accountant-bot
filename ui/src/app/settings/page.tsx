@@ -3,7 +3,79 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
-import { createDebt, Debt, listDebts, updateDebt } from "@/lib/api";
+import {
+  createDebt,
+  createPlaidLinkToken,
+  Debt,
+  exchangePlaidPublicToken,
+  listDebts,
+  PlaidAccountSummary,
+  updateDebt,
+} from "@/lib/api";
+
+type PlaidLinkOnSuccessMetadata = {
+  institution?: { name?: string | null } | null;
+  accounts?: Array<{
+    id?: string;
+    name?: string;
+    mask?: string | null;
+    subtype?: string | null;
+    type?: string | null;
+  }>;
+};
+
+type PlaidLinkOnExitError = {
+  error_message?: string;
+};
+
+type PlaidLinkHandler = {
+  open: () => void;
+  destroy?: () => void;
+};
+
+type PlaidGlobal = {
+  create: (config: {
+    token: string;
+    onSuccess: (publicToken: string, metadata: PlaidLinkOnSuccessMetadata) => void | Promise<void>;
+    onExit?: (error: PlaidLinkOnExitError | null) => void;
+  }) => PlaidLinkHandler;
+};
+
+declare global {
+  interface Window {
+    Plaid?: PlaidGlobal;
+  }
+}
+
+const PLAID_LINK_SCRIPT_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
+let plaidScriptPromise: Promise<void> | null = null;
+
+function loadPlaidLinkScript(): Promise<void> {
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("Plaid Link can only run in the browser."));
+  }
+
+  if (window.Plaid) return Promise.resolve();
+  if (plaidScriptPromise) return plaidScriptPromise;
+
+  plaidScriptPromise = new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${PLAID_LINK_SCRIPT_SRC}"]`);
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Failed to load Plaid Link.")), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = PLAID_LINK_SCRIPT_SRC;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load Plaid Link."));
+    document.body.appendChild(script);
+  });
+
+  return plaidScriptPromise;
+}
 
 /**
  * SETTINGS PAGE (single-file, copy/paste)
@@ -722,6 +794,10 @@ export default function SettingsPage() {
   const [editingDebtId, setEditingDebtId] = useState<number | null>(null);
   const [editingDebtForm, setEditingDebtForm] = useState<DebtFormState>(() => emptyDebtForm());
   const [savingDebt, setSavingDebt] = useState(false);
+  const [plaidBusy, setPlaidBusy] = useState(false);
+  const [plaidError, setPlaidError] = useState<string | null>(null);
+  const [plaidStatus, setPlaidStatus] = useState<string | null>(null);
+  const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
 
   // load persisted
   useEffect(() => {
@@ -865,6 +941,73 @@ export default function SettingsPage() {
       setDebtError(err instanceof Error ? err.message : "Failed to update debt");
     } finally {
       setSavingDebt(false);
+    }
+  }
+
+  async function handleConnectPlaidSandbox() {
+    setPlaidBusy(true);
+    setPlaidError(null);
+    setPlaidStatus("Preparing Plaid sandbox link...");
+
+    let handler: PlaidLinkHandler | null = null;
+
+    try {
+      const [{ link_token }] = await Promise.all([
+        createPlaidLinkToken({ user_id: USER_ID }),
+        loadPlaidLinkScript(),
+      ]);
+
+      if (!window.Plaid) {
+        throw new Error("Plaid Link did not initialize correctly.");
+      }
+
+      handler = window.Plaid.create({
+        token: link_token,
+        onSuccess: async (publicToken, metadata) => {
+          setPlaidError(null);
+          setPlaidStatus("Link successful. Exchanging sandbox token...");
+
+          try {
+            const exchange = await exchangePlaidPublicToken({
+              user_id: USER_ID,
+              public_token: publicToken,
+              institution_name: metadata.institution?.name || null,
+            });
+
+            setPlaidAccounts(exchange.accounts || []);
+            const institutionName = exchange.institution_name || metadata.institution?.name || "institution";
+            setPlaidStatus(
+              `Sandbox connected to ${institutionName}. ${exchange.accounts.length} account${
+                exchange.accounts.length === 1 ? "" : "s"
+              } returned.`
+            );
+          } catch (err) {
+            setPlaidError(err instanceof Error ? err.message : "Failed to exchange Plaid public token.");
+            setPlaidStatus(null);
+          } finally {
+            setPlaidBusy(false);
+            handler?.destroy?.();
+          }
+        },
+        onExit: (error) => {
+          if (error?.error_message) {
+            setPlaidError(error.error_message);
+            setPlaidStatus(null);
+          } else if (!plaidAccounts.length) {
+            setPlaidStatus("Plaid Link closed before completing a connection.");
+          }
+          setPlaidBusy(false);
+          handler?.destroy?.();
+        },
+      });
+
+      setPlaidStatus("Opening Plaid Link...");
+      handler.open();
+    } catch (err) {
+      setPlaidError(err instanceof Error ? err.message : "Failed to start Plaid sandbox.");
+      setPlaidStatus(null);
+      setPlaidBusy(false);
+      handler?.destroy?.();
     }
   }
 
@@ -2226,6 +2369,62 @@ export default function SettingsPage() {
                   value={settings.data.showDebugPanel}
                   onChange={(v) => setSettings((p) => ({ ...p, data: { ...p.data, showDebugPanel: v } }))}
                 />
+              </div>
+            </Card>
+
+            <Card>
+              <SectionTitle
+                title="Plaid Sandbox"
+                subtitle="Minimal staging-only bank connection test. This does not replace PDF uploads yet."
+              />
+              <Divider />
+
+              <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                <div className="text-sm font-medium text-zinc-100">Connected accounts</div>
+                <div className="mt-1 text-xs text-zinc-400">
+                  Uses the backend sandbox link-token and public-token exchange endpoints.
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={handleConnectPlaidSandbox}
+                    disabled={plaidBusy}
+                    className="rounded-xl border border-sky-500/30 bg-sky-500/15 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/20 disabled:opacity-50"
+                  >
+                    {plaidBusy ? "Connecting..." : "Connect Plaid Sandbox"}
+                  </button>
+                </div>
+
+                {plaidStatus ? (
+                  <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+                    {plaidStatus}
+                  </div>
+                ) : null}
+
+                {plaidError ? (
+                  <div className="mt-3 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                    {plaidError}
+                  </div>
+                ) : null}
+
+                {plaidAccounts.length ? (
+                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                    {plaidAccounts.map((account) => (
+                      <div
+                        key={account.account_id}
+                        className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300"
+                      >
+                        <div className="text-sm font-medium text-zinc-100">{account.name}</div>
+                        <div className="mt-1 text-zinc-400">
+                          {(account.type || "account").toString()}
+                          {account.subtype ? ` • ${account.subtype}` : ""}
+                          {account.mask ? ` • ****${account.mask}` : ""}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </Card>
 

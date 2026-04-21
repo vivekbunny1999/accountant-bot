@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, HTTPException, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 # Database
-from db import SessionLocal, engine, Base
+from db import SessionLocal, engine, ensure_column, initialize_database
 
 def get_db():
     db = SessionLocal()
@@ -84,6 +84,16 @@ class ProfileIn(BaseModel):
     extra_debt_target: Optional[float] = None
 
 
+class PlaidLinkTokenIn(BaseModel):
+    user_id: str = "demo"
+
+
+class PlaidPublicTokenExchangeIn(BaseModel):
+    public_token: str
+    user_id: str = "demo"
+    institution_name: Optional[str] = None
+
+
 from sqlalchemy import text
 
 def _cors_origins_from_env() -> list[str]:
@@ -94,24 +104,11 @@ def _cors_origins_from_env() -> list[str]:
         return ["*"]
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
-def _is_sqlite_engine() -> bool:
-    return engine.dialect.name == "sqlite"
-
 def ensure_statement_card_columns():
-    if not _is_sqlite_engine():
-        return
-    with engine.connect() as conn:
-        cols = conn.execute(text("PRAGMA table_info(statements);")).fetchall()
-        names = [c[1] for c in cols]
+    ensure_column("statements", "card_name", "card_name TEXT")
+    ensure_column("statements", "card_last4", "card_last4 TEXT")
 
-        if "card_name" not in names:
-            conn.execute(text("ALTER TABLE statements ADD COLUMN card_name TEXT;"))
-            conn.commit()
-
-        if "card_last4" not in names:
-            conn.execute(text("ALTER TABLE statements ADD COLUMN card_last4 TEXT;"))
-            conn.commit()
-
+initialize_database()
 ensure_statement_card_columns()
 
 
@@ -160,6 +157,195 @@ def _parse_statement_end_date(period: str):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+def _plaid_env_name() -> str:
+    return (os.getenv("PLAID_ENV", "sandbox") or "sandbox").strip().lower()
+
+
+def _plaid_products() -> list[str]:
+    raw = os.getenv("PLAID_PRODUCTS", "transactions")
+    products = [value.strip().lower() for value in raw.split(",") if value.strip()]
+    return products or ["transactions"]
+
+
+def _plaid_country_codes() -> list[str]:
+    raw = os.getenv("PLAID_COUNTRY_CODES", "US")
+    countries = [value.strip().upper() for value in raw.split(",") if value.strip()]
+    return countries or ["US"]
+
+
+def _load_plaid_sdk():
+    try:
+        import plaid
+        from plaid.api import plaid_api
+        from plaid.model.accounts_get_request import AccountsGetRequest
+        from plaid.model.country_code import CountryCode
+        from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
+        from plaid.model.link_token_create_request import LinkTokenCreateRequest
+        from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
+        from plaid.model.products import Products
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Plaid SDK is not installed on the backend. Install requirements.txt on staging first.",
+        ) from exc
+
+    return {
+        "plaid": plaid,
+        "plaid_api": plaid_api,
+        "AccountsGetRequest": AccountsGetRequest,
+        "CountryCode": CountryCode,
+        "ItemPublicTokenExchangeRequest": ItemPublicTokenExchangeRequest,
+        "LinkTokenCreateRequest": LinkTokenCreateRequest,
+        "LinkTokenCreateRequestUser": LinkTokenCreateRequestUser,
+        "Products": Products,
+    }
+
+
+def _get_plaid_client():
+    client_id = (os.getenv("PLAID_CLIENT_ID") or "").strip()
+    secret = (os.getenv("PLAID_SECRET") or "").strip()
+    if not client_id or not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Plaid is not configured. Set PLAID_CLIENT_ID and PLAID_SECRET on the backend.",
+        )
+
+    sdk = _load_plaid_sdk()
+    plaid = sdk["plaid"]
+    env_name = _plaid_env_name()
+
+    env_map = {
+        "sandbox": plaid.Environment.Sandbox,
+        "development": plaid.Environment.Development,
+        "production": plaid.Environment.Production,
+    }
+
+    host = env_map.get(env_name)
+    if host is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unsupported PLAID_ENV '{env_name}'. Use sandbox, development, or production.",
+        )
+
+    configuration = plaid.Configuration(
+        host=host,
+        api_key={
+            "clientId": client_id,
+            "secret": secret,
+            "plaidVersion": "2020-09-14",
+        },
+    )
+    api_client = plaid.ApiClient(configuration)
+    client = sdk["plaid_api"].PlaidApi(api_client)
+    return client, sdk
+
+
+def _raise_plaid_http_error(exc, fallback_status: int = 502):
+    detail = "Plaid request failed."
+    status_code = getattr(exc, "status", None) or fallback_status
+
+    body = getattr(exc, "body", None)
+    if body:
+        try:
+            parsed = json.loads(body)
+            error_message = parsed.get("error_message") or parsed.get("display_message")
+            error_code = parsed.get("error_code")
+            if error_message and error_code:
+                detail = f"{error_message} ({error_code})"
+            elif error_message:
+                detail = error_message
+        except Exception:
+            detail = str(body)
+    elif str(exc):
+        detail = str(exc)
+
+    raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+def _plaid_to_dict(value):
+    if isinstance(value, dict):
+        return value
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return dict(value)
+
+
+@app.post("/plaid/link-token")
+def create_plaid_link_token(payload: PlaidLinkTokenIn):
+    client, sdk = _get_plaid_client()
+
+    products = [sdk["Products"](value) for value in _plaid_products()]
+    country_codes = [sdk["CountryCode"](value) for value in _plaid_country_codes()]
+
+    request_kwargs = {
+        "user": sdk["LinkTokenCreateRequestUser"](client_user_id=payload.user_id or "demo"),
+        "client_name": "Accountant Bot",
+        "products": products,
+        "country_codes": country_codes,
+        "language": "en",
+    }
+
+    redirect_uri = (os.getenv("PLAID_REDIRECT_URI") or "").strip()
+    webhook_url = (os.getenv("PLAID_WEBHOOK_URL") or "").strip()
+    if redirect_uri:
+        request_kwargs["redirect_uri"] = redirect_uri
+    if webhook_url:
+        request_kwargs["webhook"] = webhook_url
+
+    try:
+        request = sdk["LinkTokenCreateRequest"](**request_kwargs)
+        response = _plaid_to_dict(client.link_token_create(request))
+    except sdk["plaid"].ApiException as exc:
+        _raise_plaid_http_error(exc)
+
+    return {
+        "link_token": response["link_token"],
+        "expiration": response.get("expiration"),
+        "request_id": response.get("request_id"),
+    }
+
+
+@app.post("/plaid/exchange-public-token")
+def exchange_plaid_public_token(payload: PlaidPublicTokenExchangeIn):
+    client, sdk = _get_plaid_client()
+
+    try:
+        exchange_request = sdk["ItemPublicTokenExchangeRequest"](
+            public_token=payload.public_token,
+        )
+        exchange_response = _plaid_to_dict(client.item_public_token_exchange(exchange_request))
+
+        accounts_request = sdk["AccountsGetRequest"](
+            access_token=exchange_response["access_token"],
+        )
+        accounts_response = _plaid_to_dict(client.accounts_get(accounts_request))
+    except sdk["plaid"].ApiException as exc:
+        _raise_plaid_http_error(exc)
+
+    accounts = []
+    for account in accounts_response.get("accounts", []):
+        account_data = _plaid_to_dict(account)
+        accounts.append(
+            {
+                "account_id": account_data.get("account_id"),
+                "name": account_data.get("name"),
+                "mask": account_data.get("mask"),
+                "type": account_data.get("type"),
+                "subtype": account_data.get("subtype"),
+            }
+        )
+
+    return {
+        "ok": True,
+        "item_id": exchange_response.get("item_id"),
+        "request_id": exchange_response.get("request_id"),
+        "institution_name": payload.institution_name,
+        "accounts": accounts,
+        "persisted": False,
+    }
 
 
 def _match_category_from_rules(db, user_id: str, description: str):
@@ -217,8 +403,7 @@ import os
 
 from capitalone_parser import parse_capitalone_pdf
 from db import SessionLocal
-from models import Statement, Transaction, Base
-Base.metadata.create_all(bind=engine)
+from models import Statement, Transaction
 # -----------------------------
 # Helpers (Fingerprint + Code)
 # -----------------------------
@@ -459,51 +644,24 @@ from sqlalchemy import text
 
 def ensure_cash_columns():
     """
-    If you already have cash tables, ensure new columns exist (SQLite ALTER TABLE safe pattern).
-    If tables don't exist yet, Base.metadata.create_all will create them once models are imported.
+    If you already have cash tables, ensure new columns exist with additive ALTER TABLE updates.
+    If tables don't exist yet, initialize_database() will create them once models are imported.
     """
-    if not _is_sqlite_engine():
-        return
-    with engine.connect() as conn:
-        # cash_accounts table
-        tables = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table';")).fetchall()
-        table_names = {t[0] for t in tables}
+    ensure_column("cash_accounts", "institution", "institution TEXT")
+    ensure_column("cash_accounts", "account_label", "account_label TEXT")
+    ensure_column("cash_accounts", "account_last4", "account_last4 TEXT")
+    ensure_column("cash_accounts", "account_name", "account_name TEXT")
+    ensure_column("cash_accounts", "statement_period", "statement_period TEXT")
+    ensure_column("cash_accounts", "statement_end_date", "statement_end_date TEXT")
+    ensure_column("cash_accounts", "filename", "filename TEXT")
+    ensure_column("cash_accounts", "checking_begin_balance", "checking_begin_balance REAL")
+    ensure_column("cash_accounts", "checking_end_balance", "checking_end_balance REAL")
+    ensure_column("cash_accounts", "savings_begin_balance", "savings_begin_balance REAL")
+    ensure_column("cash_accounts", "savings_end_balance", "savings_end_balance REAL")
+    ensure_column("cash_accounts", "fingerprint", "fingerprint TEXT")
 
-        if "cash_accounts" in table_names:
-            cols = conn.execute(text("PRAGMA table_info(cash_accounts);")).fetchall()
-            names = [c[1] for c in cols]
-
-            def add_col(colname: str, coltype: str):
-                if colname not in names:
-                    conn.execute(text(f"ALTER TABLE cash_accounts ADD COLUMN {colname} {coltype};"))
-                    conn.commit()
-
-            add_col("institution", "TEXT")
-            add_col("account_label", "TEXT")
-            add_col("account_last4", "TEXT")
-            add_col("account_name", "TEXT")
-            add_col("statement_period", "TEXT")
-            add_col("statement_end_date", "TEXT")
-            add_col("filename", "TEXT")
-
-            add_col("checking_begin_balance", "REAL")
-            add_col("checking_end_balance", "REAL")
-            add_col("savings_begin_balance", "REAL")
-            add_col("savings_end_balance", "REAL")
-
-            add_col("fingerprint", "TEXT")
-
-        if "cash_transactions" in table_names:
-            cols = conn.execute(text("PRAGMA table_info(cash_transactions);")).fetchall()
-            names = [c[1] for c in cols]
-
-            def add_col_tx(colname: str, coltype: str):
-                if colname not in names:
-                    conn.execute(text(f"ALTER TABLE cash_transactions ADD COLUMN {colname} {coltype};"))
-                    conn.commit()
-
-            add_col_tx("txn_type", "TEXT")
-            add_col_tx("category", "TEXT")
+    ensure_column("cash_transactions", "txn_type", "txn_type TEXT")
+    ensure_column("cash_transactions", "category", "category TEXT")
 
 # ensure once at startup
 ensure_cash_columns()
