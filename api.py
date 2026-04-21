@@ -216,11 +216,19 @@ def _get_plaid_client():
     plaid = sdk["plaid"]
     env_name = _plaid_env_name()
 
-    env_map = {
-        "sandbox": plaid.Environment.Sandbox,
-        "development": plaid.Environment.Development,
-        "production": plaid.Environment.Production,
-    }
+    env_map = {}
+
+    sandbox_host = getattr(plaid.Environment, "Sandbox", None)
+    if sandbox_host is not None:
+        env_map["sandbox"] = sandbox_host
+
+    development_host = getattr(plaid.Environment, "Development", None)
+    if development_host is not None:
+        env_map["development"] = development_host
+
+    production_host = getattr(plaid.Environment, "Production", None)
+    if production_host is not None:
+        env_map["production"] = production_host
 
     host = env_map.get(env_name)
     if host is None:
