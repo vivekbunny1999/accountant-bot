@@ -185,6 +185,97 @@ class CashTransaction(Base):
     cash_account = relationship("CashAccount", back_populates="transactions")
 
 
+class PlaidItem(Base):
+    __tablename__ = "plaid_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+    plaid_item_id = Column(String, unique=True, index=True, nullable=False)
+    institution_name = Column(String, nullable=True)
+    access_token = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="linked")
+    available_products_json = Column(Text, nullable=True)
+    billed_products_json = Column(Text, nullable=True)
+    consent_expiration_time = Column(String, nullable=True)
+    last_accounts_sync_at = Column(DateTime, nullable=True)
+    last_balances_sync_at = Column(DateTime, nullable=True)
+    last_transactions_sync_at = Column(DateTime, nullable=True)
+    last_sync_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    accounts = relationship(
+        "PlaidAccount",
+        back_populates="item",
+        cascade="all, delete-orphan",
+    )
+    transactions = relationship(
+        "PlaidTransaction",
+        back_populates="item",
+        cascade="all, delete-orphan",
+    )
+
+
+class PlaidAccount(Base):
+    __tablename__ = "plaid_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+    plaid_item_id = Column(Integer, ForeignKey("plaid_items.id"), index=True, nullable=False)
+    plaid_account_id = Column(String, unique=True, index=True, nullable=False)
+    institution_name = Column(String, nullable=True)
+    name = Column(String, nullable=False)
+    official_name = Column(String, nullable=True)
+    mask = Column(String, nullable=True)
+    type = Column(String, nullable=True)
+    subtype = Column(String, nullable=True)
+    current_balance = Column(Float, nullable=True)
+    available_balance = Column(Float, nullable=True)
+    iso_currency_code = Column(String, nullable=True)
+    unofficial_currency_code = Column(String, nullable=True)
+    is_cash_like = Column(Boolean, default=False)
+    is_liability = Column(Boolean, default=False)
+    sync_status = Column(String, nullable=False, default="linked")
+    last_synced_at = Column(DateTime, nullable=True)
+    last_balance_sync_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    item = relationship("PlaidItem", back_populates="accounts")
+    transactions = relationship(
+        "PlaidTransaction",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+
+
+class PlaidTransaction(Base):
+    __tablename__ = "plaid_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+    plaid_item_id = Column(Integer, ForeignKey("plaid_items.id"), index=True, nullable=False)
+    plaid_account_id = Column(Integer, ForeignKey("plaid_accounts.id"), index=True, nullable=False)
+    plaid_transaction_id = Column(String, unique=True, index=True, nullable=False)
+    posted_date = Column(String, nullable=True)
+    authorized_date = Column(String, nullable=True)
+    name = Column(String, nullable=True)
+    merchant_name = Column(String, nullable=True)
+    amount = Column(Float, nullable=True)
+    iso_currency_code = Column(String, nullable=True)
+    unofficial_currency_code = Column(String, nullable=True)
+    pending = Column(Boolean, default=False)
+    payment_channel = Column(String, nullable=True)
+    category_primary = Column(String, nullable=True)
+    category_detailed = Column(String, nullable=True)
+    raw_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    item = relationship("PlaidItem", back_populates="transactions")
+    account = relationship("PlaidAccount", back_populates="transactions")
+
+
 # =========================================================
 # Financial OS (Phase 1) — NEW TABLES (additive, no breaks)
 # =========================================================
