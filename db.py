@@ -1,4 +1,5 @@
 import os
+import re
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -37,6 +38,27 @@ def is_sqlite() -> bool:
     return engine.dialect.name == "sqlite"
 
 
+_BOOLEAN_DEFAULT_PATTERN = re.compile(
+    r"(\bBOOLEAN\b[^,]*\bDEFAULT\s+)(0|1)(\b)",
+    re.IGNORECASE,
+)
+
+
+def _postgres_safe_column_sql(col_sql: str) -> str:
+    """
+    Postgres BOOLEAN defaults must use TRUE/FALSE rather than 0/1.
+    SQLite accepts TRUE/FALSE too, so only rewrite for Postgres callers.
+    """
+    if engine.dialect.name != "postgresql":
+        return col_sql
+
+    def _replace(match: re.Match[str]) -> str:
+        boolean_default = "TRUE" if match.group(2) == "1" else "FALSE"
+        return f"{match.group(1)}{boolean_default}{match.group(3)}"
+
+    return _BOOLEAN_DEFAULT_PATTERN.sub(_replace, col_sql)
+
+
 def ensure_column(table: str, col_name: str, col_sql: str) -> bool:
     """
     Small additive schema helper for legacy databases.
@@ -52,7 +74,7 @@ def ensure_column(table: str, col_name: str, col_sql: str) -> bool:
         return False
 
     with engine.begin() as conn:
-        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_sql}"))
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {_postgres_safe_column_sql(col_sql)}"))
     return True
 
 
