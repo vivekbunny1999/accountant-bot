@@ -1,6 +1,56 @@
 // src/lib/api.tsx
 
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+const SESSION_TOKEN_KEY = "accountantbot_session_token_v1";
+
+export type AuthUser = {
+  id: string;
+  email: string;
+  display_name?: string | null;
+  auth_enabled?: boolean;
+  created_at?: string | null;
+};
+
+export type AuthResponse = {
+  ok: boolean;
+  token: string;
+  expires_at: string;
+  user: AuthUser;
+};
+
+export function getSessionToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(SESSION_TOKEN_KEY);
+}
+
+export function setSessionToken(token: string) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(SESSION_TOKEN_KEY, token);
+}
+
+export function clearSessionToken() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(SESSION_TOKEN_KEY);
+}
+
+function authHeaders(headers?: HeadersInit): Headers {
+  const out = new Headers(headers || {});
+  const token = getSessionToken();
+  if (token) out.set("Authorization", `Bearer ${token}`);
+  return out;
+}
+
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${BASE}${path}`, {
+    cache: "no-store",
+    ...init,
+    headers: authHeaders(init?.headers),
+  });
+  if (res.status === 401 && typeof window !== "undefined") {
+    clearSessionToken();
+  }
+  return res;
+}
 
 /* =========================
    Statements / Credit Card
@@ -46,13 +96,13 @@ export type UploadResult = {
 };
 
 export async function listStatements(): Promise<Statement[]> {
-  const res = await fetch(`${BASE}/statements`, { cache: "no-store" });
+  const res = await apiFetch(`/statements`);
   if (!res.ok) throw new Error(`Failed: ${res.status}`);
   return res.json();
 }
 
 export async function deleteStatementByCode(statement_code: string): Promise<void> {
-  const res = await fetch(`${BASE}/statements/by-code/${encodeURIComponent(statement_code)}`, {
+  const res = await apiFetch(`/statements/by-code/${encodeURIComponent(statement_code)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
@@ -71,9 +121,7 @@ export async function uploadCapitalOnePdf(
   form.append("file", file);
 
   const replace = opts?.replace ? "true" : "false";
-  const url = `${BASE}/upload/capitalone-pdf?replace=${replace}`;
-
-  const res = await fetch(url, {
+  const res = await apiFetch(`/upload/capitalone-pdf?replace=${replace}`, {
     method: "POST",
     body: form,
   });
@@ -87,9 +135,7 @@ export async function uploadCapitalOnePdf(
 }
 
 export async function getStatementByCode(statement_code: string): Promise<Statement> {
-  const res = await fetch(`${BASE}/statements/by-code/${encodeURIComponent(statement_code)}`, {
-    cache: "no-store",
-  });
+  const res = await apiFetch(`/statements/by-code/${encodeURIComponent(statement_code)}`);
   if (!res.ok) throw new Error(`Failed: ${res.status}`);
   return res.json();
 }
@@ -106,9 +152,7 @@ export type Transaction = {
 };
 
 export async function listStatementTransactions(statement_id: number): Promise<Transaction[]> {
-  const res = await fetch(`${BASE}/statements/${statement_id}/transactions`, {
-    cache: "no-store",
-  });
+  const res = await apiFetch(`/statements/${statement_id}/transactions`);
   if (!res.ok) throw new Error(`Failed: ${res.status}`);
   return res.json();
 }
@@ -118,13 +162,13 @@ export async function listStatementTransactions(statement_id: number): Promise<T
 ========================= */
 
 async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+  const res = await apiFetch(path);
   if (!res.ok) throw new Error(await res.text().catch(() => `Failed: ${res.status}`));
   return (await res.json()) as T;
 }
 
 async function apiDelete<T = any>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
+  const res = await apiFetch(path, { method: "DELETE" });
   if (!res.ok) throw new Error(await res.text().catch(() => `Delete failed: ${res.status}`));
 
   const ct = res.headers.get("content-type") || "";
@@ -133,7 +177,7 @@ async function apiDelete<T = any>(path: string): Promise<T> {
 }
 
 async function apiPatch<T>(path: string, body: any): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await apiFetch(path, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -147,7 +191,7 @@ async function apiPatch<T>(path: string, body: any): Promise<T> {
 }
 
 async function apiPost<T>(path: string, body: any): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await apiFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -157,6 +201,57 @@ async function apiPost<T>(path: string, body: any): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return undefined as T;
   return (await res.json()) as T;
+}
+
+export async function signup(body: {
+  email: string;
+  password: string;
+  display_name?: string;
+}): Promise<AuthResponse> {
+  return apiPost<AuthResponse>("/auth/signup", body);
+}
+
+export async function login(body: {
+  email: string;
+  password: string;
+}): Promise<AuthResponse> {
+  return apiPost<AuthResponse>("/auth/login", body);
+}
+
+export async function logout(): Promise<void> {
+  const res = await apiFetch("/auth/logout", { method: "POST" });
+  if (!res.ok) throw new Error(await res.text().catch(() => `Logout failed: ${res.status}`));
+}
+
+export async function getMe(): Promise<{
+  ok: boolean;
+  user: AuthUser;
+  settings: Record<string, any>;
+  category_rules: Record<string, any>;
+}> {
+  return apiGet("/auth/me");
+}
+
+export async function getUserSettings(): Promise<{
+  ok: boolean;
+  user_id: string;
+  settings: Record<string, any>;
+  category_rules: Record<string, any>;
+}> {
+  return apiGet("/user/settings");
+}
+
+export async function saveUserSettings(body: {
+  settings: Record<string, any>;
+  category_rules: Record<string, any>;
+}) {
+  const res = await apiFetch("/user/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text().catch(() => `Save failed: ${res.status}`));
+  return res.json();
 }
 
 export async function getCashAccounts(params?: { user_id?: string; limit?: number }) {
@@ -190,7 +285,7 @@ export async function uploadCapitalOneBankPdf(
   form.append("file", file);
 
   const q = new URLSearchParams({ user_id: params.user_id }).toString();
-  const res = await fetch(`${BASE}/upload/capitalone-bank-pdf?${q}`, {
+  const res = await apiFetch(`/upload/capitalone-bank-pdf?${q}`, {
     method: "POST",
     body: form,
   });
@@ -363,7 +458,7 @@ export async function deleteManualBill(mb_id: string | number, params: { user_id
   return apiDelete(`/os/manual-bills/${mb_id}?${q}`);
 }
 
-export async function getOsState(params: { user_id: string; window_days?: number } = { user_id: "demo" }) {
+export async function getOsState(params: { user_id: string; window_days?: number }) {
   const qs = new URLSearchParams();
   qs.set("user_id", params.user_id);
   if (params.window_days) qs.set("window_days", String(params.window_days));

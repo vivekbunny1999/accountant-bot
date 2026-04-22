@@ -1,5 +1,5 @@
 # FastAPI core
-from fastapi import FastAPI, UploadFile, HTTPException, File, Depends
+from fastapi import FastAPI, UploadFile, HTTPException, File, Depends, Body, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # Database
@@ -32,6 +32,9 @@ from models import (
     PlaidItem,
     PlaidAccount,
     PlaidTransaction,
+    User,
+    UserSession,
+    UserSettings,
 )
 
 # Pydantic
@@ -48,6 +51,18 @@ from calendar import monthrange
 # Parsers
 from capitalone_parser import parse_capitalone_pdf
 from capitalone_bank_parser import parse_capitalone_bank_pdf
+from auth import (
+    authenticate_user,
+    create_session,
+    current_user_from_token,
+    ensure_user_settings,
+    parse_settings_json,
+    public_user,
+    require_current_user,
+    resolve_user_id,
+    revoke_session,
+)
+from security import decrypt_secret, encrypt_secret, hash_password, new_user_id, normalize_email, utcnow
 
 
 
@@ -88,6 +103,22 @@ class ProfileIn(BaseModel):
     extra_debt_target: Optional[float] = None
 
 
+class SignupIn(BaseModel):
+    email: str
+    password: str
+    display_name: Optional[str] = None
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class SettingsIn(BaseModel):
+    settings: dict = {}
+    category_rules: dict = {}
+
+
 class PlaidLinkTokenIn(BaseModel):
     user_id: str = "demo"
 
@@ -118,9 +149,66 @@ def _cors_origins_from_env() -> list[str]:
 def ensure_statement_card_columns():
     ensure_column("statements", "card_name", "card_name TEXT")
     ensure_column("statements", "card_last4", "card_last4 TEXT")
+    ensure_column("plaid_items", "access_token_encrypted", "access_token_encrypted TEXT")
+
+
+def ensure_auth_seed_rows():
+    models_with_users = [
+        Statement,
+        MerchantRule,
+        Profile,
+        MonthlySnapshot,
+        AdviceLog,
+        CashAccount,
+        PlaidItem,
+        PlaidAccount,
+        PlaidTransaction,
+        Bill,
+        Debt,
+        ManualBill,
+        Goal,
+        Paycheck,
+        RecurringCandidate,
+    ]
+
+    db = SessionLocal()
+    try:
+        seen = set()
+        for model in models_with_users:
+            for (user_id,) in db.query(model.user_id).distinct().all():
+                if user_id:
+                    seen.add(user_id)
+
+        for user_id in sorted(seen):
+            if not db.query(User).filter(User.id == user_id).first():
+                db.add(
+                    User(
+                        id=user_id,
+                        email=None,
+                        password_hash=None,
+                        display_name=user_id,
+                        auth_enabled=False,
+                        created_at=utcnow(),
+                        updated_at=utcnow(),
+                    )
+                )
+            if not db.query(UserSettings).filter(UserSettings.user_id == user_id).first():
+                db.add(
+                    UserSettings(
+                        user_id=user_id,
+                        settings_json="{}",
+                        category_rules_json="{}",
+                        created_at=utcnow(),
+                        updated_at=utcnow(),
+                    )
+                )
+        db.commit()
+    finally:
+        db.close()
 
 initialize_database()
 ensure_statement_card_columns()
+ensure_auth_seed_rows()
 
 
 app.add_middleware(
@@ -168,6 +256,140 @@ def _parse_statement_end_date(period: str):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+def _coerce_user_id(current_user: User, requested_user_id: Optional[str] = None) -> str:
+    return resolve_user_id(current_user, requested_user_id)
+
+
+def _get_plaid_access_token(item_row: PlaidItem, db: Session) -> str:
+    encrypted = getattr(item_row, "access_token_encrypted", None)
+    if encrypted:
+        token = decrypt_secret(encrypted)
+        if token:
+            return token
+
+    legacy_token = getattr(item_row, "access_token", None)
+    if not legacy_token:
+        raise HTTPException(status_code=500, detail="Plaid access token is unavailable.")
+
+    item_row.access_token_encrypted = encrypt_secret(legacy_token)
+    item_row.updated_at = utcnow()
+    db.add(item_row)
+    db.commit()
+    db.refresh(item_row)
+    return legacy_token
+
+
+@app.post("/auth/signup")
+def auth_signup(payload: SignupIn, request: Request, db: Session = Depends(get_db)):
+    email = normalize_email(payload.email)
+    password = payload.password or ""
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email address is required.")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    user = User(
+        id=new_user_id(),
+        email=email,
+        password_hash=hash_password(password),
+        display_name=(payload.display_name or "").strip() or email.split("@", 1)[0],
+        auth_enabled=True,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    ensure_user_settings(db, user.id)
+
+    token, session = create_session(db, user, request.headers.get("user-agent"))
+    return {
+        "ok": True,
+        "token": token,
+        "expires_at": session.expires_at.isoformat(),
+        "user": public_user(user),
+    }
+
+
+@app.post("/auth/login")
+def auth_login(payload: LoginIn, request: Request, db: Session = Depends(get_db)):
+    email = normalize_email(payload.email)
+    user = authenticate_user(db, email, payload.password or "")
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    ensure_user_settings(db, user.id)
+    token, session = create_session(db, user, request.headers.get("user-agent"))
+    return {
+        "ok": True,
+        "token": token,
+        "expires_at": session.expires_at.isoformat(),
+        "user": public_user(user),
+    }
+
+
+@app.post("/auth/logout")
+def auth_logout(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    _ = current_user
+    token = None
+    if authorization:
+        parts = authorization.split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1].strip()
+    if token:
+        revoke_session(db, token)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+def auth_me(current_user: User = Depends(require_current_user), db: Session = Depends(get_db)):
+    settings = ensure_user_settings(db, current_user.id)
+    return {
+        "ok": True,
+        "user": public_user(current_user),
+        "settings": parse_settings_json(settings.settings_json),
+        "category_rules": parse_settings_json(settings.category_rules_json),
+    }
+
+
+@app.get("/user/settings")
+def get_user_settings(current_user: User = Depends(require_current_user), db: Session = Depends(get_db)):
+    row = ensure_user_settings(db, current_user.id)
+    return {
+        "ok": True,
+        "user_id": current_user.id,
+        "settings": parse_settings_json(row.settings_json),
+        "category_rules": parse_settings_json(row.category_rules_json),
+    }
+
+
+@app.put("/user/settings")
+def put_user_settings(
+    payload: SettingsIn,
+    current_user: User = Depends(require_current_user),
+    db: Session = Depends(get_db),
+):
+    row = ensure_user_settings(db, current_user.id)
+    row.settings_json = json.dumps(payload.settings or {})
+    row.category_rules_json = json.dumps(payload.category_rules or {})
+    row.updated_at = utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "ok": True,
+        "user_id": current_user.id,
+        "settings": parse_settings_json(row.settings_json),
+        "category_rules": parse_settings_json(row.category_rules_json),
+    }
 
 
 def _plaid_env_name() -> str:
@@ -493,7 +715,7 @@ def _sync_plaid_accounts_for_item(
 ) -> list[PlaidAccount]:
     synced_at = _plaid_now()
     try:
-        accounts_request = sdk["AccountsGetRequest"](access_token=item_row.access_token)
+        accounts_request = sdk["AccountsGetRequest"](access_token=_get_plaid_access_token(item_row, db))
         accounts_response = _plaid_to_dict(client.accounts_get(accounts_request))
     except sdk["plaid"].ApiException as exc:
         item_row.status = "error"
@@ -532,7 +754,7 @@ def _sync_plaid_transactions_for_item(
     synced_at = _plaid_now()
     try:
         request = sdk["TransactionsGetRequest"](
-            access_token=item_row.access_token,
+            access_token=_get_plaid_access_token(item_row, db),
             start_date=start_date,
             end_date=end_date,
         )
@@ -602,14 +824,18 @@ def _sync_plaid_transactions_for_item(
 
 
 @app.post("/plaid/link-token")
-def create_plaid_link_token(payload: PlaidLinkTokenIn):
+def create_plaid_link_token(
+    payload: PlaidLinkTokenIn,
+    current_user: User = Depends(require_current_user),
+):
     client, sdk = _get_plaid_client()
+    user_id = _coerce_user_id(current_user, payload.user_id)
 
     products = [sdk["Products"](value) for value in _plaid_products()]
     country_codes = [sdk["CountryCode"](value) for value in _plaid_country_codes()]
 
     request_kwargs = {
-        "user": sdk["LinkTokenCreateRequestUser"](client_user_id=payload.user_id or "demo"),
+        "user": sdk["LinkTokenCreateRequestUser"](client_user_id=user_id),
         "client_name": "Accountant Bot",
         "products": products,
         "country_codes": country_codes,
@@ -637,8 +863,13 @@ def create_plaid_link_token(payload: PlaidLinkTokenIn):
 
 
 @app.post("/plaid/exchange-public-token")
-def exchange_plaid_public_token(payload: PlaidPublicTokenExchangeIn, db: Session = Depends(get_db)):
+def exchange_plaid_public_token(
+    payload: PlaidPublicTokenExchangeIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     client, sdk = _get_plaid_client()
+    user_id = _coerce_user_id(current_user, payload.user_id)
 
     try:
         exchange_request = sdk["ItemPublicTokenExchangeRequest"](
@@ -661,15 +892,16 @@ def exchange_plaid_public_token(payload: PlaidPublicTokenExchangeIn, db: Session
     )
     if item_row is None:
         item_row = PlaidItem(
-            user_id=payload.user_id,
+            user_id=user_id,
             plaid_item_id=plaid_item_id,
             created_at=synced_at,
         )
         db.add(item_row)
 
-    item_row.user_id = payload.user_id
+    item_row.user_id = user_id
     item_row.institution_name = payload.institution_name
     item_row.access_token = access_token
+    item_row.access_token_encrypted = encrypt_secret(access_token)
     item_row.status = "linked"
     item_row.last_sync_error = None
     item_row.updated_at = synced_at
@@ -705,7 +937,12 @@ def exchange_plaid_public_token(payload: PlaidPublicTokenExchangeIn, db: Session
 
 
 @app.get("/plaid/accounts")
-def list_plaid_accounts(user_id: str = "demo", db: Session = Depends(get_db)):
+def list_plaid_accounts(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     rows = (
         db.query(PlaidAccount)
         .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
@@ -739,13 +976,18 @@ def list_plaid_accounts(user_id: str = "demo", db: Session = Depends(get_db)):
 
 
 @app.post("/plaid/sync")
-def sync_plaid_data(payload: PlaidSyncIn, db: Session = Depends(get_db)):
+def sync_plaid_data(
+    payload: PlaidSyncIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     client, sdk = _get_plaid_client()
+    user_id = _coerce_user_id(current_user, payload.user_id)
     start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
 
     items = (
         db.query(PlaidItem)
-        .filter(PlaidItem.user_id == payload.user_id)
+        .filter(PlaidItem.user_id == user_id)
         .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
         .all()
     )
@@ -761,7 +1003,7 @@ def sync_plaid_data(payload: PlaidSyncIn, db: Session = Depends(get_db)):
     db.commit()
     return {
         "ok": True,
-        "user_id": payload.user_id,
+        "user_id": user_id,
         "items_synced": len(items),
         "accounts_synced": len(synced_accounts),
         "transactions_synced": total_transactions,
@@ -771,11 +1013,16 @@ def sync_plaid_data(payload: PlaidSyncIn, db: Session = Depends(get_db)):
 
 
 @app.post("/plaid/sync/balances")
-def sync_plaid_balances(payload: PlaidSyncIn, db: Session = Depends(get_db)):
+def sync_plaid_balances(
+    payload: PlaidSyncIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     client, sdk = _get_plaid_client()
+    user_id = _coerce_user_id(current_user, payload.user_id)
     items = (
         db.query(PlaidItem)
-        .filter(PlaidItem.user_id == payload.user_id)
+        .filter(PlaidItem.user_id == user_id)
         .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
         .all()
     )
@@ -789,7 +1036,7 @@ def sync_plaid_balances(payload: PlaidSyncIn, db: Session = Depends(get_db)):
     db.commit()
     return {
         "ok": True,
-        "user_id": payload.user_id,
+        "user_id": user_id,
         "items_synced": len(items),
         "accounts_synced": len(synced_accounts),
         "balances": [_serialize_plaid_account(row) for row in synced_accounts],
@@ -797,12 +1044,17 @@ def sync_plaid_balances(payload: PlaidSyncIn, db: Session = Depends(get_db)):
 
 
 @app.post("/plaid/sync/transactions")
-def sync_plaid_transactions(payload: PlaidSyncIn, db: Session = Depends(get_db)):
+def sync_plaid_transactions(
+    payload: PlaidSyncIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     client, sdk = _get_plaid_client()
+    user_id = _coerce_user_id(current_user, payload.user_id)
     start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
     items = (
         db.query(PlaidItem)
-        .filter(PlaidItem.user_id == payload.user_id)
+        .filter(PlaidItem.user_id == user_id)
         .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
         .all()
     )
@@ -816,7 +1068,7 @@ def sync_plaid_transactions(payload: PlaidSyncIn, db: Session = Depends(get_db))
     db.commit()
     return {
         "ok": True,
-        "user_id": payload.user_id,
+        "user_id": user_id,
         "items_synced": len(items),
         "transactions_synced": total_transactions,
         "start_date": start_date,
@@ -826,12 +1078,14 @@ def sync_plaid_transactions(payload: PlaidSyncIn, db: Session = Depends(get_db))
 
 @app.get("/plaid/transactions")
 def list_plaid_transactions(
-    user_id: str = "demo",
+    user_id: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 200,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
 ):
+    user_id = _coerce_user_id(current_user, user_id)
     q = (
         db.query(PlaidTransaction)
         .join(PlaidAccount, PlaidTransaction.plaid_account_id == PlaidAccount.id)
@@ -1000,11 +1254,13 @@ def make_fingerprint_v3(user_id: str, account_label: str, parsed: dict) -> str:
 @app.post("/upload/capitalone-pdf")
 def upload_capitalone_pdf(
     file: UploadFile = File(...),
-    user_id: str = "demo",
+    user_id: Optional[str] = None,
     account_label: str = "CapitalOne",
     import_txns: bool = True,
     replace: bool = False,
+    current_user: User = Depends(require_current_user),
 ):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     tmp_path = None
 
@@ -1235,15 +1491,17 @@ def make_cash_fingerprint_v1(user_id: str, account_label: str, parsed: dict) -> 
 @app.post("/upload/capitalone-bank-pdf")
 def upload_capitalone_bank_pdf(
     file: UploadFile = File(...),
-    user_id: str = "demo",
+    user_id: Optional[str] = None,
     account_label: str = "CapitalOne Bank",
     import_txns: bool = True,
     replace: bool = False,
+    current_user: User = Depends(require_current_user),
 ):
     """
     Upload Capital One bank statement PDF (Checking + Savings balances may be present in same PDF).
     Saves into CashAccount + CashTransaction.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     tmp_path = None
 
@@ -1387,7 +1645,12 @@ def upload_capitalone_bank_pdf(
 
 
 @app.get("/cash-accounts")
-def list_cash_accounts(user_id: str = "demo", limit: int = 50):
+def list_cash_accounts(
+    user_id: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         rows = (
@@ -1421,7 +1684,13 @@ def list_cash_accounts(user_id: str = "demo", limit: int = 50):
 
 
 @app.get("/cash-accounts/{cash_account_id}/transactions")
-def list_cash_transactions(cash_account_id: int, user_id: str = "demo", limit: int = 500):
+def list_cash_transactions(
+    cash_account_id: int,
+    user_id: Optional[str] = None,
+    limit: int = 500,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         acc = db.query(CashAccount).filter(
@@ -1468,12 +1737,14 @@ class CashTransactionPatch(BaseModel):
 def patch_cash_transaction(
     cash_transaction_id: int,
     payload: CashTransactionPatch,
-    user_id: str = "demo"
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
 ):
     """
     Update a cash transaction (currently: category only)
     Safe: scoped by user_id by joining CashTransaction -> CashAccount.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         # Join to ensure the transaction belongs to this user
@@ -1523,11 +1794,17 @@ class CashTxnPatch(BaseModel):
     txn_type: Optional[str] = None
 
 @app.patch("/cash-transactions/{cash_transaction_id}")
-def patch_cash_transaction(cash_transaction_id: int, payload: CashTxnPatch, user_id: str = "demo"):
+def patch_cash_transaction(
+    cash_transaction_id: int,
+    payload: CashTxnPatch,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
     """
     Update a cash transaction (category and/or txn_type).
     Scoped by user_id via CashAccount join.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         txn = (
@@ -1562,11 +1839,16 @@ def patch_cash_transaction(cash_transaction_id: int, payload: CashTxnPatch, user
 from fastapi import HTTPException
 
 @app.delete("/cash-accounts/{cash_account_id}")
-def delete_cash_account(cash_account_id: int, user_id: str = "demo"):
+def delete_cash_account(
+    cash_account_id: int,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
     """
     Deletes a cash account statement row + all of its cash transactions.
     Safe: scoped by user_id.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         acc = db.query(CashAccount).filter(
@@ -1598,7 +1880,12 @@ def delete_cash_account(cash_account_id: int, user_id: str = "demo"):
 
 
 @app.delete("/cash-accounts/by-fingerprint/{fingerprint}")
-def delete_cash_account_by_fingerprint(fingerprint: str, user_id: str = "demo"):
+def delete_cash_account_by_fingerprint(
+    fingerprint: str,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         fp = (fingerprint or "").strip().upper()
@@ -1734,7 +2021,11 @@ def make_statement_code(account_label: str, period_end: str, fingerprint: str) -
 from fastapi import HTTPException
 
 @app.delete("/cash-accounts/{cash_account_id}")
-def delete_cash_account(cash_account_id: int, user_id: str = "demo"):
+def delete_cash_account(
+    cash_account_id: int,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
     """
     Deletes a CashAccount + all its CashTransactions (manual cascade).
     Safe for SQLite even if relationship cascade isn't configured.
@@ -1763,7 +2054,11 @@ def delete_cash_account(cash_account_id: int, user_id: str = "demo"):
 
 
 @app.delete("/cash-accounts/by-fingerprint/{fingerprint}")
-def delete_cash_account_by_fingerprint(fingerprint: str, user_id: str = "demo"):
+def delete_cash_account_by_fingerprint(
+    fingerprint: str,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
     """
     Convenience delete if UI only has fingerprint.
     """
@@ -1829,7 +2124,11 @@ def _looks_like_income(desc: str) -> bool:
     return any(k in d for k in keywords)
 
 @app.get("/dashboard/financial-os")
-def dashboard_financial_os(user_id: str = "demo", month: str = ""):
+def dashboard_financial_os(
+    user_id: Optional[str] = None,
+    month: str = "",
+    current_user: User = Depends(require_current_user),
+):
     """
     Minimal Financial OS summary:
     - detected_income (from cash txns)
@@ -1900,15 +2199,24 @@ from fastapi import Body
 # ============================
 
 @app.get("/bills")
-def list_bills(user_id: str, db: Session = Depends(get_db)):
+def list_bills(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     q = db.query(Bill).filter(Bill.user_id == user_id).order_by(Bill.active.desc(), Bill.due_day.asc().nullslast(), Bill.name.asc())
     return q.all()
 
 
 @app.post("/bills")
-def create_bill(payload: dict = Body(...), db: Session = Depends(get_db)):
+def create_bill(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     b = Bill(
-        user_id=payload.get("user_id"),
+        user_id=_coerce_user_id(current_user, payload.get("user_id")),
         name=payload.get("name") or "Bill",
         amount=float(payload.get("amount") or 0),
         frequency=payload.get("frequency") or "monthly",
@@ -1920,8 +2228,6 @@ def create_bill(payload: dict = Body(...), db: Session = Depends(get_db)):
         notes=payload.get("notes"),
         active=bool(payload.get("active") if payload.get("active") is not None else True),
     )
-    if not b.user_id:
-        raise HTTPException(status_code=400, detail="user_id is required")
     db.add(b)
     db.commit()
     db.refresh(b)
@@ -1929,7 +2235,14 @@ def create_bill(payload: dict = Body(...), db: Session = Depends(get_db)):
 
 
 @app.patch("/bills/{bill_id}")
-def update_bill(bill_id: int, user_id: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+def update_bill(
+    bill_id: int,
+    user_id: Optional[str] = None,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     b = db.query(Bill).filter(and_(Bill.id == bill_id, Bill.user_id == user_id)).first()
     if not b:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1957,7 +2270,13 @@ def update_bill(bill_id: int, user_id: str, payload: dict = Body(...), db: Sessi
 
 
 @app.delete("/bills/{bill_id}")
-def delete_bill(bill_id: int, user_id: str, db: Session = Depends(get_db)):
+def delete_bill(
+    bill_id: int,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     b = db.query(Bill).filter(and_(Bill.id == bill_id, Bill.user_id == user_id)).first()
     if not b:
         raise HTTPException(status_code=404, detail="Bill not found")
@@ -1972,13 +2291,24 @@ def delete_bill(bill_id: int, user_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/os/manual-bills")
-def os_list_manual_bills(user_id: str = "demo", db: Session = Depends(get_db)):
+def os_list_manual_bills(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     q = db.query(ManualBill).filter(ManualBill.user_id == user_id).order_by(ManualBill.active.desc(), ManualBill.name.asc())
     return q.all()
 
 
 @app.post("/os/manual-bills")
-def os_create_manual_bill(payload: dict = Body(...), user_id: str = "demo", db: Session = Depends(get_db)):
+def os_create_manual_bill(
+    payload: dict = Body(...),
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     mb = ManualBill(
         user_id=user_id,
         name=payload.get("name") or "Manual Bill",
@@ -1991,8 +2321,6 @@ def os_create_manual_bill(payload: dict = Body(...), user_id: str = "demo", db: 
         active=bool(payload.get("active") if payload.get("active") is not None else True),
         notes=payload.get("notes"),
     )
-    if not mb.user_id:
-        raise HTTPException(status_code=400, detail="user_id is required")
     db.add(mb)
     db.commit()
     db.refresh(mb)
@@ -2000,7 +2328,14 @@ def os_create_manual_bill(payload: dict = Body(...), user_id: str = "demo", db: 
 
 
 @app.patch("/os/manual-bills/{mb_id}")
-def os_update_manual_bill(mb_id: int, payload: dict = Body(...), user_id: str = "demo", db: Session = Depends(get_db)):
+def os_update_manual_bill(
+    mb_id: int,
+    payload: dict = Body(...),
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     mb = db.query(ManualBill).filter(and_(ManualBill.id == mb_id, ManualBill.user_id == user_id)).first()
     if not mb:
         raise HTTPException(status_code=404, detail="Manual bill not found")
@@ -2026,7 +2361,13 @@ def os_update_manual_bill(mb_id: int, payload: dict = Body(...), user_id: str = 
 
 
 @app.delete("/os/manual-bills/{mb_id}")
-def os_delete_manual_bill(mb_id: int, user_id: str = "demo", db: Session = Depends(get_db)):
+def os_delete_manual_bill(
+    mb_id: int,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     mb = db.query(ManualBill).filter(and_(ManualBill.id == mb_id, ManualBill.user_id == user_id)).first()
     if not mb:
         raise HTTPException(status_code=404, detail="Manual bill not found")
@@ -2043,15 +2384,24 @@ def os_delete_manual_bill(mb_id: int, user_id: str = "demo", db: Session = Depen
 # ============================
 
 @app.get("/debts")
-def list_debts(user_id: str, db: Session = Depends(get_db)):
+def list_debts(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     q = db.query(Debt).filter(Debt.user_id == user_id).order_by(Debt.active.desc(), Debt.apr.desc().nullslast(), Debt.name.asc())
     return q.all()
 
 
 @app.post("/debts")
-def create_debt(payload: dict = Body(...), db: Session = Depends(get_db)):
+def create_debt(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     d = Debt(
-        user_id=payload.get("user_id"),
+        user_id=_coerce_user_id(current_user, payload.get("user_id")),
         kind=payload.get("kind") or "credit_card",
         lender=payload.get("lender"),
         name=payload.get("name") or "Debt",
@@ -2065,8 +2415,6 @@ def create_debt(payload: dict = Body(...), db: Session = Depends(get_db)):
         statement_day=payload.get("statement_day"),
         active=bool(payload.get("active") if payload.get("active") is not None else True),
     )
-    if not d.user_id:
-        raise HTTPException(status_code=400, detail="user_id is required")
     db.add(d)
     db.commit()
     db.refresh(d)
@@ -2074,7 +2422,14 @@ def create_debt(payload: dict = Body(...), db: Session = Depends(get_db)):
 
 
 @app.patch("/debts/{debt_id}")
-def update_debt(debt_id: int, user_id: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+def update_debt(
+    debt_id: int,
+    user_id: Optional[str] = None,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     d = db.query(Debt).filter(and_(Debt.id == debt_id, Debt.user_id == user_id)).first()
     if not d:
         raise HTTPException(status_code=404, detail="Debt not found")
@@ -2101,7 +2456,13 @@ def update_debt(debt_id: int, user_id: str, payload: dict = Body(...), db: Sessi
 
 
 @app.delete("/debts/{debt_id}")
-def delete_debt(debt_id: int, user_id: str, db: Session = Depends(get_db)):
+def delete_debt(
+    debt_id: int,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     d = db.query(Debt).filter(and_(Debt.id == debt_id, Debt.user_id == user_id)).first()
     if not d:
         raise HTTPException(status_code=404, detail="Debt not found")
@@ -2115,12 +2476,24 @@ def delete_debt(debt_id: int, user_id: str, db: Session = Depends(get_db)):
 # ============================
 
 @app.get("/goals")
-def list_goals(user_id: str, db: Session = Depends(get_db)):
+def list_goals(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     return db.query(Goal).filter(Goal.user_id == user_id).order_by(Goal.key.asc()).all()
 
 
 @app.patch("/goals/{key}")
-def upsert_goal(key: str, user_id: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+def upsert_goal(
+    key: str,
+    user_id: Optional[str] = None,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     value = float(payload.get("value") or 0)
     notes = payload.get("notes")
 
@@ -2144,14 +2517,23 @@ def upsert_goal(key: str, user_id: str, payload: dict = Body(...), db: Session =
 # ============================
 
 @app.get("/paychecks")
-def list_paychecks(user_id: str, db: Session = Depends(get_db)):
+def list_paychecks(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     return db.query(Paycheck).filter(Paycheck.user_id == user_id).order_by(Paycheck.active.desc(), Paycheck.next_pay_date.asc().nullslast()).all()
 
 
 @app.post("/paychecks")
-def create_paycheck(payload: dict = Body(...), db: Session = Depends(get_db)):
+def create_paycheck(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     p = Paycheck(
-        user_id=payload.get("user_id"),
+        user_id=_coerce_user_id(current_user, payload.get("user_id")),
         employer=payload.get("employer"),
         frequency=payload.get("frequency") or "biweekly",
         next_pay_date=payload.get("next_pay_date"),
@@ -2159,8 +2541,6 @@ def create_paycheck(payload: dict = Body(...), db: Session = Depends(get_db)):
         notes=payload.get("notes"),
         active=bool(payload.get("active") if payload.get("active") is not None else True),
     )
-    if not p.user_id:
-        raise HTTPException(status_code=400, detail="user_id is required")
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -2168,7 +2548,14 @@ def create_paycheck(payload: dict = Body(...), db: Session = Depends(get_db)):
 
 
 @app.patch("/paychecks/{paycheck_id}")
-def update_paycheck(paycheck_id: int, user_id: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+def update_paycheck(
+    paycheck_id: int,
+    user_id: Optional[str] = None,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     p = db.query(Paycheck).filter(and_(Paycheck.id == paycheck_id, Paycheck.user_id == user_id)).first()
     if not p:
         raise HTTPException(status_code=404, detail="Paycheck not found")
@@ -2190,7 +2577,13 @@ def update_paycheck(paycheck_id: int, user_id: str, payload: dict = Body(...), d
 
 
 @app.delete("/paychecks/{paycheck_id}")
-def delete_paycheck(paycheck_id: int, user_id: str, db: Session = Depends(get_db)):
+def delete_paycheck(
+    paycheck_id: int,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     p = db.query(Paycheck).filter(and_(Paycheck.id == paycheck_id, Paycheck.user_id == user_id)).first()
     if not p:
         raise HTTPException(status_code=404, detail="Paycheck not found")
@@ -2200,7 +2593,15 @@ def delete_paycheck(paycheck_id: int, user_id: str, db: Session = Depends(get_db
 
 
 @app.get("/statements")
-def list_statements(user_id: str = "demo", limit: int = 50):
+def list_statements(
+    user_id: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
+    user_id = _coerce_user_id(current_user, user_id)
+    user_id = _coerce_user_id(current_user, user_id)
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         rows = (
@@ -2236,7 +2637,13 @@ def list_statements(user_id: str = "demo", limit: int = 50):
 
 
 @app.get("/statements/by-code/{statement_code}/transactions")
-def get_transactions_by_code(statement_code: str, user_id: str = "demo", limit: int = 200):
+def get_transactions_by_code(
+    statement_code: str,
+    user_id: Optional[str] = None,
+    limit: int = 200,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         st = db.query(Statement).filter(
@@ -2275,7 +2682,12 @@ class RuleIn(BaseModel):
 
 
 @app.delete("/statements/{statement_id}")
-def delete_statement(statement_id: int, user_id: str = "demo"):
+def delete_statement(
+    statement_id: int,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         stmt = db.query(Statement).filter(
@@ -2297,7 +2709,12 @@ def delete_statement(statement_id: int, user_id: str = "demo"):
 from fastapi import HTTPException
 
 @app.delete("/statements/by-code/{statement_code}")
-def delete_statement_by_code(statement_code: str, user_id: str = "demo"):
+def delete_statement_by_code(
+    statement_code: str,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         stmt = db.query(Statement).filter(
@@ -2319,7 +2736,12 @@ def delete_statement_by_code(statement_code: str, user_id: str = "demo"):
 
 
 @app.post("/rules")
-def upsert_rule(payload: RuleIn, user_id: str = "demo"):
+def upsert_rule(
+    payload: RuleIn,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         pattern = payload.pattern.strip().lower()
@@ -2354,7 +2776,11 @@ def upsert_rule(payload: RuleIn, user_id: str = "demo"):
 
 
 @app.get("/rules")
-def list_rules(user_id: str = "demo"):
+def list_rules(
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         rules = (
@@ -2379,7 +2805,12 @@ def list_rules(user_id: str = "demo"):
 
 
 @app.get("/merchants/needs-category")
-def merchants_needs_category(user_id: str = "demo", limit: int = 50):
+def merchants_needs_category(
+    user_id: Optional[str] = None,
+    limit: int = 50,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         rows = (
@@ -2403,7 +2834,12 @@ class MerchantLabelIn(BaseModel):
     priority: int = 50
 
 @app.post("/merchants/label")
-def label_merchant(payload: MerchantLabelIn, user_id: str = "demo"):
+def label_merchant(
+    payload: MerchantLabelIn,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         merchant = payload.merchant.strip()
@@ -2531,7 +2967,13 @@ def _import_transactions_from_parsed(db, statement_id: int, user_id: str, parsed
 
 
 @app.post("/statements/{statement_id}/transactions")
-def add_transactions(statement_id: int, txns: List[TransactionIn], user_id: str = "demo"):
+def add_transactions(
+    statement_id: int,
+    txns: List[TransactionIn],
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         st = db.query(Statement).filter(
@@ -2629,7 +3071,13 @@ def add_transactions(statement_id: int, txns: List[TransactionIn], user_id: str 
 from datetime import datetime, date
 
 @app.get("/statements/{statement_id}/transactions")
-def list_transactions(statement_id: int, user_id: str = "demo", limit: int = 200):
+def list_transactions(
+    statement_id: int,
+    user_id: Optional[str] = None,
+    limit: int = 200,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         st = (
@@ -2829,7 +3277,11 @@ class RuleIn(BaseModel):
 
 
 @app.get("/profile")
-def get_profile(user_id: str = "demo"):
+def get_profile(
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         p = db.query(Profile).filter(Profile.user_id == user_id).first()
@@ -2852,7 +3304,12 @@ def get_profile(user_id: str = "demo"):
 
 
 @app.post("/profile")
-def upsert_profile(payload: ProfileIn, user_id: str = "demo"):
+def upsert_profile(
+    payload: ProfileIn,
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         p = db.query(Profile).filter(Profile.user_id == user_id).first()
@@ -2876,7 +3333,11 @@ def upsert_profile(payload: ProfileIn, user_id: str = "demo"):
 
 
 @app.get("/coach/weekly")
-def weekly_coach(user_id: str = "demo"):
+def weekly_coach(
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         now = datetime.utcnow()
@@ -3126,11 +3587,16 @@ def weekly_coach(user_id: str = "demo"):
         db.close()
 
 @app.post("/month/close")
-def close_month(user_id: str = "demo", month: Optional[str] = None):
+def close_month(
+    user_id: Optional[str] = None,
+    month: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
     """
     month format: "YYYY-MM"
     If not provided, closes PREVIOUS calendar month.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         now = datetime.utcnow()
@@ -3224,7 +3690,11 @@ def close_month(user_id: str = "demo", month: Optional[str] = None):
 
 
 @app.get("/month/snapshots")
-def list_snapshots(user_id: str = "demo"):
+def list_snapshots(
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         rows = (
@@ -3253,11 +3723,17 @@ def list_snapshots(user_id: str = "demo"):
 
 
 @app.get("/month/compare")
-def compare_months(user_id: str = "demo", month_a: Optional[str] = None, month_b: Optional[str] = None):
+def compare_months(
+    user_id: Optional[str] = None,
+    month_a: Optional[str] = None,
+    month_b: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
     """
     Compares two saved snapshots.
     If not provided, compares latest vs previous.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         snaps = (
@@ -3308,7 +3784,11 @@ def compare_months(user_id: str = "demo", month_a: Optional[str] = None, month_b
         db.close()
 
 @app.get("/advice/latest")
-def latest_advice(user_id: str = "demo"):
+def latest_advice(
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         a = (
@@ -3337,7 +3817,12 @@ def latest_advice(user_id: str = "demo"):
 
 
 @app.get("/advice/history")
-def advice_history(user_id: str = "demo", limit: int = 10):
+def advice_history(
+    user_id: Optional[str] = None,
+    limit: int = 10,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         rows = (
@@ -3448,7 +3933,11 @@ def _recurring_guess(rows):
 
 
 @app.get("/insights/week")
-def insights_week(user_id: str = "demo"):
+def insights_week(
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         now = datetime.utcnow()
@@ -3489,7 +3978,13 @@ def insights_week(user_id: str = "demo"):
 
 
 @app.get("/insights/month")
-def insights_month(user_id: str = "demo", year: Optional[int] = None, month: Optional[int] = None):
+def insights_month(
+    user_id: Optional[str] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         now = datetime.utcnow()
@@ -3521,7 +4016,12 @@ def insights_month(user_id: str = "demo", year: Optional[int] = None, month: Opt
 
 
 @app.get("/insights/recurring")
-def insights_recurring(user_id: str = "demo", months_back: int = 3):
+def insights_recurring(
+    user_id: Optional[str] = None,
+    months_back: int = 3,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         now = datetime.utcnow()
@@ -3540,7 +4040,11 @@ def insights_recurring(user_id: str = "demo", months_back: int = 3):
         db.close()
 
 @app.get("/insights/coach")
-def insights_coach(user_id: str = "demo"):
+def insights_coach(
+    user_id: Optional[str] = None,
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         now = datetime.utcnow()
@@ -3759,12 +4263,17 @@ def _latest_statement_per_card(db: Session, user_id: str):
     return [v[0] for v in by_key.values()]
 
 @app.post("/os/debts/refresh-from-statements")
-def os_refresh_debts_from_statements(user_id: str = "demo", db: Session = Depends(get_db)):
+def os_refresh_debts_from_statements(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     """
     Phase 2: Build/refresh Debt registry from credit card Statements.
     - For each latest statement per card, upsert a Debt row.
     - Sets: balance=new_balance, minimum_due, apr, due_date, last4.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     latest = _latest_statement_per_card(db, user_id)
 
     upserted = 0
@@ -3813,7 +4322,11 @@ def os_refresh_debts_from_statements(user_id: str = "demo", db: Session = Depend
 
 
 @app.get("/os/debts/utilization")
-def os_debt_utilization(user_id: str = "demo", db: Session = Depends(get_db)):
+def os_debt_utilization(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     """
     Utilization per debt (if credit_limit provided) + totals.
     """
@@ -3993,10 +4506,16 @@ def _detect_monthly_candidates(rows):
 
 
 @app.post("/os/recurring/detect")
-def os_detect_recurring(user_id: str = "demo", months_back: int = 4, db: Session = Depends(get_db)):
+def os_detect_recurring(
+    user_id: Optional[str] = None,
+    months_back: int = 4,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     """
     Detect recurring candidates and upsert into recurring_candidates table.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     rows = _pull_all_txns_for_recurring(db, user_id, months_back=months_back)
     cands = _detect_monthly_candidates(rows)
 
@@ -4035,7 +4554,12 @@ def os_detect_recurring(user_id: str = "demo", months_back: int = 4, db: Session
 
 
 @app.get("/os/recurring")
-def os_list_recurring(user_id: str = "demo", db: Session = Depends(get_db)):
+def os_list_recurring(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     rows = (
         db.query(RecurringCandidate)
         .filter(RecurringCandidate.user_id == user_id)
@@ -4061,7 +4585,14 @@ def os_list_recurring(user_id: str = "demo", db: Session = Depends(get_db)):
 
 
 @app.patch("/os/recurring/{recurring_id}")
-def os_update_recurring(recurring_id: int, user_id: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+def os_update_recurring(
+    recurring_id: int,
+    user_id: Optional[str] = None,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     r = db.query(RecurringCandidate).filter(
         RecurringCandidate.id == recurring_id,
         RecurringCandidate.user_id == user_id
@@ -4130,7 +4661,12 @@ def _sum_essentials_monthly(db: Session, user_id: str):
 
 
 @app.get("/os/essentials-cap")
-def os_essentials_cap(user_id: str = "demo", db: Session = Depends(get_db)):
+def os_essentials_cap(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
     bills_total, debt_mins_total, total = _sum_essentials_monthly(db, user_id)
     return {
         "ok": True,
@@ -4342,10 +4878,11 @@ from sqlalchemy import or_
 
 @app.get("/os/next-best-dollar")
 def os_next_best_dollar(
-    user_id: str = "demo",
+    user_id: Optional[str] = None,
     window_days: int = 21,
     buffer: float = 100.0,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
 ):
     """
     Next Best Dollar (Phase 2 minimal engine):
@@ -4417,7 +4954,12 @@ def os_next_best_dollar(
 
 
 @app.get("/os/state")
-def os_state(user_id: str = "demo", window_days: int = 21, db: Session = Depends(get_db)):
+def os_state(
+    user_id: Optional[str] = None,
+    window_days: int = 21,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
     """
     One endpoint your UI can call to power Settings + Dashboard panels.
     """
@@ -4429,9 +4971,11 @@ def os_state(user_id: str = "demo", window_days: int = 21, db: Session = Depends
     # include active manual bills list for UI
     manual_bills_list = db.query(ManualBill).filter(ManualBill.user_id == user_id, ManualBill.active == True).order_by(ManualBill.name.asc()).all()
 
-    util = os_debt_utilization(user_id=user_id, db=db)
+    util = os_debt_utilization(user_id=user_id, db=db, current_user=current_user)
     cash_breakdown = _plaid_cash_breakdown(db, user_id)
     plaid_cash_total = cash_breakdown["included_total"]
+    user_id = _coerce_user_id(current_user, user_id)
+    user_id = _coerce_user_id(current_user, user_id)
     cash_total = _cash_total_latest(db, user_id)
     pdf_cash_total = round(float(cash_total - plaid_cash_total), 2)
 

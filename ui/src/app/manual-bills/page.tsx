@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
+import { useAuth } from "@/components/auth/AuthProvider";
 import {
   listManualBills,
   createManualBill,
@@ -11,12 +12,12 @@ import {
 } from "@/lib/api";
 
 export default function ManualBillsPage() {
+  const { user } = useAuth();
+  const USER_ID = user?.id ?? "";
   const [bills, setBills] = useState<ManualBill[]>([]);
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Partial<ManualBill> | null>(null);
   const [form, setForm] = useState<Partial<ManualBill>>({ frequency: "monthly", category: "Essentials", autopay: false, active: true });
-
-  const USER_ID = "demo";
 
   async function fetchBills() {
     setLoading(true);

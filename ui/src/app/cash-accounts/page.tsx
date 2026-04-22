@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
+import { useAuth } from "@/components/auth/AuthProvider";
 import {
   getCashAccounts,
   getCashAccountTransactions,
@@ -13,8 +14,6 @@ import type { CashAccount, CashTxn } from "@/types/cash";
 
 type SortKey = "date_desc" | "date_asc" | "amount_desc" | "amount_asc";
 type TxnType = "credit" | "debit";
-
-const DEMO_USER_ID = "demo";
 
 const CATEGORY_OPTIONS = [
   "Uncategorized",
@@ -196,6 +195,8 @@ function DarkSelect<T extends string>(props: {
 }
 
 export default function CashAccountsPage() {
+  const { user } = useAuth();
+  const userId = user?.id ?? "";
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [accounts, setAccounts] = useState<CashAccount[]>([]);
@@ -233,7 +234,7 @@ export default function CashAccountsPage() {
     setAccountsLoading(true);
     setAccountsError(null);
     try {
-      const data = await getCashAccounts({ user_id: DEMO_USER_ID, limit: 100 });
+      const data = await getCashAccounts({ user_id: userId, limit: 100 });
       const list = Array.isArray(data) ? data : (data as any)?.items ?? [];
       setAccounts(list);
 
@@ -256,7 +257,7 @@ export default function CashAccountsPage() {
     setTxnsLoading(true);
     setTxnsError(null);
     try {
-      const data = await getCashAccountTransactions(accountId, { user_id: DEMO_USER_ID, limit: 500 });
+      const data = await getCashAccountTransactions(accountId, { user_id: userId, limit: 500 });
       const list = Array.isArray(data) ? data : (data as any)?.items ?? [];
       setTxns(list);
       setTypeOverride({});
@@ -353,7 +354,7 @@ export default function CashAccountsPage() {
     setUploading(true);
     setUploadError(null);
     try {
-      await uploadCapitalOneBankPdf(file, { user_id: DEMO_USER_ID });
+      await uploadCapitalOneBankPdf(file, { user_id: userId });
       await loadAccounts(false);
     } catch (e: any) {
       setUploadError(e?.message ?? "Upload failed.");
@@ -368,7 +369,7 @@ export default function CashAccountsPage() {
 
     setDeletingId(accId);
     try {
-      await deleteCashAccount(accId, { user_id: DEMO_USER_ID });
+      await deleteCashAccount(accId, { user_id: userId });
       await loadAccounts(false);
 
       if (String(selectedAccountId) === String(accId)) {
@@ -395,7 +396,7 @@ export default function CashAccountsPage() {
 
     setUpdatingTxnId(txnId);
     try {
-      await updateCashTransactionCategory(txnId, newCategory, { user_id: DEMO_USER_ID });
+      await updateCashTransactionCategory(txnId, newCategory, { user_id: userId });
     } catch (e: any) {
       setTxns((old) => old.map((t: any) => (String(t.id) === String(txnId) ? { ...t, category: prev } : t)));
       alert(e?.message ?? "Failed to update category.");
