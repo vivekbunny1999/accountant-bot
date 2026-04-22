@@ -269,9 +269,10 @@ export default function CashAccountsPage() {
   }
 
   useEffect(() => {
+    if (!userId) return;
     loadAccounts(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [userId]);
 
   const selectedAccount = useMemo(() => {
     return accounts.find((a: any) => String(a.id) === String(selectedAccountId)) ?? null;
@@ -351,6 +352,7 @@ export default function CashAccountsPage() {
   }, [txns, search, typeFilter, categoryFilter, dateRange, sortKey, typeOverride]);
 
   async function onUploadBankPdf(file: File) {
+    if (!userId) return;
     setUploading(true);
     setUploadError(null);
     try {
@@ -364,6 +366,7 @@ export default function CashAccountsPage() {
   }
 
   async function onDeleteAccount(accId: string | number) {
+    if (!userId) return;
     const ok = window.confirm("Delete this cash account and its imported transactions? This cannot be undone.");
     if (!ok) return;
 
@@ -385,6 +388,7 @@ export default function CashAccountsPage() {
   }
 
   async function onChangeCategory(txn: CashTxn, newCategory: string) {
+    if (!userId) return;
     const anyTxn: any = txn as any;
     const txnId = anyTxn.id;
     if (txnId === undefined || txnId === null) return;

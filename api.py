@@ -4330,6 +4330,7 @@ def os_debt_utilization(
     """
     Utilization per debt (if credit_limit provided) + totals.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     debts = db.query(Debt).filter(Debt.user_id == user_id, Debt.active == True).all()
 
     items = []
@@ -4891,6 +4892,7 @@ def os_next_best_dollar(
     3) Safe-to-Spend = cash - upcoming - buffer
     4) If surplus > 0 => recommend extra payment to highest APR debt (avalanche)
     """
+    user_id = _coerce_user_id(current_user, user_id)
     cash_total = _cash_total_latest(db, user_id)
     items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
 
@@ -4963,6 +4965,7 @@ def os_state(
     """
     One endpoint your UI can call to power Settings + Dashboard panels.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     cash_total = _cash_total_latest(db, user_id)
     upcoming_items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
 
@@ -4974,8 +4977,6 @@ def os_state(
     util = os_debt_utilization(user_id=user_id, db=db, current_user=current_user)
     cash_breakdown = _plaid_cash_breakdown(db, user_id)
     plaid_cash_total = cash_breakdown["included_total"]
-    user_id = _coerce_user_id(current_user, user_id)
-    user_id = _coerce_user_id(current_user, user_id)
     cash_total = _cash_total_latest(db, user_id)
     pdf_cash_total = round(float(cash_total - plaid_cash_total), 2)
 

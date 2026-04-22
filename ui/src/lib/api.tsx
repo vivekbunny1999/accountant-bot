@@ -2,6 +2,7 @@
 
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const SESSION_TOKEN_KEY = "accountantbot_session_token_v1";
+const SESSION_EVENT = "accountantbot:session-changed";
 
 export type AuthUser = {
   id: string;
@@ -26,11 +27,17 @@ export function getSessionToken(): string | null {
 export function setSessionToken(token: string) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(SESSION_TOKEN_KEY, token);
+  window.dispatchEvent(new CustomEvent(SESSION_EVENT));
 }
 
 export function clearSessionToken() {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(SESSION_TOKEN_KEY);
+  window.dispatchEvent(new CustomEvent(SESSION_EVENT));
+}
+
+export function sessionEventName() {
+  return SESSION_EVENT;
 }
 
 function authHeaders(headers?: HeadersInit): Headers {
@@ -50,6 +57,18 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
     clearSessionToken();
   }
   return res;
+}
+
+async function readApiError(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.clone().json();
+    if (typeof data?.detail === "string" && data.detail.trim()) {
+      return data.detail;
+    }
+  } catch {}
+
+  const text = await res.text().catch(() => "");
+  return text || fallback;
 }
 
 /* =========================
@@ -105,7 +124,7 @@ export async function deleteStatementByCode(statement_code: string): Promise<voi
   const res = await apiFetch(`/statements/by-code/${encodeURIComponent(statement_code)}`, {
     method: "DELETE",
   });
-  if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+  if (!res.ok) throw new Error(await readApiError(res, `Delete failed: ${res.status}`));
 }
 
 /**
@@ -127,8 +146,7 @@ export async function uploadCapitalOnePdf(
   });
 
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Upload failed: ${res.status} ${txt}`);
+    throw new Error(await readApiError(res, `Upload failed: ${res.status}`));
   }
 
   return res.json();
@@ -136,7 +154,7 @@ export async function uploadCapitalOnePdf(
 
 export async function getStatementByCode(statement_code: string): Promise<Statement> {
   const res = await apiFetch(`/statements/by-code/${encodeURIComponent(statement_code)}`);
-  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  if (!res.ok) throw new Error(await readApiError(res, `Failed: ${res.status}`));
   return res.json();
 }
 
@@ -153,7 +171,7 @@ export type Transaction = {
 
 export async function listStatementTransactions(statement_id: number): Promise<Transaction[]> {
   const res = await apiFetch(`/statements/${statement_id}/transactions`);
-  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  if (!res.ok) throw new Error(await readApiError(res, `Failed: ${res.status}`));
   return res.json();
 }
 
@@ -163,13 +181,13 @@ export async function listStatementTransactions(statement_id: number): Promise<T
 
 async function apiGet<T>(path: string): Promise<T> {
   const res = await apiFetch(path);
-  if (!res.ok) throw new Error(await res.text().catch(() => `Failed: ${res.status}`));
+  if (!res.ok) throw new Error(await readApiError(res, `Failed: ${res.status}`));
   return (await res.json()) as T;
 }
 
 async function apiDelete<T = any>(path: string): Promise<T> {
   const res = await apiFetch(path, { method: "DELETE" });
-  if (!res.ok) throw new Error(await res.text().catch(() => `Delete failed: ${res.status}`));
+  if (!res.ok) throw new Error(await readApiError(res, `Delete failed: ${res.status}`));
 
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return undefined as T;
@@ -183,7 +201,7 @@ async function apiPatch<T>(path: string, body: any): Promise<T> {
     body: JSON.stringify(body),
   });
 
-  if (!res.ok) throw new Error(await res.text().catch(() => `Patch failed: ${res.status}`));
+  if (!res.ok) throw new Error(await readApiError(res, `Patch failed: ${res.status}`));
 
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return undefined as T;
@@ -196,7 +214,7 @@ async function apiPost<T>(path: string, body: any): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text().catch(() => `Post failed: ${res.status}`));
+  if (!res.ok) throw new Error(await readApiError(res, `Post failed: ${res.status}`));
 
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return undefined as T;
@@ -220,7 +238,7 @@ export async function login(body: {
 
 export async function logout(): Promise<void> {
   const res = await apiFetch("/auth/logout", { method: "POST" });
-  if (!res.ok) throw new Error(await res.text().catch(() => `Logout failed: ${res.status}`));
+  if (!res.ok) throw new Error(await readApiError(res, `Logout failed: ${res.status}`));
 }
 
 export async function getMe(): Promise<{
@@ -250,7 +268,7 @@ export async function saveUserSettings(body: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text().catch(() => `Save failed: ${res.status}`));
+  if (!res.ok) throw new Error(await readApiError(res, `Save failed: ${res.status}`));
   return res.json();
 }
 

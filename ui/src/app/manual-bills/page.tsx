@@ -20,6 +20,7 @@ export default function ManualBillsPage() {
   const [form, setForm] = useState<Partial<ManualBill>>({ frequency: "monthly", category: "Essentials", autopay: false, active: true });
 
   async function fetchBills() {
+    if (!USER_ID) return;
     setLoading(true);
     try {
       const res = await listManualBills({ user_id: USER_ID });
@@ -30,11 +31,13 @@ export default function ManualBillsPage() {
   }
 
   useEffect(() => {
+    if (!USER_ID) return;
     fetchBills();
-  }, []);
+  }, [USER_ID]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
+    if (!USER_ID) return;
     try {
       await createManualBill(form as any, { user_id: USER_ID });
       setForm({ frequency: "monthly", category: "Essentials", autopay: false, active: true });
@@ -45,6 +48,7 @@ export default function ManualBillsPage() {
   }
 
   async function handleToggleActive(b: ManualBill) {
+    if (!USER_ID) return;
     try {
       await updateManualBill(b.id, { active: !b.active }, { user_id: USER_ID });
       fetchBills();
@@ -54,6 +58,7 @@ export default function ManualBillsPage() {
   }
 
   async function handleDelete(b: ManualBill) {
+    if (!USER_ID) return;
     if (!confirm("Soft-delete this manual bill?")) return;
     try {
       await deleteManualBill(b.id, { user_id: USER_ID });
@@ -64,7 +69,7 @@ export default function ManualBillsPage() {
   }
 
   async function handleSaveEdit() {
-    if (!editing || !editing.id) return;
+    if (!editing || !editing.id || !USER_ID) return;
     try {
       await updateManualBill(editing.id, editing as any, { user_id: USER_ID });
       setEditing(null);

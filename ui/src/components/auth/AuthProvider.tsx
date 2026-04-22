@@ -9,6 +9,7 @@ import {
   getSessionToken,
   login as apiLogin,
   logout as apiLogout,
+  sessionEventName,
   setSessionToken,
   signup as apiSignup,
 } from "@/lib/api";
@@ -50,7 +51,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   useEffect(() => {
-    refresh();
+    const bootId = window.setTimeout(() => {
+      refresh().catch(() => {});
+    }, 0);
+    const sync = () => {
+      refresh().catch(() => {});
+    };
+    window.addEventListener("storage", sync);
+    window.addEventListener(sessionEventName(), sync);
+    return () => {
+      window.clearTimeout(bootId);
+      window.removeEventListener("storage", sync);
+      window.removeEventListener(sessionEventName(), sync);
+    };
   }, []);
 
   async function handleLogin(input: { email: string; password: string }) {

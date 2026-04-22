@@ -850,6 +850,7 @@ export default function SettingsPage() {
   }, [settings, loaded, USER_ID]);
 
   async function fetchDebtRegistry() {
+    if (!USER_ID) return;
     setDebtsLoading(true);
     setDebtError(null);
     try {
@@ -863,10 +864,12 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
+    if (!USER_ID) return;
     fetchDebtRegistry();
-  }, []);
+  }, [USER_ID]);
 
   async function fetchPlaidState(opts?: { silent?: boolean }) {
+    if (!USER_ID) return;
     if (!opts?.silent) {
       setPlaidBusy(true);
       setPlaidError(null);
@@ -888,8 +891,9 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
+    if (!USER_ID) return;
     fetchPlaidState({ silent: true });
-  }, []);
+  }, [USER_ID]);
 
   const quickSummary = useMemo(() => {
     const sts = settings.financialOS.sts;
@@ -969,6 +973,7 @@ export default function SettingsPage() {
   }
 
   async function handleCreateDebt() {
+    if (!USER_ID) return;
     setSavingDebt(true);
     setDebtError(null);
     setDebtStatus(null);
@@ -986,7 +991,7 @@ export default function SettingsPage() {
   }
 
   async function handleSaveDebtEdit() {
-    if (!editingDebtId) return;
+    if (!editingDebtId || !USER_ID) return;
     setSavingDebt(true);
     setDebtError(null);
     setDebtStatus(null);
@@ -1004,6 +1009,7 @@ export default function SettingsPage() {
   }
 
   async function handleConnectPlaidSandbox() {
+    if (!USER_ID) return;
     setPlaidBusy(true);
     setPlaidError(null);
     setPlaidStatus("Preparing Plaid sandbox link...");
@@ -1079,6 +1085,7 @@ export default function SettingsPage() {
   }
 
   async function handleSyncPlaidData() {
+    if (!USER_ID) return;
     setPlaidBusy(true);
     setPlaidError(null);
     setPlaidStatus("Syncing Plaid balances and transactions...");

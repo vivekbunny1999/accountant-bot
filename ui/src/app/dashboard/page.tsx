@@ -433,6 +433,7 @@ export default function DashboardPage() {
 
 
 useEffect(() => {
+  if (!userId) return;
   let cancelled = false;
 
   (async () => {
@@ -456,7 +457,7 @@ useEffect(() => {
   return () => {
     cancelled = true;
   };
-}, []);
+}, [userId]);
 
 
 // ===== Bills (Upcoming window) =====
@@ -486,6 +487,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
 
 // map backend upcoming_items into client-friendly list (already filtered by window)
 useEffect(() => {
+  if (!userId) return;
   let cancelled = false;
   (async () => {
     try {
@@ -503,7 +505,7 @@ useEffect(() => {
   return () => {
     cancelled = true;
   };
-}, [bills]);
+}, [bills, upcomingWindowDays, userId]);
 
   // current month (dashboard fixed)
   const now = useMemo(() => new Date(), []);
@@ -576,6 +578,7 @@ useEffect(() => {
    * Load cash accounts + month txns
    * ========================= */
   useEffect(() => {
+    if (!userId) return;
     let cancelled = false;
 
     (async () => {
@@ -621,7 +624,7 @@ useEffect(() => {
     return () => {
       cancelled = true;
     };
-  }, [cy, cm0]);
+  }, [cy, cm0, userId]);
 
   /** =========================
    * Cash totals (latest import)
