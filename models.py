@@ -41,6 +41,42 @@ class Statement(Base):
     )
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=True)
+    password_hash = Column(Text, nullable=True)
+    display_name = Column(String, nullable=True)
+    auth_enabled = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+    token_hash = Column(String, unique=True, index=True, nullable=False)
+    user_agent = Column(String, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, unique=True, index=True, nullable=False)
+    settings_json = Column(Text, default="{}", nullable=False)
+    category_rules_json = Column(Text, default="{}", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Transaction(Base):
     __tablename__ = "transactions"
 
@@ -193,6 +229,7 @@ class PlaidItem(Base):
     plaid_item_id = Column(String, unique=True, index=True, nullable=False)
     institution_name = Column(String, nullable=True)
     access_token = Column(Text, nullable=False)
+    access_token_encrypted = Column(Text, nullable=True)
     status = Column(String, nullable=False, default="linked")
     available_products_json = Column(Text, nullable=True)
     billed_products_json = Column(Text, nullable=True)

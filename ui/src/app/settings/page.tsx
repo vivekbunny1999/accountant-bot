@@ -3,15 +3,18 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
+import { useAuth } from "@/components/auth/AuthProvider";
 import {
   createDebt,
   createPlaidLinkToken,
   Debt,
   exchangePlaidPublicToken,
+  getUserSettings,
   getPlaidAccounts,
   listDebts,
   PlaidAccountSummary,
   PlaidItemSummary,
+  saveUserSettings,
   syncPlaidData,
   updateDebt,
 } from "@/lib/api";
@@ -785,7 +788,8 @@ function DebtFormFields({
 }
 
 export default function SettingsPage() {
-  const USER_ID = "demo";
+  const { user } = useAuth();
+  const USER_ID = user?.id ?? "";
   const [settings, setSettings] = useState<SettingsModel>(() => defaultSettings());
   const [loaded, setLoaded] = useState(false);
   const [debts, setDebts] = useState<Debt[]>([]);
@@ -813,13 +817,40 @@ export default function SettingsPage() {
     setLoaded(true);
   }, []);
 
+  useEffect(() => {
+    if (!USER_ID) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const remote = await getUserSettings();
+        if (cancelled) return;
+        if (remote?.settings && Object.keys(remote.settings).length > 0) {
+          setSettings({ ...defaultSettings(), ...(remote.settings as SettingsModel) });
+        }
+        if (remote?.category_rules && Object.keys(remote.category_rules).length > 0) {
+          const key = (remote.settings?.categories?.rulesKey as string) || RULES_KEY_DEFAULT;
+          localStorage.setItem(key, JSON.stringify(remote.category_rules));
+        }
+      } catch {}
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [USER_ID]);
+
   // persist on change
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !USER_ID) return;
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  }, [settings, loaded]);
+    const rulesKey = settings.categories.rulesKey || RULES_KEY_DEFAULT;
+    const rules = safeJsonParse<Record<string, any>>(localStorage.getItem(rulesKey)) ?? {};
+    saveUserSettings({ settings, category_rules: rules }).catch(() => {});
+  }, [settings, loaded, USER_ID]);
 
   async function fetchDebtRegistry() {
+    if (!USER_ID) return;
     setDebtsLoading(true);
     setDebtError(null);
     try {
@@ -833,10 +864,12 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
+    if (!USER_ID) return;
     fetchDebtRegistry();
-  }, []);
+  }, [USER_ID]);
 
   async function fetchPlaidState(opts?: { silent?: boolean }) {
+    if (!USER_ID) return;
     if (!opts?.silent) {
       setPlaidBusy(true);
       setPlaidError(null);
@@ -858,8 +891,9 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
+    if (!USER_ID) return;
     fetchPlaidState({ silent: true });
-  }, []);
+  }, [USER_ID]);
 
   const quickSummary = useMemo(() => {
     const sts = settings.financialOS.sts;
@@ -939,6 +973,7 @@ export default function SettingsPage() {
   }
 
   async function handleCreateDebt() {
+    if (!USER_ID) return;
     setSavingDebt(true);
     setDebtError(null);
     setDebtStatus(null);
@@ -956,7 +991,7 @@ export default function SettingsPage() {
   }
 
   async function handleSaveDebtEdit() {
-    if (!editingDebtId) return;
+    if (!editingDebtId || !USER_ID) return;
     setSavingDebt(true);
     setDebtError(null);
     setDebtStatus(null);
@@ -974,6 +1009,7 @@ export default function SettingsPage() {
   }
 
   async function handleConnectPlaidSandbox() {
+    if (!USER_ID) return;
     setPlaidBusy(true);
     setPlaidError(null);
     setPlaidStatus("Preparing Plaid sandbox link...");
@@ -1049,6 +1085,7 @@ export default function SettingsPage() {
   }
 
   async function handleSyncPlaidData() {
+    if (!USER_ID) return;
     setPlaidBusy(true);
     setPlaidError(null);
     setPlaidStatus("Syncing Plaid balances and transactions...");

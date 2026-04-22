@@ -4,6 +4,7 @@ import {
   getCashAccounts,
   getCashAccountTransactions,
 } from "@/lib/api";
+import { useAuth } from "@/components/auth/AuthProvider";
 import type { CashTxn, CashAccount } from "@/types/cash";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -401,6 +402,8 @@ function cashEndBalance(a: any) {
 }
 
 export default function DashboardPage() {
+  const { user } = useAuth();
+  const userId = user?.id ?? "";
   const [data, setData] = useState<Statement[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -430,6 +433,7 @@ export default function DashboardPage() {
 
 
 useEffect(() => {
+  if (!userId) return;
   let cancelled = false;
 
   (async () => {
@@ -438,7 +442,7 @@ useEffect(() => {
       setBillsErr(null);
 
       // use /os/state to get upcoming items + manual bills
-      const st = await getOsState({ user_id: "demo", window_days: 21 } as any);
+      const st = await getOsState({ user_id: userId, window_days: 21 } as any);
       if (cancelled) return;
 
       setBills((st?.manual_bills as any) || []);
@@ -453,7 +457,7 @@ useEffect(() => {
   return () => {
     cancelled = true;
   };
-}, []);
+}, [userId]);
 
 
 // ===== Bills (Upcoming window) =====
@@ -483,10 +487,11 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
 
 // map backend upcoming_items into client-friendly list (already filtered by window)
 useEffect(() => {
+  if (!userId) return;
   let cancelled = false;
   (async () => {
     try {
-      const st = await getOsState({ user_id: "demo", window_days: upcomingWindowDays } as any);
+      const st = await getOsState({ user_id: userId, window_days: upcomingWindowDays } as any);
       if (cancelled) return;
       setUpcomingItems(st?.upcoming_items || []);
       setUpcomingTotal(Number(st?.upcoming_total || 0));
@@ -500,7 +505,7 @@ useEffect(() => {
   return () => {
     cancelled = true;
   };
-}, [bills]);
+}, [bills, upcomingWindowDays, userId]);
 
   // current month (dashboard fixed)
   const now = useMemo(() => new Date(), []);
@@ -573,6 +578,7 @@ useEffect(() => {
    * Load cash accounts + month txns
    * ========================= */
   useEffect(() => {
+    if (!userId) return;
     let cancelled = false;
 
     (async () => {
@@ -580,7 +586,7 @@ useEffect(() => {
         setCashLoading(true);
         setCashErr(null);
 
-        const accs = await getCashAccounts({ user_id: "demo", limit: 100 });
+        const accs = await getCashAccounts({ user_id: userId, limit: 100 });
         if (cancelled) return;
 
         setCashAccounts(accs as any);
@@ -589,7 +595,7 @@ useEffect(() => {
         const all = await Promise.all(
           (accs as any[]).map(async (a) => {
             try {
-              const tx = await getCashAccountTransactions(a.id, { user_id: "demo", limit: 500 });
+              const tx = await getCashAccountTransactions(a.id, { user_id: userId, limit: 500 });
               return tx as any[];
             } catch {
               return [] as any[];
@@ -618,7 +624,7 @@ useEffect(() => {
     return () => {
       cancelled = true;
     };
-  }, [cy, cm0]);
+  }, [cy, cm0, userId]);
 
   /** =========================
    * Cash totals (latest import)
