@@ -3,6 +3,10 @@
 import {
   getCashAccounts,
   getCashAccountTransactions,
+  getNextBestDollar,
+  getOsState,
+  NextBestDollarResponse,
+  OsStateResponse,
 } from "@/lib/api";
 import { useAuth } from "@/components/auth/AuthProvider";
 import type { CashTxn, CashAccount } from "@/types/cash";
@@ -15,7 +19,6 @@ import {
   Statement,
   Transaction,
 } from "@/lib/api";
-import { getOsState } from "@/lib/api";
 
 
 /** =========================
@@ -520,6 +523,9 @@ useEffect(() => {
   const [cashErr, setCashErr] = useState<string | null>(null);
   const [txLoading, setTxLoading] = useState(false);
   const [txErr, setTxErr] = useState<string | null>(null);
+  const [osCashTotal, setOsCashTotal] = useState(0);
+  const [osCashSources, setOsCashSources] = useState<OsStateResponse["cash_sources"] | null>(null);
+  const [nextBestDollar, setNextBestDollar] = useState<NextBestDollarResponse | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -626,6 +632,37 @@ useEffect(() => {
     };
   }, [cy, cm0, userId]);
 
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const [stateRes, nbdRes] = await Promise.all([
+          getOsState({ user_id: userId, window_days: upcomingWindowDays }),
+          getNextBestDollar({
+            user_id: userId,
+            window_days: upcomingWindowDays,
+            buffer: settings.buffer_enabled ? settings.buffer_amount : 0,
+          }),
+        ]);
+        if (cancelled) return;
+        setOsCashTotal(Number(stateRes?.cash_total || 0));
+        setOsCashSources(stateRes?.cash_sources || null);
+        setNextBestDollar(nbdRes || null);
+      } catch {
+        if (cancelled) return;
+        setOsCashTotal(0);
+        setOsCashSources(null);
+        setNextBestDollar(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, upcomingWindowDays, settings.buffer_amount, settings.buffer_enabled]);
+
   /** =========================
    * Cash totals (latest import)
    * ========================= */
@@ -650,10 +687,13 @@ useEffect(() => {
     return {
       hasCash: true,
       latest,
-      totalCash,
-      label: endDate,
+      totalCash: osCashTotal > 0 ? osCashTotal : totalCash,
+      label:
+        osCashTotal > 0
+          ? `PDF ${fmtMoney(Number(osCashSources?.pdf_cash_total || 0))} • Plaid ${fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}`
+          : endDate,
     };
-  }, [cashAccounts]);
+  }, [cashAccounts, osCashSources, osCashTotal]);
 
   const netWorthV1 = useMemo(() => {
     return cashTotals.totalCash - totals.totalOutstanding;
@@ -1031,13 +1071,21 @@ useEffect(() => {
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
-                {monthMetrics.monthIncome > 0 ? fmtMoney(monthMetrics.sts) : "—"}
+                {nextBestDollar ? fmtMoney(Number(nextBestDollar.safe_to_spend_today || 0)) : (monthMetrics.monthIncome > 0 ? fmtMoney(monthMetrics.sts) : "—")}
               </div>
 
               <div className="mt-2 text-xs text-zinc-500">
                 Buffer rule:{" "}
                 <span className="text-zinc-200">
                   {settings.buffer_enabled ? fmtMoney(settings.buffer_amount) : "Off"}
+                </span>
+                {" • "}
+                Cash total:{" "}
+                <span className="text-zinc-200">{fmtMoney(cashTotals.totalCash)}</span>
+                {" • "}
+                Upcoming bills:{" "}
+                <span className="text-zinc-200">
+                  {nextBestDollar ? fmtMoney(Number(nextBestDollar.upcoming_total || 0)) : fmtMoney(upcomingTotal)}
                 </span>
                 {" • "}
                 Month spend:{" "}
@@ -1050,7 +1098,7 @@ useEffect(() => {
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Once checking/savings is imported, this becomes true day-by-day STS (not just current-month estimate).
+                Financial OS uses backend cash totals, including non-duplicate Plaid cash, when available.
               </div>
 
               {/* Small cash debug line (non-breaking) */}
@@ -1246,10 +1294,22 @@ useEffect(() => {
                     Dining/Shopping/Travel etc.
                   </div>
                 </div>
+
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3 col-span-2">
+                  <div className="text-xs text-zinc-400">Next Best Dollar</div>
+                  <div className="mt-1 text-sm font-semibold text-zinc-100">
+                    {nextBestDollar?.recommendation?.name
+                      ? `${nextBestDollar.recommendation.name} • ${fmtMoney(Number(nextBestDollar.recommendation.recommended_extra_payment || 0))}`
+                      : "No extra payment recommendation yet"}
+                  </div>
+                  <div className="mt-1 text-xs text-zinc-500">
+                    {nextBestDollar?.recommendation?.why || "This card updates from backend Financial OS cash after bills and buffer."}
+                  </div>
+                </div>
               </div>
 
               <div className="mt-4 text-xs text-zinc-500">
-                Next step: when checking/savings comes in, we’ll compute runway, debt freedom time, and true STS_today.
+                Plaid cash feeds these backend Financial OS calculations without mixing into PDF transaction tables.
               </div>
             </div>
           </div>
@@ -1263,7 +1323,7 @@ useEffect(() => {
               {cashLoading ? "…" : fmtMoney(cashTotals.totalCash)}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
-              Latest bank import • {cashTotals.hasCash ? cashTotals.label : "—"}
+              Financial OS cash • {cashTotals.hasCash ? cashTotals.label : "—"}
             </div>
           </div>
 

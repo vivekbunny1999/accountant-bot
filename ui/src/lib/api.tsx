@@ -525,13 +525,6 @@ export async function deleteManualBill(mb_id: string | number, params: { user_id
   return apiDelete(`/os/manual-bills/${mb_id}?${q}`);
 }
 
-export async function getOsState(params: { user_id: string; window_days?: number }) {
-  const qs = new URLSearchParams();
-  qs.set("user_id", params.user_id);
-  if (params.window_days) qs.set("window_days", String(params.window_days));
-  return apiGet<any>(`/os/state?${qs.toString()}`);
-}
-
 /* =========================
            Debts
 ========================= */
@@ -614,10 +607,15 @@ export type PlaidExchangeResponse = {
   request_id?: string | null;
   institution_name?: string | null;
   accounts: PlaidAccountSummary[];
+  recent_transactions?: PlaidTransactionSummary[];
   persisted: boolean;
   synced_transactions?: number;
   sync_status?: string | null;
   sync_warning?: string | null;
+  last_sync_at?: string | null;
+  last_accounts_sync_at?: string | null;
+  last_balances_sync_at?: string | null;
+  last_transactions_sync_at?: string | null;
 };
 
 export type PlaidItemSummary = {
@@ -637,6 +635,48 @@ export type PlaidAccountsResponse = {
   items: PlaidItemSummary[];
 };
 
+export type PlaidTransactionSummary = {
+  id?: number;
+  transaction_id: string;
+  account_id?: string | null;
+  item_id?: string | null;
+  account_name?: string | null;
+  institution_name?: string | null;
+  posted_date?: string | null;
+  authorized_date?: string | null;
+  name?: string | null;
+  merchant_name?: string | null;
+  amount?: number | null;
+  iso_currency_code?: string | null;
+  unofficial_currency_code?: string | null;
+  pending?: boolean;
+  payment_channel?: string | null;
+  category_primary?: string | null;
+  category_detailed?: string | null;
+};
+
+export type PlaidTransactionsResponse = {
+  ok: boolean;
+  user_id: string;
+  transactions: PlaidTransactionSummary[];
+};
+
+export type PlaidSyncItemResult = {
+  item_id: string;
+  institution_name?: string | null;
+  sync_status?: string | null;
+  last_sync_at?: string | null;
+  last_accounts_sync_at?: string | null;
+  last_balances_sync_at?: string | null;
+  last_transactions_sync_at?: string | null;
+  last_sync_error?: string | null;
+  accounts_synced?: number;
+  transactions_synced?: number;
+  accounts?: PlaidAccountSummary[];
+  recent_transactions?: PlaidTransactionSummary[];
+  warnings?: string[];
+};
+
 export type PlaidSyncResponse = {
   ok: boolean;
   user_id: string;
@@ -645,6 +685,9 @@ export type PlaidSyncResponse = {
   transactions_synced?: number;
   start_date?: string;
   end_date?: string;
+  item_results?: PlaidSyncItemResult[];
+  warnings?: string[];
+  last_sync_at?: string | null;
 };
 
 export async function createPlaidLinkToken(body: { user_id: string }): Promise<PlaidLinkTokenResponse> {
@@ -663,6 +706,20 @@ export async function getPlaidAccounts(user_id: string): Promise<PlaidAccountsRe
   return apiGet<PlaidAccountsResponse>(`/plaid/accounts?user_id=${encodeURIComponent(user_id)}`);
 }
 
+export async function getPlaidTransactions(params: {
+  user_id: string;
+  limit?: number;
+  start_date?: string;
+  end_date?: string;
+}): Promise<PlaidTransactionsResponse> {
+  const qs = new URLSearchParams();
+  qs.set("user_id", params.user_id);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.start_date) qs.set("start_date", params.start_date);
+  if (params.end_date) qs.set("end_date", params.end_date);
+  return apiGet<PlaidTransactionsResponse>(`/plaid/transactions?${qs.toString()}`);
+}
+
 export async function syncPlaidData(body: {
   user_id: string;
   lookback_days?: number;
@@ -670,4 +727,69 @@ export async function syncPlaidData(body: {
   end_date?: string;
 }): Promise<PlaidSyncResponse> {
   return apiPost<PlaidSyncResponse>("/plaid/sync", body);
+}
+
+export type OsStateResponse = {
+  ok: boolean;
+  user_id: string;
+  cash_total: number;
+  cash_sources?: {
+    pdf_cash_total?: number;
+    plaid_cash_total?: number;
+    plaid_duplicate_accounts_skipped?: Array<{
+      account_id: string;
+      name?: string | null;
+      mask?: string | null;
+      institution_name?: string | null;
+    }>;
+  };
+  upcoming_window_days?: number;
+  upcoming_total?: number;
+  upcoming_items?: any[];
+  manual_bills?: any[];
+  essentials_cap_monthly?: {
+    essentials_bills_total?: number;
+    debt_minimums_total?: number;
+    essentials_cap_total?: number;
+  };
+  debt_utilization?: any;
+};
+
+export async function getOsState(params: { user_id: string; window_days?: number }): Promise<OsStateResponse> {
+  const qs = new URLSearchParams();
+  qs.set("user_id", params.user_id);
+  if (params.window_days) qs.set("window_days", String(params.window_days));
+  return apiGet<OsStateResponse>(`/os/state?${qs.toString()}`);
+}
+
+export type NextBestDollarResponse = {
+  ok: boolean;
+  user_id: string;
+  window_days: number;
+  buffer: number;
+  cash_total: number;
+  upcoming_total: number;
+  safe_to_spend_today: number;
+  stage?: string | null;
+  upcoming_items?: any[];
+  recommendation?: {
+    debt_id?: number;
+    name?: string | null;
+    last4?: string | null;
+    apr?: number | null;
+    recommended_extra_payment?: number | null;
+    why?: string | null;
+  } | null;
+};
+
+export async function getNextBestDollar(params: {
+  user_id: string;
+  window_days?: number;
+  buffer?: number;
+}): Promise<NextBestDollarResponse> {
+  const qs = new URLSearchParams();
+  qs.set("user_id", params.user_id);
+  if (params.window_days != null) qs.set("window_days", String(params.window_days));
+  if (params.buffer != null) qs.set("buffer", String(params.buffer));
+  return apiGet<NextBestDollarResponse>(`/os/next-best-dollar?${qs.toString()}`);
 }

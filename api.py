@@ -869,6 +869,12 @@ def _serialize_plaid_transaction(row: PlaidTransaction) -> dict:
         "transaction_id": row.plaid_transaction_id,
         "account_id": row.account.plaid_account_id if row.account else None,
         "item_id": row.item.plaid_item_id if row.item else None,
+        "account_name": row.account.name if row.account else None,
+        "institution_name": (
+            row.account.institution_name
+            if row.account and row.account.institution_name
+            else (row.item.institution_name if row.item else None)
+        ),
         "posted_date": row.posted_date,
         "authorized_date": row.authorized_date,
         "name": row.name,
@@ -880,6 +886,96 @@ def _serialize_plaid_transaction(row: PlaidTransaction) -> dict:
         "payment_channel": row.payment_channel,
         "category_primary": row.category_primary,
         "category_detailed": row.category_detailed,
+    }
+
+
+def _summarize_sync_exception(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        return detail if isinstance(detail, str) and detail.strip() else "Plaid sync failed."
+    return str(exc) or "Plaid sync failed."
+
+
+def _recent_plaid_transactions_for_item(db: Session, item_row: PlaidItem, limit: int = 25) -> list[dict]:
+    rows = (
+        db.query(PlaidTransaction)
+        .join(PlaidAccount, PlaidTransaction.plaid_account_id == PlaidAccount.id)
+        .filter(PlaidTransaction.plaid_item_id == item_row.id)
+        .order_by(PlaidTransaction.posted_date.desc(), PlaidTransaction.id.desc())
+        .limit(max(1, min(int(limit or 25), 100)))
+        .all()
+    )
+    return [_serialize_plaid_transaction(row) for row in rows]
+
+
+def _sync_plaid_item_resilient(
+    db: Session,
+    client,
+    sdk,
+    item_row: PlaidItem,
+    start_date: str,
+    end_date: str,
+    include_transactions: bool = True,
+) -> dict:
+    warnings = []
+    synced_at = _plaid_now()
+    account_rows = []
+    synced_transactions = 0
+
+    try:
+        account_rows = _sync_plaid_accounts_for_item(db, client, sdk, item_row, update_balances=True)
+    except Exception as exc:
+        message = _summarize_sync_exception(exc)
+        item_row.status = "error"
+        item_row.last_sync_error = message
+        item_row.updated_at = synced_at
+        db.flush()
+        warnings.append(f"Accounts sync failed for {item_row.institution_name or item_row.plaid_item_id}: {message}")
+
+    if include_transactions:
+        if account_rows:
+            try:
+                synced_transactions = _sync_plaid_transactions_for_item(db, client, sdk, item_row, start_date, end_date)
+            except Exception as exc:
+                message = _summarize_sync_exception(exc)
+                item_row.status = "partial"
+                item_row.last_sync_error = message
+                item_row.updated_at = synced_at
+                db.flush()
+                warnings.append(f"Transaction sync failed for {item_row.institution_name or item_row.plaid_item_id}: {message}")
+        else:
+            warnings.append(
+                f"Transaction sync skipped for {item_row.institution_name or item_row.plaid_item_id} because no Plaid accounts were available."
+            )
+
+    db.flush()
+    db.refresh(item_row)
+
+    refreshed_accounts = (
+        db.query(PlaidAccount)
+        .filter(PlaidAccount.plaid_item_id == item_row.id)
+        .order_by(PlaidAccount.is_cash_like.desc(), PlaidAccount.name.asc(), PlaidAccount.id.asc())
+        .all()
+    )
+    last_sync_at = max(
+        [dt for dt in [item_row.last_accounts_sync_at, item_row.last_balances_sync_at, item_row.last_transactions_sync_at] if dt],
+        default=None,
+    )
+
+    return {
+        "item_id": item_row.plaid_item_id,
+        "institution_name": item_row.institution_name,
+        "sync_status": item_row.status,
+        "last_sync_at": last_sync_at.isoformat() if last_sync_at else None,
+        "last_accounts_sync_at": item_row.last_accounts_sync_at.isoformat() if item_row.last_accounts_sync_at else None,
+        "last_balances_sync_at": item_row.last_balances_sync_at.isoformat() if item_row.last_balances_sync_at else None,
+        "last_transactions_sync_at": item_row.last_transactions_sync_at.isoformat() if item_row.last_transactions_sync_at else None,
+        "last_sync_error": item_row.last_sync_error,
+        "accounts_synced": len(account_rows),
+        "transactions_synced": synced_transactions,
+        "accounts": [_serialize_plaid_account(row) for row in refreshed_accounts],
+        "recent_transactions": _recent_plaid_transactions_for_item(db, item_row),
+        "warnings": warnings,
     }
 
 
@@ -1138,29 +1234,34 @@ def exchange_plaid_public_token(
     db.commit()
     db.refresh(item_row)
 
-    account_rows = list(item_row.accounts)
     start_date, end_date = _plaid_sync_window(None, None, 30)
-    synced_transactions = 0
-    sync_warning = None
-    try:
-        synced_transactions = _sync_plaid_transactions_for_item(db, client, sdk, item_row, start_date, end_date)
-        db.commit()
-        db.refresh(item_row)
-    except HTTPException as exc:
-        db.commit()
-        db.refresh(item_row)
-        sync_warning = str(exc.detail)
+    sync_result = _sync_plaid_item_resilient(
+        db,
+        client,
+        sdk,
+        item_row,
+        start_date,
+        end_date,
+        include_transactions=True,
+    )
+    db.commit()
+    db.refresh(item_row)
 
     return {
         "ok": True,
         "item_id": item_row.plaid_item_id,
         "request_id": exchange_response.get("request_id"),
         "institution_name": item_row.institution_name,
-        "accounts": [_serialize_plaid_account(row) for row in account_rows],
+        "accounts": sync_result["accounts"],
         "persisted": True,
-        "synced_transactions": synced_transactions,
-        "sync_status": item_row.status,
-        "sync_warning": sync_warning,
+        "recent_transactions": sync_result["recent_transactions"],
+        "synced_transactions": sync_result["transactions_synced"],
+        "sync_status": sync_result["sync_status"],
+        "sync_warning": "; ".join(sync_result["warnings"]) if sync_result["warnings"] else None,
+        "last_sync_at": sync_result["last_sync_at"],
+        "last_accounts_sync_at": sync_result["last_accounts_sync_at"],
+        "last_balances_sync_at": sync_result["last_balances_sync_at"],
+        "last_transactions_sync_at": sync_result["last_transactions_sync_at"],
     }
 
 
@@ -1225,9 +1326,14 @@ def sync_plaid_data(
 
     synced_accounts = []
     total_transactions = 0
+    item_results = []
+    warnings = []
     for item_row in items:
-        synced_accounts.extend(_sync_plaid_accounts_for_item(db, client, sdk, item_row, update_balances=True))
-        total_transactions += _sync_plaid_transactions_for_item(db, client, sdk, item_row, start_date, end_date)
+        result = _sync_plaid_item_resilient(db, client, sdk, item_row, start_date, end_date, include_transactions=True)
+        item_results.append(result)
+        synced_accounts.extend(result["accounts"])
+        total_transactions += int(result["transactions_synced"] or 0)
+        warnings.extend(result["warnings"])
 
     db.commit()
     return {
@@ -1238,6 +1344,9 @@ def sync_plaid_data(
         "transactions_synced": total_transactions,
         "start_date": start_date,
         "end_date": end_date,
+        "item_results": item_results,
+        "warnings": warnings,
+        "last_sync_at": max((result["last_sync_at"] for result in item_results if result.get("last_sync_at")), default=None),
     }
 
 
