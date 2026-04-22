@@ -9,11 +9,14 @@ import {
   createPlaidLinkToken,
   Debt,
   exchangePlaidPublicToken,
+  getOsState,
   getUserSettings,
   getPlaidAccounts,
+  getPlaidTransactions,
   listDebts,
   PlaidAccountSummary,
   PlaidItemSummary,
+  PlaidTransactionSummary,
   saveUserSettings,
   syncPlaidData,
   updateDebt,
@@ -55,6 +58,18 @@ declare global {
 
 const PLAID_LINK_SCRIPT_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
 let plaidScriptPromise: Promise<void> | null = null;
+
+function formatMoney(value?: number | null) {
+  const amount = Number(value ?? 0);
+  return `$${amount.toFixed(2)}`;
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "not yet";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return value;
+  return dt.toLocaleString();
+}
 
 function loadPlaidLinkScript(): Promise<void> {
   if (typeof window === "undefined") {
@@ -806,6 +821,9 @@ export default function SettingsPage() {
   const [plaidStatus, setPlaidStatus] = useState<string | null>(null);
   const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
   const [plaidItems, setPlaidItems] = useState<PlaidItemSummary[]>([]);
+  const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
+  const [plaidCashContribution, setPlaidCashContribution] = useState(0);
+  const [plaidDuplicateCount, setPlaidDuplicateCount] = useState(0);
 
   // load persisted
   useEffect(() => {
@@ -875,11 +893,20 @@ export default function SettingsPage() {
       setPlaidError(null);
     }
     try {
-      const res = await getPlaidAccounts(USER_ID);
-      setPlaidAccounts(res.accounts || []);
-      setPlaidItems(res.items || []);
-      if (!opts?.silent && (res.accounts?.length || 0) > 0) {
-        setPlaidStatus(`Loaded ${res.accounts.length} linked Plaid account${res.accounts.length === 1 ? "" : "s"}.`);
+      const [accountsRes, txRes, osState] = await Promise.all([
+        getPlaidAccounts(USER_ID),
+        getPlaidTransactions({ user_id: USER_ID, limit: 12 }),
+        getOsState({ user_id: USER_ID, window_days: 21 }),
+      ]);
+      setPlaidAccounts(accountsRes.accounts || []);
+      setPlaidItems(accountsRes.items || []);
+      setPlaidTransactions(txRes.transactions || []);
+      setPlaidCashContribution(Number(osState?.cash_sources?.plaid_cash_total || 0));
+      setPlaidDuplicateCount((osState?.cash_sources?.plaid_duplicate_accounts_skipped || []).length);
+      if (!opts?.silent && (accountsRes.accounts?.length || 0) > 0) {
+        setPlaidStatus(
+          `Loaded ${accountsRes.accounts.length} linked Plaid account${accountsRes.accounts.length === 1 ? "" : "s"}.`
+        );
       }
     } catch (err) {
       if (!opts?.silent) {
@@ -1045,7 +1072,7 @@ export default function SettingsPage() {
               setPlaidStatus(
                 `Connected to ${institutionName}. ${exchange.accounts.length} account${
                   exchange.accounts.length === 1 ? "" : "s"
-                } linked, but transaction sync needs attention.`
+                } linked. ${exchange.sync_warning}`
               );
             } else {
               setPlaidStatus(
@@ -1092,10 +1119,11 @@ export default function SettingsPage() {
     try {
       const res = await syncPlaidData({ user_id: USER_ID, lookback_days: 30 });
       await fetchPlaidState({ silent: true });
+      const warningText = res.warnings?.length ? ` Warnings: ${res.warnings.join(" ")}` : "";
       setPlaidStatus(
         `Plaid sync complete. ${res.accounts_synced || 0} account${res.accounts_synced === 1 ? "" : "s"} updated and ${
           res.transactions_synced || 0
-        } transaction${res.transactions_synced === 1 ? "" : "s"} synced.`
+        } transaction${res.transactions_synced === 1 ? "" : "s"} synced.${warningText}`
       );
     } catch (err) {
       setPlaidError(err instanceof Error ? err.message : "Failed to sync Plaid data.");
@@ -2479,6 +2507,24 @@ export default function SettingsPage() {
                   Plaid stays additive here. PDF uploads keep working as-is, and linked liabilities are stored separately.
                 </div>
 
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
+                    <div className="text-zinc-400">Financial OS cash from Plaid</div>
+                    <div className="mt-2 text-lg font-semibold text-zinc-100">{formatMoney(plaidCashContribution)}</div>
+                    <div className="mt-1 text-zinc-500">Counted only when it does not duplicate a PDF cash import.</div>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
+                    <div className="text-zinc-400">Plaid accounts stored</div>
+                    <div className="mt-2 text-lg font-semibold text-zinc-100">{plaidAccounts.length}</div>
+                    <div className="mt-1 text-zinc-500">Separate from PDF account tables.</div>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
+                    <div className="text-zinc-400">PDF duplicates skipped</div>
+                    <div className="mt-2 text-lg font-semibold text-zinc-100">{plaidDuplicateCount}</div>
+                    <div className="mt-1 text-zinc-500">Prevents double-counting cash in Financial OS.</div>
+                  </div>
+                </div>
+
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -2525,10 +2571,10 @@ export default function SettingsPage() {
                             {item.status || "linked"}
                           </div>
                         </div>
-                        <div className="mt-2 text-zinc-400">Accounts sync: {item.last_accounts_sync_at || "not yet"}</div>
-                        <div className="mt-1 text-zinc-400">Balances sync: {item.last_balances_sync_at || "not yet"}</div>
+                        <div className="mt-2 text-zinc-400">Accounts sync: {formatDateTime(item.last_accounts_sync_at)}</div>
+                        <div className="mt-1 text-zinc-400">Balances sync: {formatDateTime(item.last_balances_sync_at)}</div>
                         <div className="mt-1 text-zinc-400">
-                          Transactions sync: {item.last_transactions_sync_at || "not yet"}
+                          Transactions sync: {formatDateTime(item.last_transactions_sync_at)}
                         </div>
                         {item.last_sync_error ? <div className="mt-2 text-red-300">{item.last_sync_error}</div> : null}
                       </div>
@@ -2555,7 +2601,12 @@ export default function SettingsPage() {
                         </div>
                         <div className="mt-1 text-zinc-400">
                           Sync: {account.sync_status || "linked"}
-                          {typeof account.current_balance === "number" ? ` • Balance ${account.current_balance}` : ""}
+                          {typeof account.current_balance === "number" ? ` • Current ${formatMoney(account.current_balance)}` : ""}
+                        </div>
+                        <div className="mt-1 text-zinc-400">
+                          Available: {typeof account.available_balance === "number" ? formatMoney(account.available_balance) : "—"}
+                          {" • "}
+                          Last balance sync: {formatDateTime(account.last_balance_sync_at)}
                         </div>
                         <div className="mt-1 text-zinc-500">
                           {account.is_cash_like
@@ -2568,6 +2619,56 @@ export default function SettingsPage() {
                     ))}
                   </div>
                 ) : null}
+
+                <div className="mt-4 rounded-xl border border-white/10 bg-black/20 px-3 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-zinc-100">Recent Plaid transactions</div>
+                      <div className="mt-1 text-xs text-zinc-400">
+                        Read-only Plaid feed. PDF transaction tables remain separate.
+                      </div>
+                    </div>
+                    <div className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300">
+                      Plaid only
+                    </div>
+                  </div>
+
+                  {plaidTransactions.length ? (
+                    <div className="mt-4 overflow-x-auto">
+                      <table className="w-full text-left text-xs text-zinc-300">
+                        <thead className="text-zinc-500">
+                          <tr className="border-b border-white/10">
+                            <th className="py-2 pr-3">date</th>
+                            <th className="py-2 pr-3">account</th>
+                            <th className="py-2 pr-3">merchant</th>
+                            <th className="py-2 pr-3">name</th>
+                            <th className="py-2 pr-0 text-right">amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {plaidTransactions.map((txn) => (
+                            <tr key={txn.transaction_id} className="border-b border-white/5">
+                              <td className="py-2 pr-3 text-zinc-400">{txn.posted_date || txn.authorized_date || "—"}</td>
+                              <td className="py-2 pr-3">
+                                <div className="text-zinc-200">{txn.account_name || "Plaid account"}</div>
+                                <div className="text-[11px] text-zinc-500">{txn.institution_name || "Linked institution"}</div>
+                              </td>
+                              <td className="py-2 pr-3 text-zinc-300">{txn.merchant_name || "—"}</td>
+                              <td className="py-2 pr-3 text-zinc-300">{txn.name || "—"}</td>
+                              <td className="py-2 pr-0 text-right font-mono text-zinc-100">
+                                {typeof txn.amount === "number" ? formatMoney(txn.amount) : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="mt-4 rounded-xl border border-dashed border-white/10 bg-black/10 px-3 py-4 text-xs text-zinc-400">
+                      No Plaid transactions synced yet.
+                    </div>
+                  )}
+                </div>
               </div>
             </Card>
 
