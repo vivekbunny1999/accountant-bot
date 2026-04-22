@@ -2,13 +2,16 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import {
+  AuthBootstrapResponse,
   AuthResponse,
   AuthUser,
   clearSessionToken,
+  confirmPasswordReset as apiConfirmPasswordReset,
   getMe,
   getSessionToken,
   login as apiLogin,
   logout as apiLogout,
+  requestPasswordReset as apiRequestPasswordReset,
   sessionEventName,
   setSessionToken,
   signup as apiSignup,
@@ -19,10 +22,13 @@ type AuthState = "loading" | "authenticated" | "unauthenticated";
 type AuthContextValue = {
   status: AuthState;
   user: AuthUser | null;
+  bootstrap: AuthBootstrapResponse | null;
   login: (input: { email: string; password: string }) => Promise<AuthResponse>;
   signup: (input: { email: string; password: string; display_name?: string }) => Promise<AuthResponse>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
+  requestPasswordReset: (input: { email: string }) => ReturnType<typeof apiRequestPasswordReset>;
+  confirmPasswordReset: (input: { token: string; password: string }) => Promise<AuthResponse>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -30,10 +36,12 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthState>("loading");
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [bootstrap, setBootstrap] = useState<AuthBootstrapResponse | null>(null);
 
   async function refresh() {
     const token = getSessionToken();
     if (!token) {
+      setBootstrap(null);
       setUser(null);
       setStatus("unauthenticated");
       return;
@@ -41,10 +49,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const res = await getMe();
+      setBootstrap(res);
       setUser(res.user);
       setStatus("authenticated");
     } catch {
       clearSessionToken();
+      setBootstrap(null);
       setUser(null);
       setStatus("unauthenticated");
     }
@@ -68,17 +78,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   async function handleLogin(input: { email: string; password: string }) {
     const res = await apiLogin(input);
-    setSessionToken(res.token);
+    setSessionToken(res.token, res.expires_at);
     setUser(res.user);
     setStatus("authenticated");
+    await refresh();
     return res;
   }
 
   async function handleSignup(input: { email: string; password: string; display_name?: string }) {
     const res = await apiSignup(input);
-    setSessionToken(res.token);
+    setSessionToken(res.token, res.expires_at);
     setUser(res.user);
     setStatus("authenticated");
+    await refresh();
     return res;
   }
 
@@ -87,8 +99,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await apiLogout();
     } catch {}
     clearSessionToken();
+    setBootstrap(null);
     setUser(null);
     setStatus("unauthenticated");
+  }
+
+  async function handleConfirmPasswordReset(input: { token: string; password: string }) {
+    const res = await apiConfirmPasswordReset(input);
+    setSessionToken(res.token, res.expires_at);
+    setUser(res.user);
+    setStatus("authenticated");
+    await refresh();
+    return res;
   }
 
   return (
@@ -96,10 +118,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         status,
         user,
+        bootstrap,
         login: handleLogin,
         signup: handleSignup,
         logout: handleLogout,
         refresh,
+        requestPasswordReset: apiRequestPasswordReset,
+        confirmPasswordReset: handleConfirmPasswordReset,
       }}
     >
       {children}

@@ -1,6 +1,7 @@
 # FastAPI core
 from fastapi import FastAPI, UploadFile, HTTPException, File, Depends, Body, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # Database
 from db import SessionLocal, engine, ensure_column, initialize_database
@@ -35,6 +36,7 @@ from models import (
     User,
     UserSession,
     UserSettings,
+    PasswordResetToken,
 )
 
 # Pydantic
@@ -44,6 +46,8 @@ from pydantic import BaseModel
 import os
 import tempfile
 import json
+import time
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, List
 from calendar import monthrange
@@ -53,16 +57,28 @@ from capitalone_parser import parse_capitalone_pdf
 from capitalone_bank_parser import parse_capitalone_bank_pdf
 from auth import (
     authenticate_user,
+    bump_session_version,
+    create_password_reset,
     create_session,
     current_user_from_token,
+    consume_password_reset,
     ensure_user_settings,
     parse_settings_json,
     public_user,
     require_current_user,
+    revoke_all_sessions,
     resolve_user_id,
     revoke_session,
 )
-from security import decrypt_secret, encrypt_secret, hash_password, new_user_id, normalize_email, utcnow
+from security import (
+    decrypt_secret,
+    encrypt_secret,
+    hash_password,
+    new_user_id,
+    normalize_email,
+    plaid_encryption_key_ready,
+    utcnow,
+)
 
 
 
@@ -114,6 +130,15 @@ class LoginIn(BaseModel):
     password: str
 
 
+class PasswordResetRequestIn(BaseModel):
+    email: str
+
+
+class PasswordResetConfirmIn(BaseModel):
+    token: str
+    password: str
+
+
 class SettingsIn(BaseModel):
     settings: dict = {}
     category_rules: dict = {}
@@ -138,18 +163,136 @@ class PlaidSyncIn(BaseModel):
 
 from sqlalchemy import text
 
+_AUTH_RATE_LIMITS = {
+    "login_ip": (10, 15 * 60),
+    "login_email": (8, 15 * 60),
+    "signup_ip": (5, 60 * 60),
+    "signup_email": (3, 60 * 60),
+    "reset_request_ip": (5, 60 * 60),
+    "reset_request_email": (3, 60 * 60),
+    "reset_confirm_ip": (10, 60 * 60),
+}
+_rate_limit_state: dict[str, list[float]] = {}
+_rate_limit_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    if request.client and request.client.host:
+        return request.client.host[:64]
+    return "unknown"
+
+
+def _enforce_rate_limit(bucket: str, key: str) -> None:
+    limit, window = _AUTH_RATE_LIMITS[bucket]
+    now = time.time()
+    state_key = f"{bucket}:{key}"
+    with _rate_limit_lock:
+        hits = [ts for ts in _rate_limit_state.get(state_key, []) if now - ts < window]
+        if len(hits) >= limit:
+            retry_after = max(1, int(window - (now - hits[0])))
+            raise HTTPException(
+                status_code=429,
+                detail="Too many attempts. Please wait a bit and try again.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        hits.append(now)
+        _rate_limit_state[state_key] = hits
+
+
+def _beta_signup_mode() -> str:
+    raw = (os.getenv("BETA_SIGNUP_MODE", "allowlist") or "allowlist").strip().lower()
+    if raw not in {"open", "allowlist", "closed"}:
+        return "allowlist"
+    return raw
+
+
+def _beta_allowed_emails() -> set[str]:
+    raw = os.getenv("BETA_ALLOWED_EMAILS", "")
+    return {normalize_email(value) for value in raw.split(",") if normalize_email(value)}
+
+
+def _email_verification_required() -> bool:
+    raw = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFICATION", "false") or "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _password_reset_delivery_mode() -> str:
+    return (os.getenv("AUTH_PASSWORD_RESET_DELIVERY", "manual_beta") or "manual_beta").strip().lower()
+
+
+def _password_reset_debug_links_enabled() -> bool:
+    raw = (os.getenv("AUTH_PASSWORD_RESET_DEBUG_LINKS", "false") or "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _enforce_beta_signup_gate(email: str) -> bool:
+    mode = _beta_signup_mode()
+    if mode == "open":
+        return True
+    if mode == "closed":
+        raise HTTPException(status_code=403, detail="Signup is currently closed for this limited beta.")
+    if email not in _beta_allowed_emails():
+        raise HTTPException(status_code=403, detail="This beta is invite-only right now.")
+    return True
+
 def _cors_origins_from_env() -> list[str]:
-    raw = os.getenv("CORS_ORIGINS", "*").strip()
+    raw = os.getenv("CORS_ORIGINS", "http://127.0.0.1:3000,http://localhost:3000").strip()
     if not raw:
-        return ["*"]
+        return ["http://127.0.0.1:3000", "http://localhost:3000"]
     if raw == "*":
-        return ["*"]
+        allow_all = (os.getenv("CORS_ALLOW_ALL", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+        if allow_all:
+            return ["*"]
+        return ["http://127.0.0.1:3000", "http://localhost:3000"]
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 def ensure_statement_card_columns():
     ensure_column("statements", "card_name", "card_name TEXT")
     ensure_column("statements", "card_last4", "card_last4 TEXT")
     ensure_column("plaid_items", "access_token_encrypted", "access_token_encrypted TEXT")
+    ensure_column("users", "email_verified_at", "email_verified_at TIMESTAMP")
+    ensure_column("users", "beta_access_approved", "beta_access_approved BOOLEAN NOT NULL DEFAULT 0")
+    ensure_column("users", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
+    ensure_column("users", "password_changed_at", "password_changed_at TIMESTAMP")
+    ensure_column("user_sessions", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
+
+
+def _require_plaid_encryption_ready() -> None:
+    if not plaid_encryption_key_ready():
+        raise HTTPException(
+            status_code=500,
+            detail="PLAID_TOKEN_ENCRYPTION_KEY must be configured with a real secret before using Plaid in beta.",
+        )
+
+
+def _scrub_plaintext_plaid_tokens() -> None:
+    if not plaid_encryption_key_ready():
+        return
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(PlaidItem)
+            .filter(PlaidItem.access_token != None)
+            .all()
+        )
+        updated = False
+        for row in rows:
+            plaintext = (row.access_token or "").strip()
+            if not plaintext:
+                continue
+            if not getattr(row, "access_token_encrypted", None):
+                row.access_token_encrypted = encrypt_secret(plaintext)
+            row.access_token = ""
+            row.updated_at = utcnow()
+            db.add(row)
+            updated = True
+        if updated:
+            db.commit()
+    finally:
+        db.close()
 
 
 def ensure_auth_seed_rows():
@@ -188,6 +331,9 @@ def ensure_auth_seed_rows():
                         password_hash=None,
                         display_name=user_id,
                         auth_enabled=False,
+                        email_verified_at=None,
+                        beta_access_approved=False,
+                        session_version=1,
                         created_at=utcnow(),
                         updated_at=utcnow(),
                     )
@@ -209,6 +355,7 @@ def ensure_auth_seed_rows():
 initialize_database()
 ensure_statement_card_columns()
 ensure_auth_seed_rows()
+_scrub_plaintext_plaid_tokens()
 
 
 app.add_middleware(
@@ -218,6 +365,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path != "/health":
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 import re
@@ -263,17 +422,19 @@ def _coerce_user_id(current_user: User, requested_user_id: Optional[str] = None)
 
 
 def _get_plaid_access_token(item_row: PlaidItem, db: Session) -> str:
+    _require_plaid_encryption_ready()
     encrypted = getattr(item_row, "access_token_encrypted", None)
     if encrypted:
         token = decrypt_secret(encrypted)
         if token:
             return token
 
-    legacy_token = getattr(item_row, "access_token", None)
+    legacy_token = (getattr(item_row, "access_token", None) or "").strip()
     if not legacy_token:
         raise HTTPException(status_code=500, detail="Plaid access token is unavailable.")
 
     item_row.access_token_encrypted = encrypt_secret(legacy_token)
+    item_row.access_token = ""
     item_row.updated_at = utcnow()
     db.add(item_row)
     db.commit()
@@ -285,10 +446,13 @@ def _get_plaid_access_token(item_row: PlaidItem, db: Session) -> str:
 def auth_signup(payload: SignupIn, request: Request, db: Session = Depends(get_db)):
     email = normalize_email(payload.email)
     password = payload.password or ""
+    _enforce_rate_limit("signup_ip", _client_ip(request))
+    _enforce_rate_limit("signup_email", email or "unknown")
     if "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email address is required.")
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    _enforce_beta_signup_gate(email)
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
@@ -298,6 +462,9 @@ def auth_signup(payload: SignupIn, request: Request, db: Session = Depends(get_d
         password_hash=hash_password(password),
         display_name=(payload.display_name or "").strip() or email.split("@", 1)[0],
         auth_enabled=True,
+        email_verified_at=None if _email_verification_required() else utcnow(),
+        beta_access_approved=True,
+        session_version=1,
         created_at=utcnow(),
         updated_at=utcnow(),
     )
@@ -318,6 +485,8 @@ def auth_signup(payload: SignupIn, request: Request, db: Session = Depends(get_d
 @app.post("/auth/login")
 def auth_login(payload: LoginIn, request: Request, db: Session = Depends(get_db)):
     email = normalize_email(payload.email)
+    _enforce_rate_limit("login_ip", _client_ip(request))
+    _enforce_rate_limit("login_email", email or "unknown")
     user = authenticate_user(db, email, payload.password or "")
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -349,6 +518,58 @@ def auth_logout(
     return {"ok": True}
 
 
+@app.post("/auth/password-reset/request")
+def auth_password_reset_request(payload: PasswordResetRequestIn, request: Request, db: Session = Depends(get_db)):
+    email = normalize_email(payload.email)
+    _enforce_rate_limit("reset_request_ip", _client_ip(request))
+    _enforce_rate_limit("reset_request_email", email or "unknown")
+
+    response = {
+        "ok": True,
+        "message": "If that account exists, password reset instructions have been queued.",
+        "delivery_mode": _password_reset_delivery_mode(),
+    }
+
+    if "@" not in email:
+        return response
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not user.auth_enabled:
+        return response
+
+    token = create_password_reset(db, user, _client_ip(request))
+    if _password_reset_debug_links_enabled():
+        response["reset_token"] = token
+        response["reset_path"] = f"/reset-password?token={token}"
+    return response
+
+
+@app.post("/auth/password-reset/confirm")
+def auth_password_reset_confirm(payload: PasswordResetConfirmIn, request: Request, db: Session = Depends(get_db)):
+    _enforce_rate_limit("reset_confirm_ip", _client_ip(request))
+    password = payload.password or ""
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    user = consume_password_reset(db, payload.token or "")
+    user.password_hash = hash_password(password)
+    user.password_changed_at = utcnow()
+    if not user.email_verified_at and not _email_verification_required():
+        user.email_verified_at = utcnow()
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    revoke_all_sessions(db, user.id)
+    user = bump_session_version(db, user)
+    token, session = create_session(db, user, request.headers.get("user-agent"))
+    return {
+        "ok": True,
+        "token": token,
+        "expires_at": session.expires_at.isoformat(),
+        "user": public_user(user),
+    }
+
+
 @app.get("/auth/me")
 def auth_me(current_user: User = Depends(require_current_user), db: Session = Depends(get_db)):
     settings = ensure_user_settings(db, current_user.id)
@@ -357,6 +578,11 @@ def auth_me(current_user: User = Depends(require_current_user), db: Session = De
         "user": public_user(current_user),
         "settings": parse_settings_json(settings.settings_json),
         "category_rules": parse_settings_json(settings.category_rules_json),
+        "beta": {
+            "signup_mode": _beta_signup_mode(),
+            "email_verification_required": _email_verification_required(),
+            "password_reset_delivery": _password_reset_delivery_mode(),
+        },
     }
 
 
@@ -828,6 +1054,7 @@ def create_plaid_link_token(
     payload: PlaidLinkTokenIn,
     current_user: User = Depends(require_current_user),
 ):
+    _require_plaid_encryption_ready()
     client, sdk = _get_plaid_client()
     user_id = _coerce_user_id(current_user, payload.user_id)
 
@@ -868,6 +1095,7 @@ def exchange_plaid_public_token(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_current_user),
 ):
+    _require_plaid_encryption_ready()
     client, sdk = _get_plaid_client()
     user_id = _coerce_user_id(current_user, payload.user_id)
 
@@ -900,7 +1128,7 @@ def exchange_plaid_public_token(
 
     item_row.user_id = user_id
     item_row.institution_name = payload.institution_name
-    item_row.access_token = access_token
+    item_row.access_token = ""
     item_row.access_token_encrypted = encrypt_secret(access_token)
     item_row.status = "linked"
     item_row.last_sync_error = None
@@ -981,6 +1209,7 @@ def sync_plaid_data(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_current_user),
 ):
+    _require_plaid_encryption_ready()
     client, sdk = _get_plaid_client()
     user_id = _coerce_user_id(current_user, payload.user_id)
     start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
@@ -1018,6 +1247,7 @@ def sync_plaid_balances(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_current_user),
 ):
+    _require_plaid_encryption_ready()
     client, sdk = _get_plaid_client()
     user_id = _coerce_user_id(current_user, payload.user_id)
     items = (
@@ -1049,6 +1279,7 @@ def sync_plaid_transactions(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_current_user),
 ):
+    _require_plaid_encryption_ready()
     client, sdk = _get_plaid_client()
     user_id = _coerce_user_id(current_user, payload.user_id)
     start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
@@ -2030,6 +2261,7 @@ def delete_cash_account(
     Deletes a CashAccount + all its CashTransactions (manual cascade).
     Safe for SQLite even if relationship cascade isn't configured.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         acc = db.query(CashAccount).filter(
@@ -2062,6 +2294,7 @@ def delete_cash_account_by_fingerprint(
     """
     Convenience delete if UI only has fingerprint.
     """
+    user_id = _coerce_user_id(current_user, user_id)
     db = SessionLocal()
     try:
         acc = db.query(CashAccount).filter(

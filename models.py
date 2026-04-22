@@ -49,6 +49,10 @@ class User(Base):
     password_hash = Column(Text, nullable=True)
     display_name = Column(String, nullable=True)
     auth_enabled = Column(Boolean, default=False, nullable=False)
+    email_verified_at = Column(DateTime, nullable=True)
+    beta_access_approved = Column(Boolean, default=False, nullable=False)
+    session_version = Column(Integer, default=1, nullable=False)
+    password_changed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -60,8 +64,22 @@ class UserSession(Base):
     user_id = Column(String, index=True, nullable=False)
     token_hash = Column(String, unique=True, index=True, nullable=False)
     user_agent = Column(String, nullable=True)
+    session_version = Column(Integer, default=1, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+    token_hash = Column(String, unique=True, index=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    requested_by_ip = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 

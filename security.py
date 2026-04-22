@@ -10,6 +10,11 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "30") or "30")
+PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_TTL_MINUTES", "30") or "30")
+PLAID_KEY_PLACEHOLDERS = {
+    "",
+    "replace_with_a_long_random_secret_or_fernet_key",
+}
 
 
 def utcnow() -> datetime:
@@ -66,7 +71,15 @@ def new_session_token() -> str:
     return f"ab_{secrets.token_urlsafe(32)}"
 
 
+def new_password_reset_token() -> str:
+    return f"abr_{secrets.token_urlsafe(32)}"
+
+
 def hash_session_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def hash_password_reset_token(token: str) -> str:
     return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
 
 
@@ -74,10 +87,21 @@ def session_expiry() -> datetime:
     return utcnow() + timedelta(days=SESSION_TTL_DAYS)
 
 
+def password_reset_expiry() -> datetime:
+    return utcnow() + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES)
+
+
+def plaid_encryption_key_ready() -> bool:
+    raw = (os.getenv("PLAID_TOKEN_ENCRYPTION_KEY") or "").strip()
+    if raw in PLAID_KEY_PLACEHOLDERS:
+        return False
+    return len(raw) >= 16
+
+
 def _raw_fernet_key() -> bytes:
     raw = (os.getenv("PLAID_TOKEN_ENCRYPTION_KEY") or "").strip()
-    if not raw:
-        raise RuntimeError("PLAID_TOKEN_ENCRYPTION_KEY is required to encrypt Plaid access tokens.")
+    if not plaid_encryption_key_ready():
+        raise RuntimeError("PLAID_TOKEN_ENCRYPTION_KEY must be set to a real secret before linking Plaid accounts.")
     try:
         if len(raw) == 44:
             base64.urlsafe_b64decode(raw.encode("utf-8"))

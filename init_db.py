@@ -93,6 +93,11 @@ def main():
     ensure_column("statements", "card_name", "card_name TEXT")
     ensure_column("statements", "card_last4", "card_last4 TEXT")
     ensure_column("plaid_items", "access_token_encrypted", "access_token_encrypted TEXT")
+    ensure_column("users", "email_verified_at", "email_verified_at TIMESTAMP")
+    ensure_column("users", "beta_access_approved", "beta_access_approved BOOLEAN NOT NULL DEFAULT 0")
+    ensure_column("users", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
+    ensure_column("users", "password_changed_at", "password_changed_at TIMESTAMP")
+    ensure_column("user_sessions", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
     _backfill_legacy_users()
 
     print("DB initialized/updated")
