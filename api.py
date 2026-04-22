@@ -15,6 +15,7 @@ def get_db():
 # SQLAlchemy
 from sqlalchemy import func
 from sqlalchemy import and_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from models import Bill, Debt, Goal, Paycheck, RecurringCandidate, ManualBill
 
@@ -27,7 +28,10 @@ from models import (
     MonthlySnapshot,
     AdviceLog,
     CashAccount,
-    CashTransaction
+    CashTransaction,
+    PlaidItem,
+    PlaidAccount,
+    PlaidTransaction,
 )
 
 # Pydantic
@@ -92,6 +96,13 @@ class PlaidPublicTokenExchangeIn(BaseModel):
     public_token: str
     user_id: str = "demo"
     institution_name: Optional[str] = None
+
+
+class PlaidSyncIn(BaseModel):
+    user_id: str = "demo"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    lookback_days: int = 30
 
 
 from sqlalchemy import text
@@ -180,6 +191,7 @@ def _load_plaid_sdk():
         import plaid
         from plaid.api import plaid_api
         from plaid.model.accounts_get_request import AccountsGetRequest
+        from plaid.model.transactions_get_request import TransactionsGetRequest
         from plaid.model.country_code import CountryCode
         from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
         from plaid.model.link_token_create_request import LinkTokenCreateRequest
@@ -195,6 +207,7 @@ def _load_plaid_sdk():
         "plaid": plaid,
         "plaid_api": plaid_api,
         "AccountsGetRequest": AccountsGetRequest,
+        "TransactionsGetRequest": TransactionsGetRequest,
         "CountryCode": CountryCode,
         "ItemPublicTokenExchangeRequest": ItemPublicTokenExchangeRequest,
         "LinkTokenCreateRequest": LinkTokenCreateRequest,
@@ -281,6 +294,313 @@ def _plaid_to_dict(value):
     return dict(value)
 
 
+def _plaid_now() -> datetime:
+    return datetime.utcnow()
+
+
+def _plaid_is_cash_like(account_type: Optional[str], subtype: Optional[str]) -> bool:
+    account_type = (account_type or "").lower()
+    subtype = (subtype or "").lower()
+    if account_type == "depository":
+        return True
+    return subtype in {"checking", "savings", "cash management", "paypal", "prepaid"}
+
+
+def _plaid_is_liability(account_type: Optional[str], subtype: Optional[str]) -> bool:
+    account_type = (account_type or "").lower()
+    subtype = (subtype or "").lower()
+    if account_type in {"credit", "loan"}:
+        return True
+    return subtype in {"credit card", "student", "mortgage", "auto", "personal"}
+
+
+def _norm_text(value: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _plaid_matches_pdf_cash_account(plaid_row: PlaidAccount, pdf_rows: list[CashAccount]) -> bool:
+    """
+    Conservative duplicate heuristic only.
+    TODO: replace this with stable source-level dedupe once we have canonical external account identities.
+    """
+    plaid_institution = _norm_text(plaid_row.institution_name or (plaid_row.item.institution_name if plaid_row.item else None))
+    plaid_name = _norm_text(plaid_row.name)
+    plaid_official = _norm_text(plaid_row.official_name)
+    plaid_mask = (plaid_row.mask or "").strip()
+    plaid_subtype = _norm_text(plaid_row.subtype)
+
+    for pdf_row in pdf_rows:
+        pdf_institution = _norm_text(pdf_row.institution)
+        pdf_name = _norm_text(pdf_row.account_name or pdf_row.account_label)
+        pdf_last4 = (pdf_row.account_last4 or "").strip()
+
+        same_institution = bool(plaid_institution and pdf_institution and plaid_institution == pdf_institution)
+        same_last4 = bool(plaid_mask and pdf_last4 and plaid_mask == pdf_last4)
+        name_overlap = bool(pdf_name and (pdf_name in plaid_name or pdf_name in plaid_official))
+
+        subtype_overlap = False
+        if plaid_subtype and pdf_name:
+            subtype_overlap = plaid_subtype in pdf_name or pdf_name in plaid_subtype
+
+        if same_institution and (same_last4 or name_overlap or subtype_overlap):
+            return True
+
+    return False
+
+
+def _plaid_cash_breakdown(db: Session, user_id: str) -> dict:
+    pdf_rows = (
+        db.query(CashAccount)
+        .filter(CashAccount.user_id == user_id)
+        .order_by(CashAccount.created_at.desc(), CashAccount.id.desc())
+        .limit(25)
+        .all()
+    )
+    plaid_rows = (
+        db.query(PlaidAccount)
+        .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidAccount.user_id == user_id,
+            PlaidAccount.is_cash_like == True,
+            or_(PlaidItem.status == "linked", PlaidItem.status.is_(None)),
+        )
+        .all()
+    )
+
+    included = []
+    skipped = []
+    total = 0.0
+    for row in plaid_rows:
+        if _plaid_matches_pdf_cash_account(row, pdf_rows):
+            skipped.append(row)
+            continue
+        included.append(row)
+        total += _to_float(row.current_balance, 0.0)
+
+    return {
+        "included": included,
+        "skipped": skipped,
+        "included_total": round(float(total), 2),
+    }
+
+
+def _plaid_sync_window(start_date: Optional[str], end_date: Optional[str], lookback_days: int) -> tuple[str, str]:
+    today = datetime.utcnow().date()
+    safe_lookback = max(1, min(int(lookback_days or 30), 365))
+    end_iso = end_date or today.isoformat()
+    start_iso = start_date or (today - timedelta(days=safe_lookback)).isoformat()
+    return start_iso, end_iso
+
+
+def _serialize_plaid_account(row: PlaidAccount) -> dict:
+    return {
+        "id": row.id,
+        "account_id": row.plaid_account_id,
+        "item_id": row.item.plaid_item_id if row.item else None,
+        "institution_name": row.institution_name or (row.item.institution_name if row.item else None),
+        "name": row.name,
+        "official_name": row.official_name,
+        "mask": row.mask,
+        "type": row.type,
+        "subtype": row.subtype,
+        "current_balance": row.current_balance,
+        "available_balance": row.available_balance,
+        "iso_currency_code": row.iso_currency_code,
+        "unofficial_currency_code": row.unofficial_currency_code,
+        "is_cash_like": bool(row.is_cash_like),
+        "is_liability": bool(row.is_liability),
+        "sync_status": row.sync_status,
+        "last_synced_at": row.last_synced_at.isoformat() if row.last_synced_at else None,
+        "last_balance_sync_at": row.last_balance_sync_at.isoformat() if row.last_balance_sync_at else None,
+    }
+
+
+def _serialize_plaid_transaction(row: PlaidTransaction) -> dict:
+    return {
+        "id": row.id,
+        "transaction_id": row.plaid_transaction_id,
+        "account_id": row.account.plaid_account_id if row.account else None,
+        "item_id": row.item.plaid_item_id if row.item else None,
+        "posted_date": row.posted_date,
+        "authorized_date": row.authorized_date,
+        "name": row.name,
+        "merchant_name": row.merchant_name,
+        "amount": row.amount,
+        "iso_currency_code": row.iso_currency_code,
+        "unofficial_currency_code": row.unofficial_currency_code,
+        "pending": bool(row.pending),
+        "payment_channel": row.payment_channel,
+        "category_primary": row.category_primary,
+        "category_detailed": row.category_detailed,
+    }
+
+
+def _upsert_plaid_account(
+    db: Session,
+    item_row: PlaidItem,
+    account_payload: dict,
+    synced_at: datetime,
+) -> PlaidAccount:
+    plaid_account_id = account_payload.get("account_id")
+    if not plaid_account_id:
+        raise HTTPException(status_code=502, detail="Plaid account payload missing account_id.")
+
+    row = (
+        db.query(PlaidAccount)
+        .filter(PlaidAccount.plaid_account_id == plaid_account_id)
+        .one_or_none()
+    )
+    if row is None:
+        row = PlaidAccount(
+            user_id=item_row.user_id,
+            plaid_item_id=item_row.id,
+            plaid_account_id=plaid_account_id,
+            created_at=synced_at,
+        )
+        db.add(row)
+
+    balances = _plaid_to_dict(account_payload.get("balances") or {})
+    account_type = account_payload.get("type")
+    subtype = account_payload.get("subtype")
+
+    row.user_id = item_row.user_id
+    row.plaid_item_id = item_row.id
+    row.institution_name = item_row.institution_name
+    row.name = account_payload.get("name") or row.name or "Plaid account"
+    row.official_name = account_payload.get("official_name")
+    row.mask = account_payload.get("mask")
+    row.type = account_type
+    row.subtype = subtype
+    row.current_balance = balances.get("current")
+    row.available_balance = balances.get("available")
+    row.iso_currency_code = balances.get("iso_currency_code")
+    row.unofficial_currency_code = balances.get("unofficial_currency_code")
+    row.is_cash_like = _plaid_is_cash_like(account_type, subtype)
+    row.is_liability = _plaid_is_liability(account_type, subtype)
+    row.sync_status = "synced"
+    row.last_synced_at = synced_at
+    row.last_balance_sync_at = synced_at
+    row.updated_at = synced_at
+    return row
+
+
+def _sync_plaid_accounts_for_item(
+    db: Session,
+    client,
+    sdk,
+    item_row: PlaidItem,
+    update_balances: bool = True,
+) -> list[PlaidAccount]:
+    synced_at = _plaid_now()
+    try:
+        accounts_request = sdk["AccountsGetRequest"](access_token=item_row.access_token)
+        accounts_response = _plaid_to_dict(client.accounts_get(accounts_request))
+    except sdk["plaid"].ApiException as exc:
+        item_row.status = "error"
+        item_row.last_sync_error = str(getattr(exc, "body", None) or exc)
+        item_row.updated_at = synced_at
+        db.flush()
+        _raise_plaid_http_error(exc)
+
+    rows = []
+    for account in accounts_response.get("accounts", []):
+        account_data = _plaid_to_dict(account)
+        rows.append(_upsert_plaid_account(db, item_row, account_data, synced_at))
+
+    item_data = _plaid_to_dict(accounts_response.get("item") or {})
+    item_row.status = "linked"
+    item_row.last_sync_error = None
+    item_row.available_products_json = json.dumps(accounts_response.get("available_products") or [])
+    item_row.billed_products_json = json.dumps(accounts_response.get("billed_products") or [])
+    item_row.consent_expiration_time = item_data.get("consent_expiration_time")
+    item_row.last_accounts_sync_at = synced_at
+    if update_balances:
+        item_row.last_balances_sync_at = synced_at
+    item_row.updated_at = synced_at
+    db.flush()
+    return rows
+
+
+def _sync_plaid_transactions_for_item(
+    db: Session,
+    client,
+    sdk,
+    item_row: PlaidItem,
+    start_date: str,
+    end_date: str,
+) -> int:
+    synced_at = _plaid_now()
+    try:
+        request = sdk["TransactionsGetRequest"](
+            access_token=item_row.access_token,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        response = _plaid_to_dict(client.transactions_get(request))
+    except sdk["plaid"].ApiException as exc:
+        item_row.status = "error"
+        item_row.last_sync_error = str(getattr(exc, "body", None) or exc)
+        item_row.updated_at = synced_at
+        db.flush()
+        _raise_plaid_http_error(exc)
+
+    account_map = {
+        row.plaid_account_id: row
+        for row in db.query(PlaidAccount).filter(PlaidAccount.plaid_item_id == item_row.id).all()
+    }
+
+    synced = 0
+    for txn in response.get("transactions", []):
+        txn_data = _plaid_to_dict(txn)
+        account_row = account_map.get(txn_data.get("account_id"))
+        if account_row is None:
+            continue
+
+        row = (
+            db.query(PlaidTransaction)
+            .filter(PlaidTransaction.plaid_transaction_id == txn_data.get("transaction_id"))
+            .one_or_none()
+        )
+        if row is None:
+            row = PlaidTransaction(
+                user_id=item_row.user_id,
+                plaid_item_id=item_row.id,
+                plaid_account_id=account_row.id,
+                plaid_transaction_id=txn_data["transaction_id"],
+                created_at=synced_at,
+            )
+            db.add(row)
+
+        categories = txn_data.get("personal_finance_category") or {}
+        if not isinstance(categories, dict):
+            categories = _plaid_to_dict(categories)
+
+        row.user_id = item_row.user_id
+        row.plaid_item_id = item_row.id
+        row.plaid_account_id = account_row.id
+        row.posted_date = txn_data.get("date")
+        row.authorized_date = txn_data.get("authorized_date")
+        row.name = txn_data.get("name")
+        row.merchant_name = txn_data.get("merchant_name")
+        row.amount = txn_data.get("amount")
+        row.iso_currency_code = txn_data.get("iso_currency_code")
+        row.unofficial_currency_code = txn_data.get("unofficial_currency_code")
+        row.pending = bool(txn_data.get("pending"))
+        row.payment_channel = txn_data.get("payment_channel")
+        row.category_primary = categories.get("primary")
+        row.category_detailed = categories.get("detailed")
+        row.raw_json = json.dumps(txn_data)
+        row.updated_at = synced_at
+        synced += 1
+
+    item_row.status = "linked"
+    item_row.last_sync_error = None
+    item_row.last_transactions_sync_at = synced_at
+    item_row.updated_at = synced_at
+    db.flush()
+    return synced
+
+
 @app.post("/plaid/link-token")
 def create_plaid_link_token(payload: PlaidLinkTokenIn):
     client, sdk = _get_plaid_client()
@@ -317,7 +637,7 @@ def create_plaid_link_token(payload: PlaidLinkTokenIn):
 
 
 @app.post("/plaid/exchange-public-token")
-def exchange_plaid_public_token(payload: PlaidPublicTokenExchangeIn):
+def exchange_plaid_public_token(payload: PlaidPublicTokenExchangeIn, db: Session = Depends(get_db)):
     client, sdk = _get_plaid_client()
 
     try:
@@ -325,34 +645,212 @@ def exchange_plaid_public_token(payload: PlaidPublicTokenExchangeIn):
             public_token=payload.public_token,
         )
         exchange_response = _plaid_to_dict(client.item_public_token_exchange(exchange_request))
-
-        accounts_request = sdk["AccountsGetRequest"](
-            access_token=exchange_response["access_token"],
-        )
-        accounts_response = _plaid_to_dict(client.accounts_get(accounts_request))
     except sdk["plaid"].ApiException as exc:
         _raise_plaid_http_error(exc)
 
-    accounts = []
-    for account in accounts_response.get("accounts", []):
-        account_data = _plaid_to_dict(account)
-        accounts.append(
-            {
-                "account_id": account_data.get("account_id"),
-                "name": account_data.get("name"),
-                "mask": account_data.get("mask"),
-                "type": account_data.get("type"),
-                "subtype": account_data.get("subtype"),
-            }
+    synced_at = _plaid_now()
+    plaid_item_id = exchange_response.get("item_id")
+    access_token = exchange_response.get("access_token")
+    if not plaid_item_id or not access_token:
+        raise HTTPException(status_code=502, detail="Plaid exchange response was missing item data.")
+
+    item_row = (
+        db.query(PlaidItem)
+        .filter(PlaidItem.plaid_item_id == plaid_item_id)
+        .one_or_none()
+    )
+    if item_row is None:
+        item_row = PlaidItem(
+            user_id=payload.user_id,
+            plaid_item_id=plaid_item_id,
+            created_at=synced_at,
         )
+        db.add(item_row)
+
+    item_row.user_id = payload.user_id
+    item_row.institution_name = payload.institution_name
+    item_row.access_token = access_token
+    item_row.status = "linked"
+    item_row.last_sync_error = None
+    item_row.updated_at = synced_at
+    db.flush()
+
+    db.commit()
+    db.refresh(item_row)
+
+    account_rows = list(item_row.accounts)
+    start_date, end_date = _plaid_sync_window(None, None, 30)
+    synced_transactions = 0
+    sync_warning = None
+    try:
+        synced_transactions = _sync_plaid_transactions_for_item(db, client, sdk, item_row, start_date, end_date)
+        db.commit()
+        db.refresh(item_row)
+    except HTTPException as exc:
+        db.commit()
+        db.refresh(item_row)
+        sync_warning = str(exc.detail)
 
     return {
         "ok": True,
-        "item_id": exchange_response.get("item_id"),
+        "item_id": item_row.plaid_item_id,
         "request_id": exchange_response.get("request_id"),
-        "institution_name": payload.institution_name,
-        "accounts": accounts,
-        "persisted": False,
+        "institution_name": item_row.institution_name,
+        "accounts": [_serialize_plaid_account(row) for row in account_rows],
+        "persisted": True,
+        "synced_transactions": synced_transactions,
+        "sync_status": item_row.status,
+        "sync_warning": sync_warning,
+    }
+
+
+@app.get("/plaid/accounts")
+def list_plaid_accounts(user_id: str = "demo", db: Session = Depends(get_db)):
+    rows = (
+        db.query(PlaidAccount)
+        .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
+        .filter(PlaidAccount.user_id == user_id)
+        .order_by(PlaidAccount.is_cash_like.desc(), PlaidAccount.institution_name.asc(), PlaidAccount.name.asc())
+        .all()
+    )
+    items = (
+        db.query(PlaidItem)
+        .filter(PlaidItem.user_id == user_id)
+        .order_by(PlaidItem.created_at.desc(), PlaidItem.id.desc())
+        .all()
+    )
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "accounts": [_serialize_plaid_account(row) for row in rows],
+        "items": [
+            {
+                "item_id": item.plaid_item_id,
+                "institution_name": item.institution_name,
+                "status": item.status,
+                "last_accounts_sync_at": item.last_accounts_sync_at.isoformat() if item.last_accounts_sync_at else None,
+                "last_balances_sync_at": item.last_balances_sync_at.isoformat() if item.last_balances_sync_at else None,
+                "last_transactions_sync_at": item.last_transactions_sync_at.isoformat() if item.last_transactions_sync_at else None,
+                "last_sync_error": item.last_sync_error,
+            }
+            for item in items
+        ],
+    }
+
+
+@app.post("/plaid/sync")
+def sync_plaid_data(payload: PlaidSyncIn, db: Session = Depends(get_db)):
+    client, sdk = _get_plaid_client()
+    start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
+
+    items = (
+        db.query(PlaidItem)
+        .filter(PlaidItem.user_id == payload.user_id)
+        .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
+        .all()
+    )
+    if not items:
+        raise HTTPException(status_code=404, detail="No Plaid-linked items found for this user.")
+
+    synced_accounts = []
+    total_transactions = 0
+    for item_row in items:
+        synced_accounts.extend(_sync_plaid_accounts_for_item(db, client, sdk, item_row, update_balances=True))
+        total_transactions += _sync_plaid_transactions_for_item(db, client, sdk, item_row, start_date, end_date)
+
+    db.commit()
+    return {
+        "ok": True,
+        "user_id": payload.user_id,
+        "items_synced": len(items),
+        "accounts_synced": len(synced_accounts),
+        "transactions_synced": total_transactions,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+
+@app.post("/plaid/sync/balances")
+def sync_plaid_balances(payload: PlaidSyncIn, db: Session = Depends(get_db)):
+    client, sdk = _get_plaid_client()
+    items = (
+        db.query(PlaidItem)
+        .filter(PlaidItem.user_id == payload.user_id)
+        .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
+        .all()
+    )
+    if not items:
+        raise HTTPException(status_code=404, detail="No Plaid-linked items found for this user.")
+
+    synced_accounts = []
+    for item_row in items:
+        synced_accounts.extend(_sync_plaid_accounts_for_item(db, client, sdk, item_row, update_balances=True))
+
+    db.commit()
+    return {
+        "ok": True,
+        "user_id": payload.user_id,
+        "items_synced": len(items),
+        "accounts_synced": len(synced_accounts),
+        "balances": [_serialize_plaid_account(row) for row in synced_accounts],
+    }
+
+
+@app.post("/plaid/sync/transactions")
+def sync_plaid_transactions(payload: PlaidSyncIn, db: Session = Depends(get_db)):
+    client, sdk = _get_plaid_client()
+    start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
+    items = (
+        db.query(PlaidItem)
+        .filter(PlaidItem.user_id == payload.user_id)
+        .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
+        .all()
+    )
+    if not items:
+        raise HTTPException(status_code=404, detail="No Plaid-linked items found for this user.")
+
+    total_transactions = 0
+    for item_row in items:
+        total_transactions += _sync_plaid_transactions_for_item(db, client, sdk, item_row, start_date, end_date)
+
+    db.commit()
+    return {
+        "ok": True,
+        "user_id": payload.user_id,
+        "items_synced": len(items),
+        "transactions_synced": total_transactions,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+
+@app.get("/plaid/transactions")
+def list_plaid_transactions(
+    user_id: str = "demo",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    q = (
+        db.query(PlaidTransaction)
+        .join(PlaidAccount, PlaidTransaction.plaid_account_id == PlaidAccount.id)
+        .filter(PlaidTransaction.user_id == user_id)
+    )
+    if start_date:
+        q = q.filter(PlaidTransaction.posted_date >= start_date)
+    if end_date:
+        q = q.filter(PlaidTransaction.posted_date <= end_date)
+
+    rows = (
+        q.order_by(PlaidTransaction.posted_date.desc(), PlaidTransaction.id.desc())
+        .limit(max(1, min(int(limit or 200), 1000)))
+        .all()
+    )
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "transactions": [_serialize_plaid_transaction(row) for row in rows],
     }
 
 
@@ -3647,7 +4145,7 @@ def os_essentials_cap(user_id: str = "demo", db: Session = Depends(get_db)):
 
 def _cash_total_latest(db: Session, user_id: str) -> float:
     """
-    Use latest cash_accounts end balances as cash total (checking + savings).
+    Use latest PDF cash import end balances plus non-duplicate Plaid cash-like balances.
     """
     rows = (
         db.query(CashAccount)
@@ -3657,13 +4155,17 @@ def _cash_total_latest(db: Session, user_id: str) -> float:
         .all()
     )
     if not rows:
-        return 0.0
+        pdf_cash_total = 0.0
+    else:
+        # pick latest statement row (first)
+        r = rows[0]
+        chk = _to_float(r.checking_end_balance, 0.0)
+        sav = _to_float(r.savings_end_balance, 0.0)
+        pdf_cash_total = float(chk + sav)
 
-    # pick latest statement row (first)
-    r = rows[0]
-    chk = _to_float(r.checking_end_balance, 0.0)
-    sav = _to_float(r.savings_end_balance, 0.0)
-    return float(chk + sav)
+    plaid_cash_total = _plaid_cash_breakdown(db, user_id)["included_total"]
+
+    return round(float(pdf_cash_total + plaid_cash_total), 2)
 
 
 def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
@@ -3928,11 +4430,28 @@ def os_state(user_id: str = "demo", window_days: int = 21, db: Session = Depends
     manual_bills_list = db.query(ManualBill).filter(ManualBill.user_id == user_id, ManualBill.active == True).order_by(ManualBill.name.asc()).all()
 
     util = os_debt_utilization(user_id=user_id, db=db)
+    cash_breakdown = _plaid_cash_breakdown(db, user_id)
+    plaid_cash_total = cash_breakdown["included_total"]
+    cash_total = _cash_total_latest(db, user_id)
+    pdf_cash_total = round(float(cash_total - plaid_cash_total), 2)
 
     return {
         "ok": True,
         "user_id": user_id,
         "cash_total": round(float(cash_total), 2),
+        "cash_sources": {
+            "pdf_cash_total": pdf_cash_total,
+            "plaid_cash_total": plaid_cash_total,
+            "plaid_duplicate_accounts_skipped": [
+                {
+                    "account_id": row.plaid_account_id,
+                    "name": row.name,
+                    "mask": row.mask,
+                    "institution_name": row.institution_name or (row.item.institution_name if row.item else None),
+                }
+                for row in cash_breakdown["skipped"]
+            ],
+        },
         "upcoming_window_days": window_days,
         "upcoming_total": round(float(upcoming_total), 2),
         "upcoming_items": upcoming_items,

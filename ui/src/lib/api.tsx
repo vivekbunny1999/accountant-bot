@@ -426,11 +426,24 @@ export type PlaidLinkTokenResponse = {
 };
 
 export type PlaidAccountSummary = {
+  id?: number;
   account_id: string;
+  item_id?: string | null;
+  institution_name?: string | null;
   name: string;
+  official_name?: string | null;
   mask?: string | null;
   type?: string | null;
   subtype?: string | null;
+  current_balance?: number | null;
+  available_balance?: number | null;
+  iso_currency_code?: string | null;
+  unofficial_currency_code?: string | null;
+  is_cash_like?: boolean;
+  is_liability?: boolean;
+  sync_status?: string | null;
+  last_synced_at?: string | null;
+  last_balance_sync_at?: string | null;
 };
 
 export type PlaidExchangeResponse = {
@@ -440,6 +453,36 @@ export type PlaidExchangeResponse = {
   institution_name?: string | null;
   accounts: PlaidAccountSummary[];
   persisted: boolean;
+  synced_transactions?: number;
+  sync_status?: string | null;
+  sync_warning?: string | null;
+};
+
+export type PlaidItemSummary = {
+  item_id: string;
+  institution_name?: string | null;
+  status?: string | null;
+  last_accounts_sync_at?: string | null;
+  last_balances_sync_at?: string | null;
+  last_transactions_sync_at?: string | null;
+  last_sync_error?: string | null;
+};
+
+export type PlaidAccountsResponse = {
+  ok: boolean;
+  user_id: string;
+  accounts: PlaidAccountSummary[];
+  items: PlaidItemSummary[];
+};
+
+export type PlaidSyncResponse = {
+  ok: boolean;
+  user_id: string;
+  items_synced: number;
+  accounts_synced?: number;
+  transactions_synced?: number;
+  start_date?: string;
+  end_date?: string;
 };
 
 export async function createPlaidLinkToken(body: { user_id: string }): Promise<PlaidLinkTokenResponse> {
@@ -452,4 +495,17 @@ export async function exchangePlaidPublicToken(body: {
   institution_name?: string | null;
 }): Promise<PlaidExchangeResponse> {
   return apiPost<PlaidExchangeResponse>("/plaid/exchange-public-token", body);
+}
+
+export async function getPlaidAccounts(user_id: string): Promise<PlaidAccountsResponse> {
+  return apiGet<PlaidAccountsResponse>(`/plaid/accounts?user_id=${encodeURIComponent(user_id)}`);
+}
+
+export async function syncPlaidData(body: {
+  user_id: string;
+  lookback_days?: number;
+  start_date?: string;
+  end_date?: string;
+}): Promise<PlaidSyncResponse> {
+  return apiPost<PlaidSyncResponse>("/plaid/sync", body);
 }

@@ -8,8 +8,11 @@ import {
   createPlaidLinkToken,
   Debt,
   exchangePlaidPublicToken,
+  getPlaidAccounts,
   listDebts,
   PlaidAccountSummary,
+  PlaidItemSummary,
+  syncPlaidData,
   updateDebt,
 } from "@/lib/api";
 
@@ -798,6 +801,7 @@ export default function SettingsPage() {
   const [plaidError, setPlaidError] = useState<string | null>(null);
   const [plaidStatus, setPlaidStatus] = useState<string | null>(null);
   const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
+  const [plaidItems, setPlaidItems] = useState<PlaidItemSummary[]>([]);
 
   // load persisted
   useEffect(() => {
@@ -830,6 +834,31 @@ export default function SettingsPage() {
 
   useEffect(() => {
     fetchDebtRegistry();
+  }, []);
+
+  async function fetchPlaidState(opts?: { silent?: boolean }) {
+    if (!opts?.silent) {
+      setPlaidBusy(true);
+      setPlaidError(null);
+    }
+    try {
+      const res = await getPlaidAccounts(USER_ID);
+      setPlaidAccounts(res.accounts || []);
+      setPlaidItems(res.items || []);
+      if (!opts?.silent && (res.accounts?.length || 0) > 0) {
+        setPlaidStatus(`Loaded ${res.accounts.length} linked Plaid account${res.accounts.length === 1 ? "" : "s"}.`);
+      }
+    } catch (err) {
+      if (!opts?.silent) {
+        setPlaidError(err instanceof Error ? err.message : "Failed to load linked Plaid accounts.");
+      }
+    } finally {
+      if (!opts?.silent) setPlaidBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchPlaidState({ silent: true });
   }, []);
 
   const quickSummary = useMemo(() => {
@@ -974,13 +1003,21 @@ export default function SettingsPage() {
               institution_name: metadata.institution?.name || null,
             });
 
-            setPlaidAccounts(exchange.accounts || []);
+            await fetchPlaidState({ silent: true });
             const institutionName = exchange.institution_name || metadata.institution?.name || "institution";
-            setPlaidStatus(
-              `Sandbox connected to ${institutionName}. ${exchange.accounts.length} account${
-                exchange.accounts.length === 1 ? "" : "s"
-              } returned.`
-            );
+            if (exchange.sync_warning) {
+              setPlaidStatus(
+                `Sandbox connected to ${institutionName}. ${exchange.accounts.length} account${
+                  exchange.accounts.length === 1 ? "" : "s"
+                } linked, but transaction sync needs attention.`
+              );
+            } else {
+              setPlaidStatus(
+                `Sandbox connected to ${institutionName}. ${exchange.accounts.length} account${
+                  exchange.accounts.length === 1 ? "" : "s"
+                } linked and synced.`
+              );
+            }
           } catch (err) {
             setPlaidError(err instanceof Error ? err.message : "Failed to exchange Plaid public token.");
             setPlaidStatus(null);
@@ -1008,6 +1045,26 @@ export default function SettingsPage() {
       setPlaidStatus(null);
       setPlaidBusy(false);
       handler?.destroy?.();
+    }
+  }
+
+  async function handleSyncPlaidData() {
+    setPlaidBusy(true);
+    setPlaidError(null);
+    setPlaidStatus("Syncing Plaid balances and transactions...");
+    try {
+      const res = await syncPlaidData({ user_id: USER_ID, lookback_days: 30 });
+      await fetchPlaidState({ silent: true });
+      setPlaidStatus(
+        `Plaid sync complete. ${res.accounts_synced || 0} account${res.accounts_synced === 1 ? "" : "s"} updated and ${
+          res.transactions_synced || 0
+        } transaction${res.transactions_synced === 1 ? "" : "s"} synced.`
+      );
+    } catch (err) {
+      setPlaidError(err instanceof Error ? err.message : "Failed to sync Plaid data.");
+      setPlaidStatus(null);
+    } finally {
+      setPlaidBusy(false);
     }
   }
 
@@ -2375,14 +2432,14 @@ export default function SettingsPage() {
             <Card>
               <SectionTitle
                 title="Plaid Sandbox"
-                subtitle="Minimal staging-only bank connection test. This does not replace PDF uploads yet."
+                subtitle="Backend-linked sandbox accounts sync server-side and can contribute cash-like balances to the Financial OS."
               />
               <Divider />
 
               <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
                 <div className="text-sm font-medium text-zinc-100">Connected accounts</div>
                 <div className="mt-1 text-xs text-zinc-400">
-                  Uses the backend sandbox link-token and public-token exchange endpoints.
+                  Plaid stays additive here. PDF uploads keep working as-is, and linked liabilities are stored separately.
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-2">
@@ -2393,6 +2450,14 @@ export default function SettingsPage() {
                     className="rounded-xl border border-sky-500/30 bg-sky-500/15 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/20 disabled:opacity-50"
                   >
                     {plaidBusy ? "Connecting..." : "Connect Plaid Sandbox"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSyncPlaidData}
+                    disabled={plaidBusy || !plaidItems.length}
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10 disabled:opacity-50"
+                  >
+                    {plaidBusy ? "Syncing..." : "Sync Plaid Data"}
                   </button>
                 </div>
 
@@ -2408,6 +2473,36 @@ export default function SettingsPage() {
                   </div>
                 ) : null}
 
+                {plaidItems.length ? (
+                  <div className="mt-4 grid gap-2">
+                    {plaidItems.map((item) => (
+                      <div
+                        key={item.item_id}
+                        className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium text-zinc-100">
+                            {item.institution_name || "Linked institution"}
+                          </div>
+                          <div className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300">
+                            {item.status || "linked"}
+                          </div>
+                        </div>
+                        <div className="mt-2 text-zinc-400">Accounts sync: {item.last_accounts_sync_at || "not yet"}</div>
+                        <div className="mt-1 text-zinc-400">Balances sync: {item.last_balances_sync_at || "not yet"}</div>
+                        <div className="mt-1 text-zinc-400">
+                          Transactions sync: {item.last_transactions_sync_at || "not yet"}
+                        </div>
+                        {item.last_sync_error ? <div className="mt-2 text-red-300">{item.last_sync_error}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-xl border border-dashed border-white/10 bg-black/20 px-3 py-4 text-xs text-zinc-400">
+                    No linked Plaid accounts yet.
+                  </div>
+                )}
+
                 {plaidAccounts.length ? (
                   <div className="mt-4 grid gap-2 sm:grid-cols-2">
                     {plaidAccounts.map((account) => (
@@ -2420,6 +2515,17 @@ export default function SettingsPage() {
                           {(account.type || "account").toString()}
                           {account.subtype ? ` • ${account.subtype}` : ""}
                           {account.mask ? ` • ****${account.mask}` : ""}
+                        </div>
+                        <div className="mt-1 text-zinc-400">
+                          Sync: {account.sync_status || "linked"}
+                          {typeof account.current_balance === "number" ? ` • Balance ${account.current_balance}` : ""}
+                        </div>
+                        <div className="mt-1 text-zinc-500">
+                          {account.is_cash_like
+                            ? "Cash-like"
+                            : account.is_liability
+                              ? "Liability stored separately"
+                              : "Stored for future mapping"}
                         </div>
                       </div>
                     ))}
