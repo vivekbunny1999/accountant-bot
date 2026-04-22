@@ -1408,7 +1408,10 @@ def _sync_plaid_transactions_for_item(
         row.payment_channel = txn_data.get("payment_channel")
         row.category_primary = categories.get("primary")
         row.category_detailed = categories.get("detailed")
-        row.raw_json = json.dumps(txn_data)
+        row.raw_json = json.dumps(
+            txn_data,
+            default=lambda value: value.isoformat() if isinstance(value, (date, datetime)) else str(value),
+        )
         row.updated_at = synced_at
         synced += 1
 
