@@ -33,7 +33,7 @@ export default function LoginPage() {
         <div className="mb-6">
           <div className="text-xs uppercase tracking-[0.2em] text-zinc-500">Accountant Bot</div>
           <h1 className="mt-2 text-2xl font-semibold">Log in</h1>
-          <p className="mt-2 text-sm text-zinc-400">Secure access for real per-user testing.</p>
+          <p className="mt-2 text-sm text-zinc-400">Limited beta access for trusted users with real financial data.</p>
         </div>
 
         <div className="space-y-4">
@@ -65,12 +65,14 @@ export default function LoginPage() {
           {busy ? "Logging in..." : "Log in"}
         </button>
 
-        <p className="mt-5 text-sm text-zinc-400">
-          Need an account?{" "}
-          <Link href="/signup" className="text-zinc-100">
-            Sign up
+        <div className="mt-5 flex items-center justify-between gap-4 text-sm text-zinc-400">
+          <Link href="/forgot-password" className="text-zinc-100">
+            Forgot password?
           </Link>
-        </p>
+          <Link href="/signup" className="text-zinc-100">
+            Create account
+          </Link>
+        </div>
       </form>
     </div>
   );

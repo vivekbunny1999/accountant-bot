@@ -1008,11 +1008,11 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleConnectPlaidSandbox() {
+  async function handleConnectPlaidConnection() {
     if (!USER_ID) return;
     setPlaidBusy(true);
     setPlaidError(null);
-    setPlaidStatus("Preparing Plaid sandbox link...");
+    setPlaidStatus("Preparing Plaid Link...");
 
     let handler: PlaidLinkHandler | null = null;
 
@@ -1030,7 +1030,7 @@ export default function SettingsPage() {
         token: link_token,
         onSuccess: async (publicToken, metadata) => {
           setPlaidError(null);
-          setPlaidStatus("Link successful. Exchanging sandbox token...");
+          setPlaidStatus("Link successful. Finishing account connection...");
 
           try {
             const exchange = await exchangePlaidPublicToken({
@@ -1043,13 +1043,13 @@ export default function SettingsPage() {
             const institutionName = exchange.institution_name || metadata.institution?.name || "institution";
             if (exchange.sync_warning) {
               setPlaidStatus(
-                `Sandbox connected to ${institutionName}. ${exchange.accounts.length} account${
+                `Connected to ${institutionName}. ${exchange.accounts.length} account${
                   exchange.accounts.length === 1 ? "" : "s"
                 } linked, but transaction sync needs attention.`
               );
             } else {
               setPlaidStatus(
-                `Sandbox connected to ${institutionName}. ${exchange.accounts.length} account${
+                `Connected to ${institutionName}. ${exchange.accounts.length} account${
                   exchange.accounts.length === 1 ? "" : "s"
                 } linked and synced.`
               );
@@ -1077,7 +1077,7 @@ export default function SettingsPage() {
       setPlaidStatus("Opening Plaid Link...");
       handler.open();
     } catch (err) {
-      setPlaidError(err instanceof Error ? err.message : "Failed to start Plaid sandbox.");
+      setPlaidError(err instanceof Error ? err.message : "Failed to start Plaid Link.");
       setPlaidStatus(null);
       setPlaidBusy(false);
       handler?.destroy?.();
@@ -2482,11 +2482,11 @@ export default function SettingsPage() {
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
                     type="button"
-                    onClick={handleConnectPlaidSandbox}
+                    onClick={handleConnectPlaidConnection}
                     disabled={plaidBusy}
                     className="rounded-xl border border-sky-500/30 bg-sky-500/15 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/20 disabled:opacity-50"
                   >
-                    {plaidBusy ? "Connecting..." : "Connect Plaid Sandbox"}
+                    {plaidBusy ? "Connecting..." : "Connect Plaid"}
                   </button>
                   <button
                     type="button"

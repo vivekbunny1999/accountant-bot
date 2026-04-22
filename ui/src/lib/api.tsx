@@ -2,6 +2,7 @@
 
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const SESSION_TOKEN_KEY = "accountantbot_session_token_v1";
+const SESSION_EXPIRES_AT_KEY = "accountantbot_session_expires_at_v1";
 const SESSION_EVENT = "accountantbot:session-changed";
 
 export type AuthUser = {
@@ -9,6 +10,9 @@ export type AuthUser = {
   email: string;
   display_name?: string | null;
   auth_enabled?: boolean;
+  email_verified?: boolean;
+  email_verified_at?: string | null;
+  beta_access_approved?: boolean;
   created_at?: string | null;
 };
 
@@ -19,20 +23,46 @@ export type AuthResponse = {
   user: AuthUser;
 };
 
+export type AuthBootstrapResponse = {
+  ok: boolean;
+  user: AuthUser;
+  settings: Record<string, any>;
+  category_rules: Record<string, any>;
+  beta?: {
+    signup_mode?: string;
+    email_verification_required?: boolean;
+    password_reset_delivery?: string;
+  };
+};
+
 export function getSessionToken(): string | null {
   if (typeof window === "undefined") return null;
+  const expiresAt = window.localStorage.getItem(SESSION_EXPIRES_AT_KEY);
+  if (expiresAt) {
+    const parsed = Date.parse(expiresAt);
+    if (Number.isFinite(parsed) && parsed <= Date.now()) {
+      clearSessionToken();
+      return null;
+    }
+  }
   return window.localStorage.getItem(SESSION_TOKEN_KEY);
 }
 
-export function setSessionToken(token: string) {
+export function setSessionToken(token: string, expiresAt?: string | null) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(SESSION_TOKEN_KEY, token);
+  if (expiresAt) {
+    window.localStorage.setItem(SESSION_EXPIRES_AT_KEY, expiresAt);
+  } else {
+    window.localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
+  }
   window.dispatchEvent(new CustomEvent(SESSION_EVENT));
 }
 
 export function clearSessionToken() {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(SESSION_TOKEN_KEY);
+  window.localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
   window.dispatchEvent(new CustomEvent(SESSION_EVENT));
 }
 
@@ -246,8 +276,27 @@ export async function getMe(): Promise<{
   user: AuthUser;
   settings: Record<string, any>;
   category_rules: Record<string, any>;
+  beta?: {
+    signup_mode?: string;
+    email_verification_required?: boolean;
+    password_reset_delivery?: string;
+  };
 }> {
   return apiGet("/auth/me");
+}
+
+export async function requestPasswordReset(body: { email: string }): Promise<{
+  ok: boolean;
+  message: string;
+  delivery_mode?: string;
+  reset_token?: string;
+  reset_path?: string;
+}> {
+  return apiPost("/auth/password-reset/request", body);
+}
+
+export async function confirmPasswordReset(body: { token: string; password: string }): Promise<AuthResponse> {
+  return apiPost<AuthResponse>("/auth/password-reset/confirm", body);
 }
 
 export async function getUserSettings(): Promise<{
