@@ -48,7 +48,7 @@ import tempfile
 import json
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, List
 from calendar import monthrange
 
@@ -156,8 +156,8 @@ class PlaidPublicTokenExchangeIn(BaseModel):
 
 class PlaidSyncIn(BaseModel):
     user_id: str = "demo"
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
     lookback_days: int = 30
 
 
@@ -746,6 +746,275 @@ def _plaid_now() -> datetime:
     return datetime.utcnow()
 
 
+def _plaid_sort_ts(*values: Optional[datetime]) -> float:
+    for value in values:
+        if value is not None:
+            return value.timestamp()
+    return 0.0
+
+
+def _plaid_item_is_active(item_row: Optional[PlaidItem]) -> bool:
+    if item_row is None:
+        return False
+    return (item_row.status or "linked") != "superseded"
+
+
+def _plaid_sync_item_query(db: Session, user_id: str):
+    return (
+        db.query(PlaidItem)
+        .filter(
+            PlaidItem.user_id == user_id,
+            or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
+        )
+    )
+
+
+def _plaid_logical_item_key(institution_name: Optional[str]) -> str:
+    return _norm_text(institution_name)
+
+
+def _plaid_canonical_item_sort_key(item_row: PlaidItem) -> tuple[int, float, int]:
+    status = (item_row.status or "linked").lower()
+    linked_score = 1 if status == "linked" else 0
+    sync_score = _plaid_sort_ts(
+        item_row.last_transactions_sync_at,
+        item_row.last_balances_sync_at,
+        item_row.last_accounts_sync_at,
+        item_row.updated_at,
+        item_row.created_at,
+    )
+    return (linked_score, sync_score, item_row.id or 0)
+
+
+def _plaid_select_canonical_items(item_rows: list[PlaidItem]) -> tuple[list[PlaidItem], list[PlaidItem]]:
+    if not _plaid_should_merge_relinks():
+        return sorted(
+            item_rows,
+            key=lambda row: (
+                row.created_at or datetime.min,
+                row.id or 0,
+            ),
+            reverse=True,
+        ), []
+
+    canonical_by_key: dict[str, PlaidItem] = {}
+    duplicates: list[PlaidItem] = []
+
+    for item_row in item_rows:
+        key = _plaid_logical_item_key(item_row.institution_name) or f"item:{item_row.id}"
+        current = canonical_by_key.get(key)
+        if current is None or _plaid_canonical_item_sort_key(item_row) > _plaid_canonical_item_sort_key(current):
+            if current is not None:
+                duplicates.append(current)
+            canonical_by_key[key] = item_row
+        else:
+            duplicates.append(item_row)
+
+    canonical_items = sorted(
+        canonical_by_key.values(),
+        key=lambda row: (
+            row.created_at or datetime.min,
+            row.id or 0,
+        ),
+        reverse=True,
+    )
+    return canonical_items, duplicates
+
+
+def _plaid_account_label(name: Optional[str], official_name: Optional[str], subtype: Optional[str]) -> str:
+    return _norm_text(official_name or name or subtype)
+
+
+def _plaid_logical_account_key_from_parts(
+    institution_name: Optional[str],
+    mask: Optional[str],
+    name: Optional[str],
+    official_name: Optional[str],
+    account_type: Optional[str],
+    subtype: Optional[str],
+) -> str:
+    inst = _norm_text(institution_name)
+    acct_mask = (mask or "").strip()
+    label = _plaid_account_label(name, official_name, subtype)
+    acct_type = (account_type or "").strip().lower()
+    acct_subtype = (subtype or "").strip().lower()
+    return "|".join([inst, acct_mask, label, acct_type, acct_subtype])
+
+
+def _plaid_logical_account_key_for_payload(item_row: PlaidItem, account_payload: dict) -> str:
+    return _plaid_logical_account_key_from_parts(
+        item_row.institution_name,
+        account_payload.get("mask"),
+        account_payload.get("name"),
+        account_payload.get("official_name"),
+        account_payload.get("type"),
+        account_payload.get("subtype"),
+    )
+
+
+def _plaid_logical_account_key_for_row(row: PlaidAccount) -> str:
+    return _plaid_logical_account_key_from_parts(
+        row.institution_name or (row.item.institution_name if row.item else None),
+        row.mask,
+        row.name,
+        row.official_name,
+        row.type,
+        row.subtype,
+    )
+
+
+def _plaid_canonical_account_sort_key(row: PlaidAccount) -> tuple[int, int, float, int]:
+    account_score = 1 if (row.sync_status or "").lower() == "synced" else 0
+    item_score = 1 if _plaid_item_is_active(row.item) and (row.item.status or "linked") == "linked" else 0
+    sync_score = _plaid_sort_ts(
+        row.last_balance_sync_at,
+        row.last_synced_at,
+    )
+    return (account_score, item_score, sync_score, -(row.id or 0))
+
+
+def _plaid_select_canonical_accounts(account_rows: list[PlaidAccount]) -> tuple[list[PlaidAccount], list[PlaidAccount]]:
+    canonical_by_key: dict[str, PlaidAccount] = {}
+    duplicates: list[PlaidAccount] = []
+
+    for row in account_rows:
+        if not _plaid_item_is_active(row.item):
+            duplicates.append(row)
+            continue
+
+        key = _plaid_logical_account_key_for_row(row) or f"account:{row.id}"
+        current = canonical_by_key.get(key)
+        if current is None or _plaid_canonical_account_sort_key(row) > _plaid_canonical_account_sort_key(current):
+            if current is not None:
+                duplicates.append(current)
+            canonical_by_key[key] = row
+        else:
+            duplicates.append(row)
+
+    canonical_rows = sorted(
+        canonical_by_key.values(),
+        key=lambda row: (
+            not bool(row.is_cash_like),
+            row.institution_name or (row.item.institution_name if row.item else ""),
+            row.name or "",
+            row.id or 0,
+        ),
+    )
+    return canonical_rows, duplicates
+
+
+def _plaid_find_existing_account_candidate(db: Session, item_row: PlaidItem, account_payload: dict) -> Optional[PlaidAccount]:
+    logical_key = _plaid_logical_account_key_for_payload(item_row, account_payload)
+    if not logical_key.replace("|", "").strip():
+        return None
+
+    candidates = (
+        db.query(PlaidAccount)
+        .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidAccount.user_id == item_row.user_id,
+            or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
+        )
+        .all()
+    )
+    matches = [row for row in candidates if _plaid_logical_account_key_for_row(row) == logical_key]
+    if not matches:
+        return None
+    return max(matches, key=_plaid_canonical_account_sort_key)
+
+
+def _plaid_should_merge_relinks() -> bool:
+    return _plaid_env_name() == "sandbox"
+
+
+def _plaid_find_existing_item_candidate(db: Session, user_id: str, institution_name: Optional[str]) -> Optional[PlaidItem]:
+    if not _plaid_should_merge_relinks():
+        return None
+
+    logical_key = _plaid_logical_item_key(institution_name)
+    if not logical_key:
+        return None
+
+    items = _plaid_sync_item_query(db, user_id).all()
+    matches = [row for row in items if _plaid_logical_item_key(row.institution_name) == logical_key]
+    if not matches:
+        return None
+    return max(matches, key=_plaid_canonical_item_sort_key)
+
+
+def _plaid_merge_duplicate_items(db: Session, canonical_item: PlaidItem, synced_at: datetime) -> None:
+    if not _plaid_should_merge_relinks():
+        return
+
+    logical_key = _plaid_logical_item_key(canonical_item.institution_name)
+    if not logical_key:
+        return
+
+    duplicate_items = [
+        row
+        for row in _plaid_sync_item_query(db, canonical_item.user_id).all()
+        if row.id != canonical_item.id and _plaid_logical_item_key(row.institution_name) == logical_key
+    ]
+
+    for duplicate in duplicate_items:
+        db.query(PlaidAccount).filter(PlaidAccount.plaid_item_id == duplicate.id).update(
+            {
+                PlaidAccount.plaid_item_id: canonical_item.id,
+                PlaidAccount.user_id: canonical_item.user_id,
+                PlaidAccount.institution_name: canonical_item.institution_name,
+                PlaidAccount.updated_at: synced_at,
+            },
+            synchronize_session=False,
+        )
+        db.query(PlaidTransaction).filter(PlaidTransaction.plaid_item_id == duplicate.id).update(
+            {
+                PlaidTransaction.plaid_item_id: canonical_item.id,
+                PlaidTransaction.user_id: canonical_item.user_id,
+                PlaidTransaction.updated_at: synced_at,
+            },
+            synchronize_session=False,
+        )
+        duplicate.status = "superseded"
+        duplicate.updated_at = synced_at
+        duplicate.last_sync_error = f"Superseded by relinked item {canonical_item.plaid_item_id}."
+
+    db.flush()
+
+
+def _plaid_mark_duplicate_accounts_superseded(db: Session, user_id: str, synced_at: datetime) -> None:
+    account_rows = (
+        db.query(PlaidAccount)
+        .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidAccount.user_id == user_id,
+            or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
+        )
+        .all()
+    )
+    canonical_rows, duplicates = _plaid_select_canonical_accounts(account_rows)
+    canonical_by_key = {_plaid_logical_account_key_for_row(row): row for row in canonical_rows}
+
+    for duplicate in duplicates:
+        canonical = canonical_by_key.get(_plaid_logical_account_key_for_row(duplicate))
+        if canonical is None or canonical.id == duplicate.id:
+            continue
+
+        db.query(PlaidTransaction).filter(PlaidTransaction.plaid_account_id == duplicate.id).update(
+            {
+                PlaidTransaction.plaid_account_id: canonical.id,
+                PlaidTransaction.plaid_item_id: canonical.plaid_item_id,
+                PlaidTransaction.user_id: canonical.user_id,
+                PlaidTransaction.updated_at: synced_at,
+            },
+            synchronize_session=False,
+        )
+        duplicate.sync_status = "superseded"
+        duplicate.plaid_item_id = canonical.plaid_item_id
+        duplicate.updated_at = synced_at
+
+    db.flush()
+
+
 def _plaid_is_cash_like(account_type: Optional[str], subtype: Optional[str]) -> bool:
     account_type = (account_type or "").lower()
     subtype = (subtype or "").lower()
@@ -810,13 +1079,15 @@ def _plaid_cash_breakdown(db: Session, user_id: str) -> dict:
         .filter(
             PlaidAccount.user_id == user_id,
             PlaidAccount.is_cash_like == True,
-            or_(PlaidItem.status == "linked", PlaidItem.status.is_(None)),
+            or_(PlaidItem.status == "linked", PlaidItem.status.is_(None), PlaidItem.status == "partial"),
+            or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
         )
         .all()
     )
+    plaid_rows, plaid_duplicates = _plaid_select_canonical_accounts(plaid_rows)
 
     included = []
-    skipped = []
+    skipped = list(plaid_duplicates)
     total = 0.0
     for row in plaid_rows:
         if _plaid_matches_pdf_cash_account(row, pdf_rows):
@@ -832,12 +1103,12 @@ def _plaid_cash_breakdown(db: Session, user_id: str) -> dict:
     }
 
 
-def _plaid_sync_window(start_date: Optional[str], end_date: Optional[str], lookback_days: int) -> tuple[str, str]:
+def _plaid_sync_window(start_date: Optional[date], end_date: Optional[date], lookback_days: int) -> tuple[date, date]:
     today = datetime.utcnow().date()
     safe_lookback = max(1, min(int(lookback_days or 30), 365))
-    end_iso = end_date or today.isoformat()
-    start_iso = start_date or (today - timedelta(days=safe_lookback)).isoformat()
-    return start_iso, end_iso
+    end_value = end_date or today
+    start_value = start_date or (today - timedelta(days=safe_lookback))
+    return start_value, end_value
 
 
 def _serialize_plaid_account(row: PlaidAccount) -> dict:
@@ -913,8 +1184,8 @@ def _sync_plaid_item_resilient(
     client,
     sdk,
     item_row: PlaidItem,
-    start_date: str,
-    end_date: str,
+    start_date: date,
+    end_date: date,
     include_transactions: bool = True,
 ) -> dict:
     warnings = []
@@ -995,6 +1266,8 @@ def _upsert_plaid_account(
         .one_or_none()
     )
     if row is None:
+        row = _plaid_find_existing_account_candidate(db, item_row, account_payload)
+    if row is None:
         row = PlaidAccount(
             user_id=item_row.user_id,
             plaid_item_id=item_row.id,
@@ -1009,6 +1282,7 @@ def _upsert_plaid_account(
 
     row.user_id = item_row.user_id
     row.plaid_item_id = item_row.id
+    row.plaid_account_id = plaid_account_id
     row.institution_name = item_row.institution_name
     row.name = account_payload.get("name") or row.name or "Plaid account"
     row.official_name = account_payload.get("official_name")
@@ -1061,6 +1335,7 @@ def _sync_plaid_accounts_for_item(
     if update_balances:
         item_row.last_balances_sync_at = synced_at
     item_row.updated_at = synced_at
+    _plaid_mark_duplicate_accounts_superseded(db, item_row.user_id, synced_at)
     db.flush()
     return rows
 
@@ -1070,8 +1345,8 @@ def _sync_plaid_transactions_for_item(
     client,
     sdk,
     item_row: PlaidItem,
-    start_date: str,
-    end_date: str,
+    start_date: date,
+    end_date: date,
 ) -> int:
     synced_at = _plaid_now()
     try:
@@ -1141,6 +1416,7 @@ def _sync_plaid_transactions_for_item(
     item_row.last_sync_error = None
     item_row.last_transactions_sync_at = synced_at
     item_row.updated_at = synced_at
+    _plaid_mark_duplicate_accounts_superseded(db, item_row.user_id, synced_at)
     db.flush()
     return synced
 
@@ -1215,6 +1491,8 @@ def exchange_plaid_public_token(
         .one_or_none()
     )
     if item_row is None:
+        item_row = _plaid_find_existing_item_candidate(db, user_id, payload.institution_name)
+    if item_row is None:
         item_row = PlaidItem(
             user_id=user_id,
             plaid_item_id=plaid_item_id,
@@ -1230,6 +1508,7 @@ def exchange_plaid_public_token(
     item_row.last_sync_error = None
     item_row.updated_at = synced_at
     db.flush()
+    _plaid_merge_duplicate_items(db, item_row, synced_at)
 
     db.commit()
     db.refresh(item_row)
@@ -1275,16 +1554,17 @@ def list_plaid_accounts(
     rows = (
         db.query(PlaidAccount)
         .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
-        .filter(PlaidAccount.user_id == user_id)
+        .filter(
+            PlaidAccount.user_id == user_id,
+            or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
+            or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
+        )
         .order_by(PlaidAccount.is_cash_like.desc(), PlaidAccount.institution_name.asc(), PlaidAccount.name.asc())
         .all()
     )
-    items = (
-        db.query(PlaidItem)
-        .filter(PlaidItem.user_id == user_id)
-        .order_by(PlaidItem.created_at.desc(), PlaidItem.id.desc())
-        .all()
-    )
+    rows, _ = _plaid_select_canonical_accounts(rows)
+    items = _plaid_sync_item_query(db, user_id).order_by(PlaidItem.created_at.desc(), PlaidItem.id.desc()).all()
+    items, _ = _plaid_select_canonical_items(items)
     return {
         "ok": True,
         "user_id": user_id,
@@ -1315,12 +1595,7 @@ def sync_plaid_data(
     user_id = _coerce_user_id(current_user, payload.user_id)
     start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
 
-    items = (
-        db.query(PlaidItem)
-        .filter(PlaidItem.user_id == user_id)
-        .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
-        .all()
-    )
+    items = _plaid_sync_item_query(db, user_id).order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc()).all()
     if not items:
         raise HTTPException(status_code=404, detail="No Plaid-linked items found for this user.")
 
@@ -1359,12 +1634,7 @@ def sync_plaid_balances(
     _require_plaid_encryption_ready()
     client, sdk = _get_plaid_client()
     user_id = _coerce_user_id(current_user, payload.user_id)
-    items = (
-        db.query(PlaidItem)
-        .filter(PlaidItem.user_id == user_id)
-        .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
-        .all()
-    )
+    items = _plaid_sync_item_query(db, user_id).order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc()).all()
     if not items:
         raise HTTPException(status_code=404, detail="No Plaid-linked items found for this user.")
 
@@ -1392,12 +1662,7 @@ def sync_plaid_transactions(
     client, sdk = _get_plaid_client()
     user_id = _coerce_user_id(current_user, payload.user_id)
     start_date, end_date = _plaid_sync_window(payload.start_date, payload.end_date, payload.lookback_days)
-    items = (
-        db.query(PlaidItem)
-        .filter(PlaidItem.user_id == user_id)
-        .order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc())
-        .all()
-    )
+    items = _plaid_sync_item_query(db, user_id).order_by(PlaidItem.created_at.asc(), PlaidItem.id.asc()).all()
     if not items:
         raise HTTPException(status_code=404, detail="No Plaid-linked items found for this user.")
 
@@ -1429,7 +1694,12 @@ def list_plaid_transactions(
     q = (
         db.query(PlaidTransaction)
         .join(PlaidAccount, PlaidTransaction.plaid_account_id == PlaidAccount.id)
-        .filter(PlaidTransaction.user_id == user_id)
+        .join(PlaidItem, PlaidTransaction.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidTransaction.user_id == user_id,
+            or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
+            or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
+        )
     )
     if start_date:
         q = q.filter(PlaidTransaction.posted_date >= start_date)
