@@ -1,14 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import {
+  createManualTransaction,
+  deleteManualTransaction,
   listStatements,
   listStatementTransactions,
+  listManualTransactions,
+  ManualTransaction,
   Statement,
   Transaction,
 } from "@/lib/api";
+import { useAuth } from "@/components/auth/AuthProvider";
 
 /** =========================
  * Helpers
@@ -17,6 +22,16 @@ function fmtMoney(n: number) {
   const v = Number(n || 0);
   const sign = v < 0 ? "-" : "";
   return `${sign}$${Math.abs(v).toFixed(2)}`;
+}
+
+function todayInputValue() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 function safeTime(s?: string | null) {
@@ -182,14 +197,34 @@ type TxRow = Transaction & {
 
 type SortKey = "date_desc" | "date_asc" | "amount_desc" | "amount_asc";
 
+type ManualTransactionForm = {
+  amount: string;
+  date: string;
+  category: Category;
+  description: string;
+};
+
 /** =========================
  * Page
  * ========================= */
 export default function TransactionsPage() {
+  const { user } = useAuth();
+  const userId = user?.id ?? "";
   const [statements, setStatements] = useState<Statement[]>([]);
   const [rows, setRows] = useState<TxRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [manualTransactions, setManualTransactions] = useState<ManualTransaction[]>([]);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualFormOpen, setManualFormOpen] = useState(false);
+  const [manualSaving, setManualSaving] = useState(false);
+  const [manualForm, setManualForm] = useState<ManualTransactionForm>({
+    amount: "",
+    date: todayInputValue(),
+    category: "Other",
+    description: "",
+  });
 
   // UI state
   const [q, setQ] = useState("");
@@ -219,6 +254,25 @@ export default function TransactionsPage() {
     // load rules once client-side
     setRules(loadRules());
   }, []);
+
+  const loadManualEntries = useCallback(async () => {
+    if (!userId) return;
+    setManualLoading(true);
+    setManualError(null);
+    try {
+      const rows = await listManualTransactions({ user_id: userId });
+      setManualTransactions(rows || []);
+    } catch (error) {
+      setManualError(getErrorMessage(error, "Failed to load manual transactions"));
+    } finally {
+      setManualLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    loadManualEntries();
+  }, [userId, loadManualEntries]);
 
   useEffect(() => {
     setLoading(true);
@@ -427,6 +481,61 @@ export default function TransactionsPage() {
     });
   }
 
+  async function handleCreateManualTransaction(e: React.FormEvent) {
+    e.preventDefault();
+    if (!userId || manualSaving) return;
+
+    const amount = Number(manualForm.amount);
+    if (!Number.isFinite(amount) || amount === 0) {
+      setManualError("Amount must be a valid number and cannot be 0.");
+      return;
+    }
+    if (!manualForm.date) {
+      setManualError("Date is required.");
+      return;
+    }
+
+    setManualSaving(true);
+    setManualError(null);
+    try {
+      await createManualTransaction(
+        {
+          user_id: userId,
+          amount,
+          date: manualForm.date,
+          category: manualForm.category,
+          description: manualForm.description.trim(),
+        },
+        { user_id: userId }
+      );
+      setManualForm({
+        amount: "",
+        date: todayInputValue(),
+        category: "Other",
+        description: "",
+      });
+      setManualFormOpen(false);
+      await loadManualEntries();
+    } catch (error) {
+      setManualError(getErrorMessage(error, "Failed to save manual transaction"));
+    } finally {
+      setManualSaving(false);
+    }
+  }
+
+  async function handleDeleteManualTransaction(row: ManualTransaction) {
+    if (!userId) return;
+    const ok = window.confirm("Delete this manual transaction?");
+    if (!ok) return;
+
+    try {
+      await deleteManualTransaction(row.id, { user_id: userId });
+      await loadManualEntries();
+    } catch (error) {
+      setManualError(getErrorMessage(error, "Failed to delete manual transaction"));
+    }
+  }
+
   function exportCsv() {
     // export current FILTERED view (not just current page)
     const headers = [
@@ -488,6 +597,16 @@ export default function TransactionsPage() {
 
             <div className="flex items-center gap-2">
               <button
+                onClick={() => {
+                  setManualError(null);
+                  setManualFormOpen((prev) => !prev);
+                }}
+                className="rounded-xl border border-white/10 bg-white/10 px-3 py-2 text-xs text-zinc-100 hover:bg-white/15"
+                title="Add a manual transaction"
+              >
+                Add Transaction
+              </button>
+              <button
                 onClick={exportCsv}
                 className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
                 title="Export filtered view to CSV"
@@ -502,6 +621,156 @@ export default function TransactionsPage() {
                 Statements
               </Link>
             </div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-zinc-100">Manual Transactions</div>
+              <div className="mt-1 text-xs text-zinc-400">
+                Stored separately from Plaid and statement imports so cash/manual activity has its own source.
+              </div>
+            </div>
+            <div className="text-xs text-zinc-500">
+              {manualTransactions.length} saved
+            </div>
+          </div>
+
+          {manualFormOpen && (
+            <form onSubmit={handleCreateManualTransaction} className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <div>
+                <div className="text-xs text-zinc-400">Amount</div>
+                <input
+                  value={manualForm.amount}
+                  onChange={(e) => setManualForm((prev) => ({ ...prev, amount: e.target.value }))}
+                  inputMode="decimal"
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-white/20"
+                  placeholder="-42.50 or 1200"
+                />
+              </div>
+
+              <div>
+                <div className="text-xs text-zinc-400">Date</div>
+                <input
+                  type="date"
+                  value={manualForm.date}
+                  onChange={(e) => setManualForm((prev) => ({ ...prev, date: e.target.value }))}
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                />
+              </div>
+
+              <div>
+                <div className="text-xs text-zinc-400">Category</div>
+                <select
+                  value={manualForm.category}
+                  onChange={(e) => setManualForm((prev) => ({ ...prev, category: e.target.value as Category }))}
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                >
+                  {CATEGORY_OPTIONS.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="xl:col-span-2">
+                <div className="text-xs text-zinc-400">Description</div>
+                <input
+                  value={manualForm.description}
+                  onChange={(e) => setManualForm((prev) => ({ ...prev, description: e.target.value }))}
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-white/20"
+                  placeholder="Cash groceries, Venmo split, rent paid in cash..."
+                />
+              </div>
+
+              <div className="md:col-span-2 xl:col-span-5 flex flex-wrap gap-2">
+                <button
+                  type="submit"
+                  disabled={manualSaving}
+                  className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm text-zinc-100 hover:bg-white/15 disabled:opacity-60"
+                >
+                  {manualSaving ? "Saving..." : "Save Transaction"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setManualForm({
+                      amount: "",
+                      date: todayInputValue(),
+                      category: "Other",
+                      description: "",
+                    });
+                    setManualError(null);
+                    setManualFormOpen(false);
+                  }}
+                  className="rounded-xl border border-white/10 bg-[#0B0F14] px-4 py-2 text-sm text-zinc-300 hover:bg-white/5"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+
+          {manualError && (
+            <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              {manualError}
+            </div>
+          )}
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs text-zinc-400">
+                <tr className="border-b border-white/10">
+                  <th className="py-3 pr-4">date</th>
+                  <th className="py-3 pr-4">description</th>
+                  <th className="py-3 pr-4">category</th>
+                  <th className="py-3 pr-4 text-right">amount</th>
+                  <th className="py-3 pr-0 text-right">actions</th>
+                </tr>
+              </thead>
+              <tbody className="text-zinc-200">
+                {manualLoading ? (
+                  <tr>
+                    <td colSpan={5} className="py-6 text-zinc-400">
+                      Loading manual transactions...
+                    </td>
+                  </tr>
+                ) : manualTransactions.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="py-6 text-zinc-400">
+                      No manual transactions saved yet.
+                    </td>
+                  </tr>
+                ) : (
+                  manualTransactions.slice(0, 8).map((row) => (
+                    <tr key={row.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="py-3 pr-4 text-zinc-300">
+                        {parseDateLoose(row.date)?.toLocaleDateString(undefined, {
+                          year: "numeric",
+                          month: "short",
+                          day: "2-digit",
+                        }) || row.date}
+                      </td>
+                      <td className="py-3 pr-4 text-zinc-100">{row.description || "-"}</td>
+                      <td className="py-3 pr-4 text-zinc-300">{row.category || "Other"}</td>
+                      <td className="py-3 pr-4 text-right font-mono text-zinc-200">
+                        {fmtMoney(Number(row.amount || 0))}
+                      </td>
+                      <td className="py-3 pr-0 text-right">
+                        <button
+                          onClick={() => handleDeleteManualTransaction(row)}
+                          className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-200 hover:bg-red-500/20"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 

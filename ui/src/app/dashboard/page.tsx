@@ -1208,9 +1208,9 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     </div>
 
     <Link
-      href="/settings"
+      href="/bills"
       className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
-      title="Manage bills in Settings"
+      title="Manage bills"
     >
       Manage →
     </Link>

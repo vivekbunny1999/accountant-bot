@@ -421,6 +421,24 @@ class ManualBill(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ManualTransaction(Base):
+    """
+    User-entered cash/manual activity stored separately from Plaid/PDF imports.
+    """
+    __tablename__ = "manual_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+
+    amount = Column(Float, nullable=False, default=0.0)
+    date = Column(String, nullable=False, index=True)  # ISO "YYYY-MM-DD"
+    category = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Goal(Base):
     """
     Goals for Emergency Fund + FI + others.

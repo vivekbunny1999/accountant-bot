@@ -18,7 +18,7 @@ from sqlalchemy import func
 from sqlalchemy import and_
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from models import Bill, Debt, Goal, Paycheck, RecurringCandidate, ManualBill
+from models import Bill, Debt, Goal, Paycheck, RecurringCandidate, ManualBill, ManualTransaction
 
 # Models
 from models import (
@@ -311,6 +311,7 @@ def ensure_auth_seed_rows():
         Bill,
         Debt,
         ManualBill,
+        ManualTransaction,
         Goal,
         Paycheck,
         RecurringCandidate,
@@ -3366,6 +3367,97 @@ def os_delete_manual_bill(
     mb.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(mb)
+    return {"ok": True}
+
+
+# ----------------------------
+# Manual Transactions
+# ----------------------------
+
+
+@app.get("/manual-transactions")
+def list_manual_transactions(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
+    q = (
+        db.query(ManualTransaction)
+        .filter(ManualTransaction.user_id == user_id)
+        .order_by(ManualTransaction.date.desc(), ManualTransaction.created_at.desc())
+    )
+    return q.all()
+
+
+@app.post("/manual-transactions")
+def create_manual_transaction(
+    payload: dict = Body(...),
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id or payload.get("user_id"))
+    row = ManualTransaction(
+        user_id=user_id,
+        amount=float(payload.get("amount") or 0),
+        date=(payload.get("date") or date.today().isoformat()),
+        category=payload.get("category") or "Other",
+        description=payload.get("description") or "",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@app.patch("/manual-transactions/{transaction_id}")
+def update_manual_transaction(
+    transaction_id: int,
+    payload: dict = Body(...),
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
+    row = (
+        db.query(ManualTransaction)
+        .filter(and_(ManualTransaction.id == transaction_id, ManualTransaction.user_id == user_id))
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Manual transaction not found")
+
+    if "amount" in payload and payload["amount"] is not None:
+        row.amount = float(payload["amount"])
+
+    for key in ["date", "category", "description"]:
+        if key in payload:
+            setattr(row, key, payload[key])
+
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@app.delete("/manual-transactions/{transaction_id}")
+def delete_manual_transaction(
+    transaction_id: int,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
+    row = (
+        db.query(ManualTransaction)
+        .filter(and_(ManualTransaction.id == transaction_id, ManualTransaction.user_id == user_id))
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Manual transaction not found")
+    db.delete(row)
+    db.commit()
     return {"ok": True}
 
 
