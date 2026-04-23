@@ -935,6 +935,16 @@ export type FinancialHealthComponent = {
   explanation?: string | null;
 };
 
+export type FinancialOsInsight = {
+  key: string;
+  title: string;
+  severity: "info" | "warning" | "critical" | "success";
+  explanation: string;
+  suggested_action: string;
+  sources?: string[];
+  rule?: string | null;
+};
+
 export type FinancialOsIntelligenceResponse = {
   ok: boolean;
   user_id: string;
@@ -1014,6 +1024,15 @@ export type FinancialOsIntelligenceResponse = {
     explanation?: string | null;
   };
   recommendation?: NextBestDollarResponse["recommendation"];
+  insights?: {
+    what_to_do_next?: FinancialOsInsight | null;
+    items?: FinancialOsInsight[];
+    source_coverage?: Record<string, {
+      transactions?: number;
+      latest_date?: string | null;
+      source_label?: string | null;
+    }>;
+  };
 };
 
 export async function getFinancialOsIntelligence(params: {
