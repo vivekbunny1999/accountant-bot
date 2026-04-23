@@ -729,6 +729,34 @@ export async function syncPlaidData(body: {
   return apiPost<PlaidSyncResponse>("/plaid/sync", body);
 }
 
+export type FinancialOsUpcomingItem = {
+  id?: number;
+  type?: "bill" | "manual_bill" | "debt_minimum" | string;
+  source?: string | null;
+  name?: string | null;
+  amount?: number | null;
+  due_date?: string | null;
+  frequency?: string | null;
+  category?: string | null;
+  autopay?: boolean | null;
+  apr?: number | null;
+  last4?: string | null;
+};
+
+export type FinancialOsBreakdown = {
+  total_cash?: number;
+  pdf_cash?: number;
+  plaid_cash_counted?: number;
+  duplicates_skipped?: number;
+  duplicates_skipped_balance?: number;
+  upcoming_total?: number;
+  upcoming_bills_total?: number;
+  manual_obligations_total?: number;
+  debt_minimums_total?: number;
+  buffer?: number;
+  final_safe_to_spend?: number;
+};
+
 export type OsStateResponse = {
   ok: boolean;
   user_id: string;
@@ -764,7 +792,7 @@ export type OsStateResponse = {
   };
   upcoming_window_days?: number;
   upcoming_total?: number;
-  upcoming_items?: any[];
+  upcoming_items?: FinancialOsUpcomingItem[];
   upcoming_summary?: {
     bill_total?: number;
     manual_bill_total?: number;
@@ -803,7 +831,7 @@ export type NextBestDollarResponse = {
   upcoming_total: number;
   safe_to_spend_today: number;
   stage?: string | null;
-  upcoming_items?: any[];
+  upcoming_items?: FinancialOsUpcomingItem[];
   upcoming_summary?: {
     bill_total?: number;
     manual_bill_total?: number;
@@ -820,6 +848,7 @@ export type NextBestDollarResponse = {
     buffer?: number;
     safe_to_spend_today?: number;
   };
+  breakdown?: FinancialOsBreakdown;
   recommendation?: {
     debt_id?: number;
     name?: string | null;
