@@ -6030,3 +6030,633 @@ def os_state(
         },
         "debt_utilization": util,
     }
+
+
+def _goal_value_map(db: Session, user_id: str) -> dict:
+    rows = db.query(Goal).filter(Goal.user_id == user_id).all()
+    out = {}
+    for row in rows:
+        out[row.key] = _to_float(row.value, 0.0)
+    return out
+
+
+def _goal_value(goals: dict, key: str, default: Optional[float] = None) -> Optional[float]:
+    raw = goals.get(key)
+    value = _to_float(raw, default if default is not None else 0.0)
+    if value <= 0:
+        return default
+    return value
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _round_clean(value: float) -> int:
+    return int(round(float(value)))
+
+
+def _active_debts_for_intelligence(db: Session, user_id: str) -> list:
+    return (
+        db.query(Debt)
+        .filter(Debt.user_id == user_id, _active_financial_os_clause(Debt))
+        .all()
+    )
+
+
+def _priority_debt_for_intelligence(debts: list) -> Optional[Debt]:
+    ranked = []
+    for debt in debts:
+        balance = _to_float(getattr(debt, "balance", None), 0.0)
+        if balance <= 0:
+            continue
+        apr = getattr(debt, "apr", None)
+        apr_rank = _to_float(apr, -1.0) if apr is not None else -1.0
+        ranked.append((apr_rank, balance, debt))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return ranked[0][2]
+
+
+def _priority_debt_snapshot_for_intelligence(items: list[dict]) -> Optional[dict]:
+    ranked = []
+    for item in items:
+        balance = _to_float(item.get("balance"), 0.0)
+        if balance <= 0:
+            continue
+        apr_rank = _to_float(item.get("apr"), -1.0)
+        ranked.append((apr_rank, balance, item))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    return ranked[0][2]
+
+
+def _debt_totals_snapshot(debts: list) -> dict:
+    total_balance = 0.0
+    weighted_numerator = 0.0
+    weighted_balance = 0.0
+    minimum_total = 0.0
+    positive_balance_count = 0
+    apr_known_count = 0
+
+    for debt in debts:
+        balance = _to_float(getattr(debt, "balance", None), 0.0)
+        minimum_due = _to_float(getattr(debt, "minimum_due", None), 0.0)
+        apr = getattr(debt, "apr", None)
+
+        if balance > 0:
+            positive_balance_count += 1
+            total_balance += balance
+            if apr is not None:
+                apr_known_count += 1
+                weighted_numerator += balance * _to_float(apr, 0.0)
+                weighted_balance += balance
+
+        if minimum_due > 0:
+            minimum_total += minimum_due
+
+    weighted_apr = None
+    if weighted_balance > 0:
+        weighted_apr = round(weighted_numerator / weighted_balance, 2)
+
+    return {
+        "total_balance": round(total_balance, 2),
+        "minimum_total": round(minimum_total, 2),
+        "weighted_apr": weighted_apr,
+        "positive_balance_count": positive_balance_count,
+        "apr_known_count": apr_known_count,
+    }
+
+
+def _project_single_debt_payoff(balance: float, apr_pct: Optional[float], monthly_payment: float, max_months: int = 600) -> dict:
+    balance_remaining = _to_float(balance, 0.0)
+    payment = _to_float(monthly_payment, 0.0)
+    apr = max(_to_float(apr_pct, 0.0), 0.0)
+
+    if balance_remaining <= 0:
+        return {"ok": True, "months": 0, "interest_paid": 0.0}
+    if payment <= 0:
+        return {"ok": False, "reason": "missing_payment"}
+
+    months = 0
+    interest_paid = 0.0
+
+    while balance_remaining > 0.01 and months < max_months:
+        starting_balance = balance_remaining
+        interest = balance_remaining * (apr / 1200.0)
+        interest_paid += interest
+        balance_remaining += interest
+
+        actual_payment = min(payment, balance_remaining)
+        balance_remaining -= actual_payment
+        months += 1
+
+        if balance_remaining >= starting_balance - 0.01:
+            return {"ok": False, "reason": "payment_does_not_reduce_principal"}
+
+    if balance_remaining > 0.01:
+        return {"ok": False, "reason": "projection_horizon_exceeded"}
+
+    return {
+        "ok": True,
+        "months": months,
+        "interest_paid": round(interest_paid, 2),
+    }
+
+
+def _project_portfolio_debt_free(debts: list, recurring_extra_payment: float, max_months: int = 600) -> dict:
+    modeled = []
+    excluded = []
+    positive_balance_found = False
+
+    for debt in debts:
+        balance = _to_float(getattr(debt, "balance", None), 0.0)
+        if balance <= 0:
+            continue
+        positive_balance_found = True
+
+        minimum_due = _to_float(getattr(debt, "minimum_due", None), 0.0)
+        if minimum_due <= 0:
+            excluded.append({
+                "id": debt.id,
+                "name": debt.name,
+                "reason": "Missing minimum payment",
+                "balance": round(balance, 2),
+            })
+            continue
+
+        modeled.append({
+            "id": debt.id,
+            "name": debt.name,
+            "apr": max(_to_float(getattr(debt, "apr", None), 0.0), 0.0),
+            "balance": balance,
+            "minimum_due": minimum_due,
+        })
+
+    if not positive_balance_found:
+        return {
+            "ok": True,
+            "months": 0,
+            "interest_paid": 0.0,
+            "modeled_debt_count": 0,
+            "excluded_debts": [],
+        }
+
+    if not modeled:
+        return {
+            "ok": False,
+            "reason": "no_modelable_debts",
+            "modeled_debt_count": 0,
+            "excluded_debts": excluded,
+        }
+
+    months = 0
+    interest_paid = 0.0
+    extra_payment = max(_to_float(recurring_extra_payment, 0.0), 0.0)
+
+    while months < max_months:
+        remaining_before_month = sum(item["balance"] for item in modeled if item["balance"] > 0.01)
+        if remaining_before_month <= 0.01:
+            break
+
+        for item in modeled:
+            if item["balance"] <= 0.01:
+                continue
+            interest = item["balance"] * (item["apr"] / 1200.0)
+            item["balance"] += interest
+            interest_paid += interest
+
+        for item in modeled:
+            if item["balance"] <= 0.01:
+                continue
+            payment = min(item["minimum_due"], item["balance"])
+            item["balance"] -= payment
+
+        extra_left = extra_payment
+        while extra_left > 0.01:
+            target = _priority_debt_snapshot_for_intelligence(
+                [item for item in modeled if item["balance"] > 0.01]
+            )
+            if not target:
+                break
+
+            payment = min(extra_left, target["balance"])
+            target["balance"] -= payment
+            extra_left -= payment
+
+        remaining_after_month = sum(item["balance"] for item in modeled if item["balance"] > 0.01)
+        months += 1
+
+        # Assumption: if balances stop shrinking with minimums + recurring extra,
+        # the current debt inputs are not enough for a reliable payoff estimate.
+        if remaining_after_month >= remaining_before_month - 0.01:
+            return {
+                "ok": False,
+                "reason": "payments_do_not_reduce_portfolio",
+                "modeled_debt_count": len(modeled),
+                "excluded_debts": excluded,
+            }
+
+    if any(item["balance"] > 0.01 for item in modeled):
+        return {
+            "ok": False,
+            "reason": "projection_horizon_exceeded",
+            "modeled_debt_count": len(modeled),
+            "excluded_debts": excluded,
+        }
+
+    return {
+        "ok": True,
+        "months": months,
+        "interest_paid": round(interest_paid, 2),
+        "modeled_debt_count": len(modeled),
+        "excluded_debts": excluded,
+    }
+
+
+@app.get("/os/intelligence")
+def os_intelligence(
+    user_id: Optional[str] = None,
+    window_days: int = 21,
+    buffer: float = 100.0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    """
+    Phase 4A intelligence bundle for the dashboard.
+    All numbers are backend-computed from current Financial OS state.
+    """
+    user_id = _coerce_user_id(current_user, user_id)
+
+    cash_total = _cash_total_latest(db, user_id)
+    upcoming_items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
+    upcoming_summary = _summarize_upcoming_items(upcoming_items)
+    bills_total, debt_mins_total, essentials_total = _sum_essentials_monthly(db, user_id)
+    utilization = os_debt_utilization(user_id=user_id, db=db, current_user=current_user)
+    goals = _goal_value_map(db, user_id)
+    debts = _active_debts_for_intelligence(db, user_id)
+    debt_snapshot = _debt_totals_snapshot(debts)
+
+    safe_to_spend = round(float(cash_total) - float(upcoming_total) - float(buffer), 2)
+    runway_target_months = _goal_value(goals, "runway_target_months", 3.0) or 3.0
+    runway_months = None
+    if essentials_total > 0:
+        runway_months = round(cash_total / essentials_total, 1)
+
+    emergency_target_amount = _goal_value(goals, "emergency_fund_target", None)
+    if emergency_target_amount is None:
+        emergency_target_amount = round(essentials_total * runway_target_months, 2) if essentials_total > 0 else max(cash_total, 0.0)
+
+    fi_cash_target = _goal_value(goals, "fi_target", None)
+    if fi_cash_target is None or fi_cash_target <= 0:
+        fi_cash_target = emergency_target_amount
+        fi_target_label = "Emergency fund target"
+    else:
+        fi_target_label = "Configured FI cash target"
+
+    non_debt_upcoming_total = round(
+        _to_float(upcoming_summary.get("bill_total"), 0.0) + _to_float(upcoming_summary.get("manual_bill_total"), 0.0),
+        2,
+    )
+    upcoming_debt_minimum_total = round(_to_float(upcoming_summary.get("debt_minimum_total"), 0.0), 2)
+    available_for_minimums = round(max(cash_total - non_debt_upcoming_total - buffer, 0.0), 2)
+
+    recommendation = None
+    priority_debt = _priority_debt_for_intelligence(debts)
+    recurring_extra_payment = 0.0
+    if priority_debt and safe_to_spend > 0:
+        recurring_extra_payment = round(max(safe_to_spend, 0.0), 2)
+        recommendation = {
+            "debt_id": priority_debt.id,
+            "name": priority_debt.name,
+            "last4": priority_debt.last4,
+            "apr": priority_debt.apr,
+            "recommended_extra_payment": recurring_extra_payment,
+            "why": "Highest APR debt first (avalanche) after upcoming obligations and buffer are protected.",
+        }
+
+    health_components = []
+
+    liquidity_ratio = _clamp01(cash_total / max(upcoming_total + buffer, 1.0))
+    liquidity_points = 35.0 * liquidity_ratio
+    health_components.append({
+        "key": "liquidity",
+        "label": "Liquidity and STS",
+        "weight": 35,
+        "points": round(liquidity_points, 1),
+        "included": True,
+        "formula": "35 * clamp(cash_total / (upcoming_total + buffer), 0, 1)",
+        "explanation": (
+            f"Cash covers {round(liquidity_ratio * 100)}% of upcoming obligations plus buffer; "
+            f"STS is {safe_to_spend:+.0f}."
+        ),
+    })
+
+    if runway_months is not None and runway_target_months > 0:
+        runway_ratio = _clamp01(runway_months / runway_target_months)
+        runway_points = 25.0 * runway_ratio
+        health_components.append({
+            "key": "runway",
+            "label": "Runway progress",
+            "weight": 25,
+            "points": round(runway_points, 1),
+            "included": True,
+            "formula": "25 * clamp(runway_months / runway_target_months, 0, 1)",
+            "explanation": (
+                f"Runway is {runway_months:.1f} months against a {runway_target_months:.1f}-month target."
+            ),
+        })
+
+    if debt_snapshot["total_balance"] <= 0:
+        health_components.append({
+            "key": "debt_cost",
+            "label": "Debt burden",
+            "weight": 20,
+            "points": 20.0,
+            "included": True,
+            "formula": "Full points when active debt balance is zero",
+            "explanation": "No active debt balance is currently dragging the score.",
+        })
+    elif debt_snapshot["weighted_apr"] is not None:
+        high_apr_benchmark = 24.0
+        debt_cost_ratio = 1.0 - _clamp01(debt_snapshot["weighted_apr"] / high_apr_benchmark)
+        debt_cost_points = 20.0 * debt_cost_ratio
+        health_components.append({
+            "key": "debt_cost",
+            "label": "Debt burden",
+            "weight": 20,
+            "points": round(debt_cost_points, 1),
+            "included": True,
+            "formula": "20 * (1 - clamp(weighted_apr / 24, 0, 1))",
+            "explanation": (
+                f"Weighted APR is {debt_snapshot['weighted_apr']:.1f}% across active debt balances."
+            ),
+        })
+    else:
+        health_components.append({
+            "key": "debt_cost",
+            "label": "Debt burden",
+            "weight": 20,
+            "points": 0.0,
+            "included": False,
+            "formula": "Skipped until APR is available on active debts",
+            "explanation": "Active debt exists, but APR data is incomplete so debt-cost scoring is skipped.",
+        })
+
+    if upcoming_debt_minimum_total > 0:
+        minimum_ratio = _clamp01(available_for_minimums / upcoming_debt_minimum_total)
+        minimum_points = 15.0 * minimum_ratio
+        health_components.append({
+            "key": "minimums",
+            "label": "Minimum payments covered",
+            "weight": 15,
+            "points": round(minimum_points, 1),
+            "included": True,
+            "formula": "15 * clamp((cash_total - non_debt_upcoming_total - buffer) / debt_minimums_due_in_window, 0, 1)",
+            "explanation": (
+                f"{round(minimum_ratio * 100)}% of debt minimums due in the next {window_days} days are covered after non-debt obligations."
+            ),
+        })
+    else:
+        health_components.append({
+            "key": "minimums",
+            "label": "Minimum payments covered",
+            "weight": 15,
+            "points": 15.0,
+            "included": True,
+            "formula": "Full points when no debt minimum is due in the current planning window",
+            "explanation": f"No debt minimum is due within the next {window_days} days.",
+        })
+
+    total_utilization_pct = utilization.get("total_utilization_pct")
+    if total_utilization_pct is not None:
+        util_ratio = 1.0
+        util_value = _to_float(total_utilization_pct, 0.0)
+        if util_value > 30:
+            util_ratio = 1.0 - _clamp01((util_value - 30.0) / 60.0)
+        util_points = 5.0 * util_ratio
+        health_components.append({
+            "key": "utilization",
+            "label": "Utilization risk",
+            "weight": 5,
+            "points": round(util_points, 1),
+            "included": True,
+            "formula": "5 when utilization <= 30%; linearly down to 0 at 90%",
+            "explanation": f"Tracked revolving utilization is {util_value:.1f}%.",
+        })
+    else:
+        health_components.append({
+            "key": "utilization",
+            "label": "Utilization risk",
+            "weight": 5,
+            "points": 0.0,
+            "included": False,
+            "formula": "Skipped until credit limits are available",
+            "explanation": "No credit-limit data is available, so utilization is not counted yet.",
+        })
+
+    included_health_components = [item for item in health_components if item["included"]]
+    health_points = sum(item["points"] for item in included_health_components)
+    health_weights = sum(item["weight"] for item in included_health_components)
+    financial_health_score = _round_clean((health_points / health_weights) * 100.0) if health_weights > 0 else 0
+
+    stability_factors = []
+    sts_factor = 100.0 if safe_to_spend >= 0 else max(0.0, 100.0 - min(100.0, (abs(safe_to_spend) / max(buffer, 100.0)) * 100.0))
+    stability_factors.append(("sts", 40, sts_factor))
+    obligation_factor = _clamp01(cash_total / max(upcoming_total + buffer, 1.0)) * 100.0
+    stability_factors.append(("obligations", 30, obligation_factor))
+    if runway_months is not None and runway_target_months > 0:
+        stability_factors.append(("runway", 20, _clamp01(runway_months / runway_target_months) * 100.0))
+    if upcoming_debt_minimum_total > 0:
+        stability_factors.append(("minimums", 10, _clamp01(available_for_minimums / upcoming_debt_minimum_total) * 100.0))
+    else:
+        stability_factors.append(("minimums", 10, 100.0))
+
+    stability_weight = sum(weight for _, weight, _ in stability_factors)
+    stability_value = _round_clean(sum((weight * value) for _, weight, value in stability_factors) / max(stability_weight, 1))
+    if stability_value < 35:
+        stability_label = "Fragile"
+    elif stability_value < 60:
+        stability_label = "Stabilizing"
+    elif stability_value < 80:
+        stability_label = "Stable"
+    else:
+        stability_label = "Strong"
+
+    if safe_to_spend < 0:
+        stability_explanation = f"Upcoming obligations and buffer currently exceed cash by {abs(safe_to_spend):.0f}."
+    elif upcoming_debt_minimum_total > 0 and available_for_minimums < upcoming_debt_minimum_total:
+        stability_explanation = "Short-term cash is positive, but upcoming debt minimums are only partially covered after other obligations."
+    elif runway_months is not None and runway_months < runway_target_months:
+        stability_explanation = f"Near-term cash is covered, but runway is only {runway_months:.1f} of {runway_target_months:.1f} target months."
+    else:
+        stability_explanation = "Cash currently covers upcoming obligations, buffer, and runway is on track."
+
+    portfolio_projection = _project_portfolio_debt_free(debts, recurring_extra_payment=recurring_extra_payment)
+    if portfolio_projection.get("ok"):
+        excluded_count = len(portfolio_projection.get("excluded_debts") or [])
+        if portfolio_projection.get("months", 0) == 0 and not priority_debt:
+            countdown_explanation = "No active debt balance is on file right now."
+        else:
+            countdown_explanation = (
+                f"Assumes each debt keeps its current minimum and the current extra payment suggestion of ${recurring_extra_payment:.0f}/month can repeat."
+                if recurring_extra_payment > 0
+                else "Assumes each debt keeps its current minimum payment and rates stay flat."
+            )
+        if excluded_count > 0:
+            countdown_explanation += f" {excluded_count} debt(s) were excluded because minimum payments are missing."
+        debt_free_countdown = {
+            "estimated_months_remaining": int(portfolio_projection["months"]),
+            "priority_debt": {
+                "id": priority_debt.id,
+                "name": priority_debt.name,
+                "apr": priority_debt.apr,
+                "balance": round(_to_float(priority_debt.balance, 0.0), 2),
+            } if priority_debt else None,
+            "modeled_debt_count": portfolio_projection.get("modeled_debt_count", 0),
+            "excluded_debts": portfolio_projection.get("excluded_debts", []),
+            "is_partial": excluded_count > 0,
+            "formula": "Simulated month by month: accrue interest, pay minimums, then apply the current extra-payment recommendation to the highest-APR balance.",
+            "explanation": countdown_explanation,
+        }
+    else:
+        debt_free_countdown = {
+            "estimated_months_remaining": None,
+            "priority_debt": {
+                "id": priority_debt.id,
+                "name": priority_debt.name,
+                "apr": priority_debt.apr,
+                "balance": round(_to_float(priority_debt.balance, 0.0), 2),
+            } if priority_debt else None,
+            "modeled_debt_count": portfolio_projection.get("modeled_debt_count", 0),
+            "excluded_debts": portfolio_projection.get("excluded_debts", []),
+            "is_partial": False,
+            "formula": "Needs positive balances plus usable minimum payments on file for simulation.",
+            "explanation": "The debt-free countdown could not be estimated reliably from the current debt inputs.",
+        }
+
+    fi_components = []
+    if fi_cash_target and fi_cash_target > 0:
+        cash_progress = _clamp01(cash_total / fi_cash_target)
+        fi_components.append({
+            "label": fi_target_label,
+            "weight": 40,
+            "progress": round(cash_progress * 100.0, 1),
+            "explanation": f"Cash is {round(cash_progress * 100)}% of the ${fi_cash_target:.0f} target.",
+        })
+
+    if runway_months is not None and runway_target_months > 0:
+        runway_progress = _clamp01(runway_months / runway_target_months)
+        fi_components.append({
+            "label": "Runway target",
+            "weight": 35,
+            "progress": round(runway_progress * 100.0, 1),
+            "explanation": f"Runway is {runway_months:.1f} months toward a {runway_target_months:.1f}-month resilience target.",
+        })
+
+    debt_drag_progress = 1.0 if debt_snapshot["total_balance"] <= 0 else _clamp01(cash_total / (cash_total + debt_snapshot["total_balance"]))
+    fi_components.append({
+        "label": "Debt drag",
+        "weight": 25,
+        "progress": round(debt_drag_progress * 100.0, 1),
+        "explanation": (
+            "No active debt balance is reducing liquidity."
+            if debt_snapshot["total_balance"] <= 0
+            else f"Cash is {round(debt_drag_progress * 100)}% of cash plus active debt, which is a conservative debt-drag proxy."
+        ),
+    })
+
+    fi_weight = sum(item["weight"] for item in fi_components)
+    fi_progress_value = _round_clean(sum(item["weight"] * item["progress"] for item in fi_components) / max(fi_weight, 1))
+
+    impact_payload = {
+        "recommended_extra_payment": recurring_extra_payment,
+        "target_debt": {
+            "id": priority_debt.id,
+            "name": priority_debt.name,
+            "apr": priority_debt.apr,
+            "balance": round(_to_float(priority_debt.balance, 0.0), 2),
+            "minimum_due": round(_to_float(priority_debt.minimum_due, 0.0), 2),
+        } if priority_debt else None,
+        "estimated_interest_saved": None,
+        "estimated_months_faster": None,
+        "estimated_payoff_months_with_extra": None,
+        "formula": "Compare target debt payoff using minimum only versus minimum plus the current extra-payment recommendation each month.",
+        "assumptions": [
+            "APR and minimum payment stay constant.",
+            "The current extra-payment recommendation can be repeated monthly.",
+        ],
+        "explanation": "No extra debt payment is recommended right now.",
+    }
+
+    if priority_debt and recurring_extra_payment > 0:
+        minimum_due = _to_float(getattr(priority_debt, "minimum_due", None), 0.0)
+        if minimum_due > 0:
+            baseline_projection = _project_single_debt_payoff(priority_debt.balance, priority_debt.apr, minimum_due)
+            accelerated_projection = _project_single_debt_payoff(priority_debt.balance, priority_debt.apr, minimum_due + recurring_extra_payment)
+
+            if baseline_projection.get("ok") and accelerated_projection.get("ok"):
+                interest_saved = max(0.0, baseline_projection["interest_paid"] - accelerated_projection["interest_paid"])
+                months_faster = max(0, int(baseline_projection["months"] - accelerated_projection["months"]))
+                impact_payload.update({
+                    "estimated_interest_saved": round(interest_saved, 2),
+                    "estimated_months_faster": months_faster,
+                    "estimated_payoff_months_with_extra": int(accelerated_projection["months"]),
+                    "explanation": (
+                        f"Keeping the extra ${recurring_extra_payment:.0f}/month on {priority_debt.name} is estimated to cut "
+                        f"{months_faster} month(s) and save about ${interest_saved:.0f} on that balance."
+                    ),
+                })
+            else:
+                impact_payload["explanation"] = "The target debt has data on file, but its current minimum payment does not support a reliable payoff projection."
+        else:
+            impact_payload["explanation"] = "Add a minimum payment for the recommended target debt to unlock payoff-impact estimates."
+
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "window_days": window_days,
+        "buffer": round(float(buffer), 2),
+        "context": {
+            "cash_total": round(float(cash_total), 2),
+            "upcoming_total": round(float(upcoming_total), 2),
+            "safe_to_spend_today": round(float(safe_to_spend), 2),
+            "monthly_essentials_total": round(float(essentials_total), 2),
+            "monthly_essential_bills_total": round(float(bills_total), 2),
+            "monthly_debt_minimums_total": round(float(debt_mins_total), 2),
+            "runway_months": runway_months,
+            "runway_target_months": runway_target_months,
+            "emergency_target_amount": round(float(emergency_target_amount), 2),
+            "fi_cash_target_amount": round(float(fi_cash_target), 2),
+            "fi_cash_target_label": fi_target_label,
+            "debt_total_balance": debt_snapshot["total_balance"],
+            "weighted_apr": debt_snapshot["weighted_apr"],
+            "total_utilization_pct": utilization.get("total_utilization_pct"),
+        },
+        "financial_health": {
+            "score": financial_health_score,
+            "formula": "Weighted average of liquidity (35), runway (25), debt burden (20), minimum coverage (15), and utilization (5 when limits exist).",
+            "components": health_components,
+        },
+        "stability_meter": {
+            "label": stability_label,
+            "value": stability_value,
+            "formula": "Weighted average of STS safety (40), upcoming-obligation coverage (30), runway progress (20), and debt-minimum coverage (10).",
+            "explanation": stability_explanation,
+        },
+        "debt_free_countdown": debt_free_countdown,
+        "fi_progress": {
+            "percent": fi_progress_value,
+            "formula": "Weighted average of cash-target progress (40), runway progress (35), and debt-drag reduction (25).",
+            "explanation": "Conservative FI proxy based on resilience and debt drag, not a full retirement model.",
+            "components": fi_components,
+        },
+        "next_best_dollar_impact": impact_payload,
+        "recommendation": recommendation,
+    }
