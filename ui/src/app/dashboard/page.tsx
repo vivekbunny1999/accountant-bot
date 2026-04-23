@@ -408,6 +408,19 @@ function stabilityTone(label?: string | null) {
   }
 }
 
+function insightTone(severity?: string | null) {
+  switch ((severity || "").toLowerCase()) {
+    case "critical":
+      return "border-red-500/20 bg-red-500/10 text-red-200";
+    case "warning":
+      return "border-amber-500/20 bg-amber-500/10 text-amber-200";
+    case "success":
+      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-200";
+    default:
+      return "border-sky-500/20 bg-sky-500/10 text-sky-200";
+  }
+}
+
 function fmtMonthsCompact(months?: number | null) {
   if (months == null) return "Needs data";
   if (months <= 0) return "Debt-free";
@@ -748,6 +761,15 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
   const intelligenceContext = intelligence?.context ?? null;
   const healthTone = scoreTone(healthScore);
   const stabilityToneClass = stabilityTone(stabilityMeter?.label);
+  const osInsights = useMemo(
+    () => (intelligence?.insights?.items || []).slice(0, 5),
+    [intelligence]
+  );
+  const whatToDoNext = intelligence?.insights?.what_to_do_next ?? osInsights[0] ?? null;
+  const secondaryInsights = useMemo(
+    () => osInsights.filter((item) => item.key !== whatToDoNext?.key).slice(0, 4),
+    [osInsights, whatToDoNext]
+  );
 
   /** =========================
    * Trend: sum balances by statement end-month
@@ -1105,6 +1127,72 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 <div className="mt-1 text-sm text-zinc-200/90">{a.body}</div>
               </div>
             ))}
+          </div>
+        )}
+
+        {settings.show_financial_os_panels && whatToDoNext && (
+          <div className="grid gap-3 xl:grid-cols-[1.35fr,1fr]">
+            <div className="rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_35%),#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">What To Do Next</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Backend coaching based on your current STS, obligations, and tracked spend.
+                  </div>
+                </div>
+                <div className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${insightTone(whatToDoNext.severity)}`}>
+                  {whatToDoNext.severity}
+                </div>
+              </div>
+
+              <div className="mt-5 max-w-3xl text-2xl font-semibold leading-tight text-zinc-100 sm:text-3xl">
+                {whatToDoNext.title}
+              </div>
+
+              <div className="mt-4 max-w-2xl text-sm leading-6 text-zinc-300">
+                {whatToDoNext.explanation}
+              </div>
+
+              <div className="mt-5 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Suggested action</div>
+                <div className="mt-2 text-sm font-medium leading-6 text-zinc-100">
+                  {whatToDoNext.suggested_action}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Top Insights</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Low-noise coaching and alerts from the backend.
+                  </div>
+                </div>
+                <div className="text-xs text-zinc-500">{osInsights.length} items</div>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {secondaryInsights.length ? (
+                  secondaryInsights.map((insight) => (
+                    <div key={insight.key} className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="text-sm font-medium leading-5 text-zinc-100">{insight.title}</div>
+                        <div className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${insightTone(insight.severity)}`}>
+                          {insight.severity}
+                        </div>
+                      </div>
+                      <div className="mt-2 text-xs leading-5 text-zinc-400">{insight.explanation}</div>
+                      <div className="mt-3 text-xs font-medium text-zinc-200">{insight.suggested_action}</div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-sm text-zinc-400">
+                    Additional insights are loading from the backend.
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 

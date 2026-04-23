@@ -6280,6 +6280,714 @@ def _project_portfolio_debt_free(debts: list, recurring_extra_payment: float, ma
     }
 
 
+def _insight_priority_rank(severity: str) -> int:
+    return {
+        "critical": 0,
+        "warning": 1,
+        "info": 2,
+        "success": 3,
+    }.get((severity or "info").strip().lower(), 2)
+
+
+def _build_os_insight(
+    *,
+    key: str,
+    title: str,
+    severity: str,
+    explanation: str,
+    suggested_action: str,
+    sources: list[str],
+    rule: str,
+    score: float = 0.0,
+) -> dict:
+    return {
+        "key": key,
+        "title": title,
+        "severity": severity,
+        "explanation": explanation,
+        "suggested_action": suggested_action,
+        "sources": sources,
+        "rule": rule,
+        "_score": round(_to_float(score, 0.0), 2),
+    }
+
+
+def _insight_source_label(source: str) -> str:
+    return {
+        "statement": "statement transactions",
+        "cash": "cash-statement transactions",
+        "manual": "manual transactions",
+        "plaid": "Plaid transactions",
+        "financial_os": "Financial OS cash and obligation data",
+    }.get((source or "").strip().lower(), "tracked transactions")
+
+
+def _insight_recency_note(latest_date: Optional[date]) -> str:
+    if not latest_date:
+        return ""
+    age_days = (date.today() - latest_date).days
+    if age_days <= 7:
+        return ""
+    return f" Based on the latest tracked activity ending {latest_date.isoformat()}."
+
+
+def _normalize_insight_category(raw_value: Optional[str]) -> str:
+    text = (raw_value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in {"other", "uncategorized", "unknown"}:
+        return ""
+    if "_" in text or text.isupper():
+        text = text.replace("_", " ").strip().title()
+    return text
+
+
+def _infer_spend_category(
+    *,
+    raw_category: Optional[str] = None,
+    description: Optional[str] = None,
+    merchant: Optional[str] = None,
+    plaid_primary: Optional[str] = None,
+    plaid_detailed: Optional[str] = None,
+) -> str:
+    for candidate in (raw_category, plaid_detailed, plaid_primary):
+        normalized = _normalize_insight_category(candidate)
+        if normalized:
+            return normalized
+
+    text = f"{description or ''} {merchant or ''}".strip().lower()
+    if not text:
+        return "Other"
+    if any(token in text for token in ["rent", "lease", "mortgage", "apartment"]):
+        return "Housing"
+    if any(token in text for token in ["electric", "energy", "water", "internet", "utility", "comcast", "att", "verizon"]):
+        return "Utilities"
+    if any(token in text for token in ["aldi", "kroger", "meijer", "costco", "grocery", "walmart neighborhood"]):
+        return "Groceries"
+    if any(token in text for token in ["restaurant", "doordash", "ubereats", "grill", "cafe", "coffee", "starbucks", "arbys", "mcdonald"]):
+        return "Dining"
+    if any(token in text for token in ["shell", "chevron", "exxon", "bp ", "speedway", "gas"]):
+        return "Fuel"
+    if any(token in text for token in ["netflix", "spotify", "hulu", "prime", "icloud", "apple.com/bill", "youtube"]):
+        return "Subscriptions"
+    if any(token in text for token in ["amazon", "target", "best buy", "walmart", "oculus"]):
+        return "Shopping"
+    if any(token in text for token in ["doctor", "pharmacy", "hospital", "health"]):
+        return "Medical"
+    if any(token in text for token in ["movie", "theater", "steam", "playstation", "xbox"]):
+        return "Entertainment"
+    return "Other"
+
+
+def _looks_like_non_spend(description: Optional[str], category: Optional[str] = None, txn_type: Optional[str] = None) -> bool:
+    text = f"{description or ''} {category or ''} {txn_type or ''}".strip().lower()
+    if not text:
+        return False
+    keywords = [
+        "payment",
+        "pymt",
+        "refund",
+        "reversal",
+        "credit",
+        "deposit",
+        "payroll",
+        "income",
+        "transfer",
+        "withdrawal to ",
+        "deposit from ",
+        "internal transfer",
+        "interest paid",
+    ]
+    return any(keyword in text for keyword in keywords)
+
+
+def _source_window(rows: list[dict], days: int) -> tuple[list[dict], Optional[date]]:
+    if not rows:
+        return [], None
+    latest = max((row["date"] for row in rows if row.get("date")), default=None)
+    if not latest:
+        return [], None
+    cutoff = latest - timedelta(days=max(1, int(days or 1)) - 1)
+    return [row for row in rows if row.get("date") and row["date"] >= cutoff], latest
+
+
+def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dict[str, list[dict]], dict[str, dict]]:
+    out = {
+        "statement": [],
+        "cash": [],
+        "manual": [],
+        "plaid": [],
+    }
+
+    card_rows = (
+        db.query(Transaction, Statement)
+        .join(Statement, Statement.id == Transaction.statement_id)
+        .filter(Statement.user_id == user_id)
+        .all()
+    )
+    for txn, stmt in card_rows:
+        posted = _parse_posted_date(getattr(txn, "posted_date", None))
+        amount = _to_float(getattr(txn, "amount", None), 0.0)
+        description = (getattr(txn, "description", None) or "").strip()
+        txn_type = (getattr(txn, "txn_type", None) or "").strip()
+        if not posted or amount <= 0 or not description or _looks_like_non_spend(description, getattr(txn, "category", None), txn_type):
+            continue
+        out["statement"].append({
+            "source": "statement",
+            "date": posted,
+            "amount": round(abs(amount), 2),
+            "merchant": description,
+            "merchant_norm": _normalize_merchant_local(description),
+            "category": _infer_spend_category(
+                raw_category=getattr(txn, "category", None),
+                description=description,
+            ),
+            "reference": getattr(stmt, "account_label", None) or "Statement",
+        })
+
+    cash_rows = (
+        db.query(CashTransaction, CashAccount)
+        .join(CashAccount, CashAccount.id == CashTransaction.cash_account_id)
+        .filter(CashAccount.user_id == user_id)
+        .all()
+    )
+    for txn, account in cash_rows:
+        posted = _parse_posted_date(getattr(txn, "posted_date", None))
+        raw_amount = _to_float(getattr(txn, "amount", None), 0.0)
+        description = (getattr(txn, "description", None) or "").strip()
+        raw_category = getattr(txn, "category", None)
+        txn_type = getattr(txn, "txn_type", None)
+        if not posted or not description or _looks_like_non_spend(description, raw_category, txn_type):
+            continue
+        is_outflow = raw_amount < 0 or str(txn_type or "").strip().lower() in {"debit", "fee", "withdrawal"}
+        if not is_outflow:
+            continue
+        out["cash"].append({
+            "source": "cash",
+            "date": posted,
+            "amount": round(abs(raw_amount), 2),
+            "merchant": description,
+            "merchant_norm": _normalize_merchant_local(description),
+            "category": _infer_spend_category(
+                raw_category=raw_category,
+                description=description,
+            ),
+            "reference": getattr(account, "account_label", None) or "Cash",
+        })
+
+    manual_rows = (
+        db.query(ManualTransaction)
+        .filter(ManualTransaction.user_id == user_id)
+        .all()
+    )
+    for txn in manual_rows:
+        posted = _iso_to_date(getattr(txn, "date", None))
+        amount = _to_float(getattr(txn, "amount", None), 0.0)
+        description = (getattr(txn, "description", None) or "").strip() or "Manual entry"
+        raw_category = getattr(txn, "category", None)
+        if not posted or amount <= 0 or _looks_like_non_spend(description, raw_category, None):
+            continue
+        out["manual"].append({
+            "source": "manual",
+            "date": posted,
+            "amount": round(abs(amount), 2),
+            "merchant": description,
+            "merchant_norm": _normalize_merchant_local(description),
+            "category": _infer_spend_category(
+                raw_category=raw_category,
+                description=description,
+            ),
+            "reference": "Manual",
+        })
+
+    plaid_rows = (
+        db.query(PlaidTransaction, PlaidAccount, PlaidItem)
+        .join(PlaidAccount, PlaidTransaction.plaid_account_id == PlaidAccount.id)
+        .join(PlaidItem, PlaidTransaction.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidTransaction.user_id == user_id,
+            PlaidAccount.user_id == user_id,
+            PlaidItem.user_id == user_id,
+            or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
+            or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
+        )
+        .all()
+    )
+    for txn, account, item in plaid_rows:
+        posted = _iso_to_date(getattr(txn, "posted_date", None))
+        amount = _to_float(getattr(txn, "amount", None), 0.0)
+        merchant = (getattr(txn, "merchant_name", None) or getattr(txn, "name", None) or "").strip()
+        if not posted or amount <= 0 or not merchant or getattr(txn, "pending", False):
+            continue
+        if _looks_like_non_spend(merchant, getattr(txn, "category_primary", None), None):
+            continue
+        out["plaid"].append({
+            "source": "plaid",
+            "date": posted,
+            "amount": round(abs(amount), 2),
+            "merchant": merchant,
+            "merchant_norm": _normalize_merchant_local(merchant),
+            "category": _infer_spend_category(
+                description=merchant,
+                merchant=merchant,
+                plaid_primary=getattr(txn, "category_primary", None),
+                plaid_detailed=getattr(txn, "category_detailed", None),
+            ),
+            "reference": getattr(account, "name", None) or getattr(item, "institution_name", None) or "Plaid",
+        })
+
+    coverage = {}
+    for source, rows in out.items():
+        latest = max((row["date"] for row in rows), default=None)
+        coverage[source] = {
+            "transactions": len(rows),
+            "latest_date": latest.isoformat() if latest else None,
+            "source_label": _insight_source_label(source),
+        }
+
+    return out, coverage
+
+
+def _build_spending_leak_insight(source_activity: dict[str, list[dict]]) -> Optional[dict]:
+    candidates = []
+
+    for source, rows in source_activity.items():
+        window_rows, latest_date = _source_window(rows, 30)
+        if len(window_rows) < 3:
+            continue
+
+        total_spend = round(sum(_to_float(row.get("amount"), 0.0) for row in window_rows), 2)
+        if total_spend < 60:
+            continue
+
+        by_category = defaultdict(float)
+        category_counts = defaultdict(int)
+        for row in window_rows:
+            category = (row.get("category") or "Other").strip() or "Other"
+            by_category[category] += _to_float(row.get("amount"), 0.0)
+            category_counts[category] += 1
+
+        if by_category:
+            top_category = max(by_category.items(), key=lambda item: item[1])[0]
+            category_total = round(by_category[top_category], 2)
+            category_share = category_total / max(total_spend, 1.0)
+            if top_category not in {"Other"} and category_total >= 100 and category_share >= 0.35 and category_counts[top_category] >= 2:
+                severity = "warning"
+                if category_total >= 250 or category_share >= 0.55:
+                    severity = "critical"
+                elif category_share < 0.45 and category_total < 180:
+                    severity = "info"
+                candidates.append(_build_os_insight(
+                    key=f"spending_leak_category_{source}",
+                    title=f"{top_category} spending is running high.",
+                    severity=severity,
+                    explanation=(
+                        f"Your {_insight_source_label(source)} show {top_category} at ${category_total:.0f} over the latest 30-day window "
+                        f"({round(category_share * 100)}% of tracked spend).{_insight_recency_note(latest_date)}"
+                    ),
+                    suggested_action=f"Cap {top_category.lower()} spending for the next 7 days and redirect that room to bills or buffer.",
+                    sources=[source],
+                    rule="Trigger when one category is at least $100, at least 35% of the source's latest 30-day spend, and appears 2+ times.",
+                    score=category_total * category_share,
+                ))
+
+        merchant_groups = defaultdict(list)
+        for row in window_rows:
+            merchant_groups[row.get("merchant_norm") or "unknown"].append(row)
+
+        for merchant_norm, items in merchant_groups.items():
+            count = len(items)
+            if count < 3:
+                continue
+            total = round(sum(_to_float(item.get("amount"), 0.0) for item in items), 2)
+            avg_amount = total / max(count, 1)
+            if total < 30 or avg_amount < 3 or avg_amount > 25:
+                continue
+            merchant_name = (items[-1].get("merchant") or "Small charges").strip()
+            severity = "warning" if total >= 60 or count >= 5 else "info"
+            candidates.append(_build_os_insight(
+                key=f"spending_leak_small_{source}_{merchant_norm[:18]}",
+                title=f"Small {merchant_name} charges are stacking up.",
+                severity=severity,
+                explanation=(
+                    f"Your {_insight_source_label(source)} show {count} charges totaling ${total:.0f} "
+                    f"(about ${avg_amount:.0f} each) in the latest 30-day window.{_insight_recency_note(latest_date)}"
+                ),
+                suggested_action=f"Pause or bundle {merchant_name} spending this week so the small charges stop leaking cash.",
+                sources=[source],
+                rule="Trigger when the same merchant appears 3+ times in the latest 30-day window, averages $3-$25, and totals at least $30.",
+                score=total + (count * 5),
+            ))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (_insight_priority_rank(item["severity"]), -item["_score"], item["title"]))
+    return candidates[0]
+
+
+def _build_burn_rate_insight(
+    *,
+    source_activity: dict[str, list[dict]],
+    window_days: int,
+    safe_to_spend: float,
+) -> Optional[dict]:
+    candidates = []
+    normalized_window_days = max(1, int(window_days or 1))
+
+    for source, rows in source_activity.items():
+        recent_rows, latest_date = _source_window(rows, 14)
+        if len(recent_rows) < 2:
+            continue
+        recent_spend = round(sum(_to_float(row.get("amount"), 0.0) for row in recent_rows), 2)
+        if recent_spend < 25:
+            continue
+
+        daily_burn = recent_spend / 14.0
+        projected_window_spend = round(daily_burn * normalized_window_days, 2)
+
+        if safe_to_spend <= 0:
+            severity = "warning"
+        elif projected_window_spend > safe_to_spend * 1.15:
+            severity = "warning"
+        elif projected_window_spend > safe_to_spend * 0.75:
+            severity = "info"
+        else:
+            severity = "success"
+
+        weekly_cap = round((max(safe_to_spend, 0.0) / normalized_window_days) * 7, 2)
+        candidates.append(_build_os_insight(
+            key=f"burn_rate_{source}",
+            title=(
+                "Current burn rate is outrunning your STS window."
+                if severity in {"warning", "critical"}
+                else "Current burn rate still fits inside your STS window."
+            ),
+            severity=severity,
+            explanation=(
+                f"Based on {_insight_source_label(source)}, the latest 14-day pace is about ${daily_burn:.0f}/day, "
+                f"or ${projected_window_spend:.0f} over {normalized_window_days} days, versus STS of ${safe_to_spend:.0f}."
+                f"{_insight_recency_note(latest_date)}"
+            ),
+            suggested_action=(
+                f"Keep discretionary spending under about ${weekly_cap:.0f} per week until the projected pace fits under STS."
+                if severity in {"warning", "critical"}
+                else f"Keep weekly discretionary spending near ${weekly_cap:.0f} or lower to stay inside STS."
+            ),
+            sources=[source],
+            rule="Use the latest 14-day spend window for one source, convert it to a daily pace, then project it across the STS window and compare it with current STS.",
+            score=projected_window_spend,
+        ))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (_insight_priority_rank(item["severity"]), -item["_score"], item["title"]))
+    return candidates[0]
+
+
+def _build_upcoming_risk_insight(
+    *,
+    window_days: int,
+    cash_total: float,
+    upcoming_total: float,
+    buffer: float,
+    safe_to_spend: float,
+    upcoming_debt_minimum_total: float,
+    available_for_minimums: float,
+) -> dict:
+    if safe_to_spend < 0:
+        return _build_os_insight(
+            key="upcoming_risk_shortfall",
+            title=f"Cash is short for the next {window_days} days.",
+            severity="critical",
+            explanation=(
+                f"Cash is ${cash_total:.0f}, but upcoming obligations plus buffer total ${(upcoming_total + buffer):.0f}, "
+                f"leaving STS at ${safe_to_spend:.0f}."
+            ),
+            suggested_action="Pause extra debt payments and protect bills, minimums, and buffer first.",
+            sources=["financial_os"],
+            rule="Critical when cash_total - upcoming_total - buffer is negative.",
+            score=abs(safe_to_spend),
+        )
+
+    if upcoming_debt_minimum_total > 0 and available_for_minimums < upcoming_debt_minimum_total:
+        gap = round(upcoming_debt_minimum_total - available_for_minimums, 2)
+        return _build_os_insight(
+            key="upcoming_risk_minimums",
+            title="Debt minimum coverage is tight inside the STS window.",
+            severity="warning",
+            explanation=(
+                f"After non-debt obligations and buffer, about ${available_for_minimums:.0f} is left for debt minimums "
+                f"against ${upcoming_debt_minimum_total:.0f} due soon."
+            ),
+            suggested_action=f"Keep at least ${gap:.0f} more in cash before making extra payments.",
+            sources=["financial_os"],
+            rule="Warning when debt minimums due in the window exceed cash left after non-debt obligations and buffer.",
+            score=gap,
+        )
+
+    low_cushion = max(50.0, buffer * 0.5)
+    if safe_to_spend <= low_cushion:
+        return _build_os_insight(
+            key="upcoming_risk_low_cushion",
+            title="Upcoming bills are covered, but the cushion is thin.",
+            severity="warning",
+            explanation=(
+                f"Upcoming obligations total ${upcoming_total:.0f} and the remaining STS after a ${buffer:.0f} buffer is only ${safe_to_spend:.0f}."
+            ),
+            suggested_action="Avoid new discretionary spending until the next cash inflow lands.",
+            sources=["financial_os"],
+            rule="Warning when STS stays positive but is at or below max($50, 50% of buffer).",
+            score=low_cushion - safe_to_spend,
+        )
+
+    return _build_os_insight(
+        key="upcoming_risk_covered",
+        title=f"Upcoming obligations are covered for the next {window_days} days.",
+        severity="success",
+        explanation=(
+            f"Cash covers ${upcoming_total:.0f} of upcoming obligations plus a ${buffer:.0f} buffer, "
+            f"leaving STS at ${safe_to_spend:.0f}."
+        ),
+        suggested_action="Keep bills and minimums protected, then use the remaining STS intentionally.",
+        sources=["financial_os"],
+        rule="Success when cash_total - upcoming_total - buffer stays above the low-cushion threshold and minimums are covered.",
+        score=safe_to_spend,
+    )
+
+
+def _build_stability_insight(
+    *,
+    stability_label: str,
+    stability_value: float,
+    stability_explanation: str,
+    runway_months: Optional[float],
+    runway_target_months: float,
+) -> dict:
+    label = (stability_label or "Stable").strip()
+    lowered = label.lower()
+    severity = "success" if lowered in {"strong", "stable"} else "warning"
+    title = (
+        "Debt minimums are covered, but stability is fragile."
+        if lowered == "fragile"
+        else "Short-term stability is improving, but still needs margin."
+        if lowered == "stabilizing"
+        else "Short-term stability is holding."
+    )
+    action = "Hold extra cash in checking until STS and runway improve."
+    if lowered in {"strong", "stable"}:
+        action = "Keep following the current plan and use surplus deliberately, not reactively."
+    elif runway_months is not None and runway_months < runway_target_months:
+        action = f"Keep building cash until runway moves closer to {runway_target_months:.1f} months."
+
+    return _build_os_insight(
+        key="stability_meter_summary",
+        title=title,
+        severity=severity,
+        explanation=f"{stability_explanation} Stability meter: {stability_value}/100 ({label}).",
+        suggested_action=action,
+        sources=["financial_os"],
+        rule="Uses the existing stability meter: STS safety (40), obligation coverage (30), runway progress (20), and debt-minimum coverage (10).",
+        score=100.0 - _to_float(stability_value, 0.0),
+    )
+
+
+def _build_spending_data_insight(source_coverage: dict[str, dict]) -> dict:
+    loaded_sources = [
+        details.get("source_label")
+        for details in source_coverage.values()
+        if _to_float(details.get("transactions"), 0.0) > 0
+    ]
+    loaded_text = ", ".join(loaded_sources) if loaded_sources else "no transaction sources"
+    return _build_os_insight(
+        key="spending_data_coverage",
+        title="Recent spend coaching is waiting on transaction data.",
+        severity="info",
+        explanation=f"Leak detection and burn-rate coaching only saw {loaded_text}.",
+        suggested_action="Import a recent statement, add manual transactions, or sync Plaid to unlock richer coaching.",
+        sources=[source for source, details in source_coverage.items() if _to_float(details.get('transactions'), 0.0) > 0],
+        rule="Fallback when no spend source has enough recent transactions for leak or burn-rate analysis.",
+        score=0.0,
+    )
+
+
+def _build_what_to_do_next_insight(
+    *,
+    safe_to_spend: float,
+    buffer: float,
+    upcoming_total: float,
+    stability_value: float,
+    stability_label: str,
+    priority_debt: Optional[Debt],
+    recurring_extra_payment: float,
+    runway_months: Optional[float],
+    runway_target_months: float,
+    upcoming_debt_minimum_total: float,
+    available_for_minimums: float,
+) -> dict:
+    if safe_to_spend < 0:
+        return _build_os_insight(
+            key="what_to_do_next",
+            title="Pause extra debt payments and cover bills first.",
+            severity="critical",
+            explanation=(
+                f"STS is ${safe_to_spend:.0f} after ${upcoming_total:.0f} of upcoming obligations and a ${buffer:.0f} buffer."
+            ),
+            suggested_action="Use available cash for upcoming bills and minimums only until STS turns positive.",
+            sources=["financial_os"],
+            rule="If STS is negative, the next step is to stop extra paydown and protect obligations first.",
+            score=abs(safe_to_spend),
+        )
+
+    if upcoming_debt_minimum_total > 0 and available_for_minimums < upcoming_debt_minimum_total:
+        return _build_os_insight(
+            key="what_to_do_next",
+            title="Keep cash reserved for upcoming debt minimums this week.",
+            severity="warning",
+            explanation=(
+                f"Debt minimums due soon total ${upcoming_debt_minimum_total:.0f}, but only about ${available_for_minimums:.0f} is left after other obligations and buffer."
+            ),
+            suggested_action="Do not make extra payments until the due-soon minimums are fully covered.",
+            sources=["financial_os"],
+            rule="If debt minimums due soon are not fully covered after non-debt obligations and buffer, hold cash instead of paying extra.",
+            score=upcoming_debt_minimum_total - available_for_minimums,
+        )
+
+    if runway_months is not None and runway_months < runway_target_months and stability_value < 60:
+        keep_amount = max(min(safe_to_spend, max(buffer, 50.0)), 0.0)
+        return _build_os_insight(
+            key="what_to_do_next",
+            title=f"Keep the next ${keep_amount:.0f} in cash this week.",
+            severity="info",
+            explanation=(
+                f"STS is positive, but stability is {stability_label.lower()} and runway is only {runway_months:.1f} of {runway_target_months:.1f} target months."
+            ),
+            suggested_action="Let cash build before resuming aggressive extra debt payments.",
+            sources=["financial_os"],
+            rule="If STS is positive but stability is below 60 and runway is below target, prioritize cash retention over extra paydown.",
+            score=60.0 - stability_value,
+        )
+
+    if priority_debt and recurring_extra_payment > 0:
+        debt_name = priority_debt.name or "your highest-APR debt"
+        return _build_os_insight(
+            key="what_to_do_next",
+            title=f"Put extra ${recurring_extra_payment:.0f} toward {debt_name}.",
+            severity="success" if stability_value >= 60 else "info",
+            explanation=(
+                f"STS is healthy at ${safe_to_spend:.0f}, and the current priority debt is {debt_name}."
+            ),
+            suggested_action=f"Apply the extra payment to {debt_name} after bills, minimums, and buffer stay protected.",
+            sources=["financial_os"],
+            rule="If STS is positive and bills/minimums are covered, direct the extra amount to the highest-APR active debt.",
+            score=recurring_extra_payment,
+        )
+
+    return _build_os_insight(
+        key="what_to_do_next",
+        title="Hold steady and protect your current cash cushion.",
+        severity="success" if stability_value >= 60 else "info",
+        explanation=f"STS is ${safe_to_spend:.0f} and short-term stability is {stability_label.lower()}.",
+        suggested_action="Keep bills protected and avoid adding new fixed spending until the next review cycle.",
+        sources=["financial_os"],
+        rule="Fallback when no extra debt payment is available and cash coverage is acceptable.",
+        score=safe_to_spend,
+    )
+
+
+def _build_coaching_insights_payload(
+    *,
+    db: Session,
+    user_id: str,
+    window_days: int,
+    buffer: float,
+    cash_total: float,
+    upcoming_total: float,
+    safe_to_spend: float,
+    stability_label: str,
+    stability_value: float,
+    stability_explanation: str,
+    runway_months: Optional[float],
+    runway_target_months: float,
+    priority_debt: Optional[Debt],
+    recurring_extra_payment: float,
+    upcoming_debt_minimum_total: float,
+    available_for_minimums: float,
+) -> dict:
+    source_activity, source_coverage = _collect_spending_activity_by_source(db, user_id)
+
+    what_to_do_next = _build_what_to_do_next_insight(
+        safe_to_spend=safe_to_spend,
+        buffer=buffer,
+        upcoming_total=upcoming_total,
+        stability_value=stability_value,
+        stability_label=stability_label,
+        priority_debt=priority_debt,
+        recurring_extra_payment=recurring_extra_payment,
+        runway_months=runway_months,
+        runway_target_months=runway_target_months,
+        upcoming_debt_minimum_total=upcoming_debt_minimum_total,
+        available_for_minimums=available_for_minimums,
+    )
+
+    candidates = [
+        what_to_do_next,
+        _build_upcoming_risk_insight(
+            window_days=window_days,
+            cash_total=cash_total,
+            upcoming_total=upcoming_total,
+            buffer=buffer,
+            safe_to_spend=safe_to_spend,
+            upcoming_debt_minimum_total=upcoming_debt_minimum_total,
+            available_for_minimums=available_for_minimums,
+        ),
+        _build_burn_rate_insight(
+            source_activity=source_activity,
+            window_days=window_days,
+            safe_to_spend=safe_to_spend,
+        ),
+        _build_spending_leak_insight(source_activity),
+        _build_stability_insight(
+            stability_label=stability_label,
+            stability_value=stability_value,
+            stability_explanation=stability_explanation,
+            runway_months=runway_months,
+            runway_target_months=runway_target_months,
+        ),
+    ]
+
+    deduped = []
+    seen_keys = set()
+    for item in candidates:
+        if not item:
+            continue
+        if item["key"] in seen_keys:
+            continue
+        seen_keys.add(item["key"])
+        deduped.append(item)
+
+    if len(deduped) < 3:
+        deduped.append(_build_spending_data_insight(source_coverage))
+
+    rest = deduped[1:]
+    rest.sort(key=lambda item: (_insight_priority_rank(item["severity"]), -item["_score"], item["title"]))
+    ordered = [deduped[0]] + rest[:4]
+
+    cleaned_items = []
+    for item in ordered:
+        cleaned = dict(item)
+        cleaned.pop("_score", None)
+        cleaned_items.append(cleaned)
+
+    return {
+        "what_to_do_next": cleaned_items[0] if cleaned_items else None,
+        "items": cleaned_items,
+        "source_coverage": source_coverage,
+    }
+
+
 @app.get("/os/intelligence")
 def os_intelligence(
     user_id: Optional[str] = None,
@@ -6618,6 +7326,25 @@ def os_intelligence(
         else:
             impact_payload["explanation"] = "Add a minimum payment for the recommended target debt to unlock payoff-impact estimates."
 
+    coaching_insights = _build_coaching_insights_payload(
+        db=db,
+        user_id=user_id,
+        window_days=window_days,
+        buffer=buffer,
+        cash_total=cash_total,
+        upcoming_total=upcoming_total,
+        safe_to_spend=safe_to_spend,
+        stability_label=stability_label,
+        stability_value=stability_value,
+        stability_explanation=stability_explanation,
+        runway_months=runway_months,
+        runway_target_months=runway_target_months,
+        priority_debt=priority_debt,
+        recurring_extra_payment=recurring_extra_payment,
+        upcoming_debt_minimum_total=upcoming_debt_minimum_total,
+        available_for_minimums=available_for_minimums,
+    )
+
     return {
         "ok": True,
         "user_id": user_id,
@@ -6659,4 +7386,5 @@ def os_intelligence(
         },
         "next_best_dollar_impact": impact_payload,
         "recommendation": recommendation,
+        "insights": coaching_insights,
     }
