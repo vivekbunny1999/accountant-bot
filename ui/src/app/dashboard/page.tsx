@@ -439,80 +439,15 @@ export default function DashboardPage() {
   }, []);
 
 
-useEffect(() => {
-  if (!userId) return;
-  let cancelled = false;
-
-  (async () => {
-    try {
-      setBillsLoading(true);
-      setBillsErr(null);
-
-      // use /os/state to get upcoming items + manual bills
-      const st = await getOsState({ user_id: userId, window_days: 21 } as any);
-      if (cancelled) return;
-
-      setBills((st?.manual_bills as any) || []);
-      // note: upcoming items are consumed from the `upcomingBills` memo below
-    } catch (e: any) {
-      if (!cancelled) setBillsErr(e?.message || "Failed to load bills");
-    } finally {
-      if (!cancelled) setBillsLoading(false);
-    }
-  })();
-
-  return () => {
-    cancelled = true;
-  };
-}, [userId]);
-
-
 // ===== Bills (Upcoming window) =====
-type Bill = {
-  id: number;
-  user_id: string;
-  name: string;
-  amount: number;
-  due_date: string; // "YYYY-MM-DD" (recommended)
-  frequency?: string | null;
-  is_active?: boolean;
-  autopay?: boolean;
-  category?: string | null;
-  notes?: string | null;
-  created_at?: string;
-  updated_at?: string;
-};
 
-   const [bills, setBills] = useState<Bill[]>([]);
    const [billsLoading, setBillsLoading] = useState(false);
    const [billsErr, setBillsErr] = useState<string | null>(null);
 
-const upcomingWindowDays = 21; // Phase 1 default; later we’ll read from settings if you want
+const upcomingWindowDays = 21; // Phase 1 fixed backend window
 
-const [upcomingItems, setUpcomingItems] = useState<any[]>([]);
+const [upcomingItems, setUpcomingItems] = useState<OsStateResponse["upcoming_items"]>([]);
 const [upcomingTotal, setUpcomingTotal] = useState(0);
-
-// map backend upcoming_items into client-friendly list (already filtered by window)
-useEffect(() => {
-  if (!userId) return;
-  let cancelled = false;
-  (async () => {
-    try {
-      const st = await getOsState({ user_id: userId, window_days: upcomingWindowDays } as any);
-      if (cancelled) return;
-      setUpcomingItems(st?.upcoming_items || []);
-      setUpcomingTotal(Number(st?.upcoming_total || 0));
-    } catch (e) {
-      if (!cancelled) {
-        setUpcomingItems([]);
-        setUpcomingTotal(0);
-      }
-    }
-  })();
-  return () => {
-    cancelled = true;
-  };
-}, [bills, upcomingWindowDays, userId]);
 
   // current month (dashboard fixed)
   const now = useMemo(() => new Date(), []);
@@ -527,8 +462,7 @@ useEffect(() => {
   const [cashErr, setCashErr] = useState<string | null>(null);
   const [txLoading, setTxLoading] = useState(false);
   const [txErr, setTxErr] = useState<string | null>(null);
-  const [osCashTotal, setOsCashTotal] = useState(0);
-  const [osCashSources, setOsCashSources] = useState<OsStateResponse["cash_sources"] | null>(null);
+  const [osState, setOsState] = useState<OsStateResponse | null>(null);
   const [nextBestDollar, setNextBestDollar] = useState<NextBestDollarResponse | null>(null);
   const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
   const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
@@ -643,8 +577,10 @@ useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      try {
-        const [stateRes, nbdRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.all([
+      setBillsLoading(true);
+      setBillsErr(null);
+
+      const [stateRes, nbdRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.allSettled([
           getOsState({ user_id: userId, window_days: upcomingWindowDays }),
           getNextBestDollar({
             user_id: userId,
@@ -654,20 +590,40 @@ useEffect(() => {
           getPlaidAccounts(userId),
           getPlaidTransactions({ user_id: userId, limit: 8 }),
         ]);
-        if (cancelled) return;
-        setOsCashTotal(Number(stateRes?.cash_total || 0));
-        setOsCashSources(stateRes?.cash_sources || null);
-        setNextBestDollar(nbdRes || null);
-        setPlaidAccounts(plaidAccountsRes?.accounts || []);
-        setPlaidTransactions(plaidTransactionsRes?.transactions || []);
-      } catch {
-        if (cancelled) return;
-        setOsCashTotal(0);
-        setOsCashSources(null);
+      if (cancelled) return;
+
+      if (stateRes.status === "fulfilled") {
+        const stateValue = stateRes.value;
+        setOsState(stateValue || null);
+        setUpcomingItems(stateValue?.upcoming_items || []);
+        setUpcomingTotal(Number(stateValue?.upcoming_total || 0));
+        setBillsErr(null);
+      } else {
+        setOsState(null);
+        setUpcomingItems([]);
+        setUpcomingTotal(0);
+        setBillsErr(stateRes.reason?.message || "Failed to load Financial OS state.");
+      }
+
+      if (nbdRes.status === "fulfilled") {
+        setNextBestDollar(nbdRes.value || null);
+      } else {
         setNextBestDollar(null);
+      }
+
+      if (plaidAccountsRes.status === "fulfilled") {
+        setPlaidAccounts(plaidAccountsRes.value?.accounts || []);
+      } else {
         setPlaidAccounts([]);
+      }
+
+      if (plaidTransactionsRes.status === "fulfilled") {
+        setPlaidTransactions(plaidTransactionsRes.value?.transactions || []);
+      } else {
         setPlaidTransactions([]);
       }
+
+      setBillsLoading(false);
     })();
 
     return () => {
@@ -699,17 +655,24 @@ useEffect(() => {
     return {
       hasCash: true,
       latest,
-      totalCash: osCashTotal > 0 ? osCashTotal : totalCash,
-      label:
-        osCashTotal > 0
-          ? `PDF ${fmtMoney(Number(osCashSources?.pdf_cash_total || 0))} • Plaid ${fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}`
-          : endDate,
+      totalCash,
+      label: endDate,
     };
-  }, [cashAccounts, osCashSources, osCashTotal]);
+  }, [cashAccounts]);
+
+  const osCashSources = osState?.cash_sources || null;
+  const financialOsCashTotal = nextBestDollar?.cash_total ?? osState?.cash_total ?? null;
+  const stsBreakdown = nextBestDollar?.breakdown || null;
+  const upcomingSummary = nextBestDollar?.upcoming_summary ?? osState?.upcoming_summary ?? null;
+  const upcomingItemsList = upcomingItems ?? [];
+  const financialOsCashLabel = osCashSources
+    ? `PDF ${fmtMoney(Number(osCashSources?.pdf_cash_total || 0))} | Plaid ${fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}`
+    : (cashTotals.hasCash ? `Latest PDF import ${cashTotals.label}` : "Backend Financial OS cash");
 
   const netWorthV1 = useMemo(() => {
-    return cashTotals.totalCash - totals.totalOutstanding;
-  }, [cashTotals.totalCash, totals.totalOutstanding]);
+    if (financialOsCashTotal == null) return null;
+    return financialOsCashTotal - totals.totalOutstanding;
+  }, [financialOsCashTotal, totals.totalOutstanding]);
 
   const plaidIncludedAccounts = useMemo(
     () => osCashSources?.plaid_accounts_included || [],
@@ -1017,11 +980,11 @@ useEffect(() => {
       cashIncome,
 
       cashAccountsCount: (cashAccounts || []).length,
-      cashTotalBalance: cashTotals.totalCash,
+      cashTotalBalance: financialOsCashTotal ?? cashTotals.totalCash,
       cashLoading,
       cashErr,
     };
-  }, [monthTxns, cashMonthTxns, cashAccounts, cashTotals.totalCash, cashLoading, cashErr, settings]);
+  }, [monthTxns, cashMonthTxns, cashAccounts, cashTotals.totalCash, cashLoading, cashErr, financialOsCashTotal, settings]);
 
   const stageUi = useMemo(() => stageBadge(monthMetrics.stage), [monthMetrics.stage]);
 
@@ -1093,47 +1056,65 @@ useEffect(() => {
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
-                {nextBestDollar ? fmtMoney(Number(nextBestDollar.safe_to_spend_today || 0)) : (monthMetrics.monthIncome > 0 ? fmtMoney(monthMetrics.sts) : "—")}
+                {nextBestDollar ? fmtMoney(Number(nextBestDollar.safe_to_spend_today || 0)) : "—"}
               </div>
 
-              <div className="mt-2 text-xs text-zinc-500">
-                Cash total{" "}
-                <span className="text-zinc-200">{fmtMoney(Number(nextBestDollar?.cash_total ?? cashTotals.totalCash))}</span>
-                {" = PDF "}
-                <span className="text-zinc-200">{fmtMoney(Number(osCashSources?.pdf_cash_total || 0))}</span>
-                {" + Plaid "}
-                <span className="text-zinc-200">{fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}</span>
-              </div>
-
-              <div className="mt-2 text-xs text-zinc-500">
-                Upcoming obligations{" "}
-                <span className="text-zinc-200">
-                  {fmtMoney(Number(nextBestDollar?.upcoming_total || upcomingTotal))}
-                </span>
-                {" = Bills "}
-                <span className="text-zinc-200">
-                  {fmtMoney(Number(nextBestDollar?.upcoming_summary?.bill_total || 0))}
-                </span>
-                {" + Manual "}
-                <span className="text-zinc-200">
-                  {fmtMoney(Number(nextBestDollar?.upcoming_summary?.manual_bill_total || 0))}
-                </span>
-                {" + Debt minimums "}
-                <span className="text-zinc-200">
-                  {fmtMoney(Number(nextBestDollar?.upcoming_summary?.debt_minimum_total || 0))}
-                </span>
-              </div>
-
-              <div className="mt-2 text-xs text-zinc-500">
-                Buffer{" "}
-                <span className="text-zinc-200">
-                  {fmtMoney(Number(nextBestDollar?.buffer ?? (settings.buffer_enabled ? settings.buffer_amount : 0)))}
-                </span>
-                {" • Formula: "}
-                <span className="text-zinc-200">
-                  {nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer"}
-                </span>
-              </div>
+              {stsBreakdown ? (
+                <div className="mt-4 space-y-2 text-xs text-zinc-500">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Total cash</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.total_cash || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>PDF cash</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.pdf_cash || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Plaid cash counted</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.plaid_cash_counted || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Duplicates skipped</span>
+                    <span className="font-mono text-zinc-200">
+                      {Number(stsBreakdown.duplicates_skipped || 0)}
+                      {Number(stsBreakdown.duplicates_skipped_balance || 0) > 0
+                        ? ` • ${fmtMoney(Number(stsBreakdown.duplicates_skipped_balance || 0))}`
+                        : ""}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Upcoming bills</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.upcoming_bills_total || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Manual obligations</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.manual_obligations_total || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Debt minimums</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.debt_minimums_total || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Upcoming total</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.upcoming_total || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Buffer</span>
+                    <span className="font-mono text-zinc-200">{fmtMoney(Number(stsBreakdown.buffer || 0))}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-300">
+                    <span>Final safe to spend</span>
+                    <span className="font-mono text-zinc-100">{fmtMoney(Number(stsBreakdown.final_safe_to_spend || 0))}</span>
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    {nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer"}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 text-xs text-zinc-500">
+                  Backend STS breakdown is loading.
+                </div>
+              )}
 
               <div className="mt-3 text-xs text-zinc-500">
                 Financial OS reads backend cash totals, including non-duplicate Plaid cash accounts, before applying upcoming obligations and buffer.
@@ -1212,14 +1193,17 @@ useEffect(() => {
                 </span>
               </div>
             </div>
-            {/* ===== Upcoming Bills (Phase 1) ===== */}
+            {/* ===== Upcoming Obligations (Phase 1) ===== */}
 <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
   <div className="flex items-center justify-between gap-3">
     <div>
-      <div className="text-sm font-semibold text-zinc-100">Upcoming Bills</div>
+      <div className="text-sm font-semibold text-zinc-100">Upcoming Obligations</div>
         <div className="mt-1 text-xs text-zinc-400">
         Next {upcomingWindowDays} days • total needed{" "}
         <span className="text-zinc-100 font-mono">{fmtMoney(upcomingTotal)}</span>
+      </div>
+      <div className="mt-1 text-xs text-zinc-500">
+        Bills {fmtMoney(Number(upcomingSummary?.bill_total || 0))} • Manual {fmtMoney(Number(upcomingSummary?.manual_bill_total || 0))} • Debt minimums {fmtMoney(Number(upcomingSummary?.debt_minimum_total || 0))}
       </div>
     </div>
 
@@ -1232,7 +1216,7 @@ useEffect(() => {
     </Link>
   </div>
 
-  {billsLoading && <div className="mt-4 text-sm text-zinc-400">Loading bills…</div>}
+  {billsLoading && <div className="mt-4 text-sm text-zinc-400">Loading obligations…</div>}
   {billsErr && <div className="mt-4 text-sm text-red-400">Error: {billsErr}</div>}
 
   {!billsLoading && !billsErr && (
@@ -1240,19 +1224,23 @@ useEffect(() => {
       <table className="w-full text-left text-sm">
         <thead className="text-xs text-zinc-400">
           <tr className="border-b border-white/10">
-            <th className="py-3 pr-4">bill</th>
+            <th className="py-3 pr-4">obligation</th>
             <th className="py-3 pr-4">due</th>
             <th className="py-3 pr-4">frequency</th>
             <th className="py-3 pr-0 text-right">amount</th>
           </tr>
         </thead>
         <tbody className="text-zinc-200">
-          {upcomingItems.map((b: any) => (
+          {upcomingItemsList.map((b: any) => (
             <tr key={b.id} className="border-b border-white/5 hover:bg-white/5">
               <td className="py-3 pr-4">
                 <div className="text-zinc-100">{b.name}</div>
                 <div className="mt-1 text-xs text-zinc-500">
-                  {b.type === "debt_minimum" ? "Debt minimum" : (b.autopay ? "Autopay" : "Manual")}
+                  {b.type === "debt_minimum"
+                    ? "Debt minimum"
+                    : b.type === "manual_bill"
+                      ? "Manual obligation"
+                      : (b.autopay ? "Autopay bill" : "Bill")}
                   {b.category ? ` • ${b.category}` : ""}
                 </div>
               </td>
@@ -1264,10 +1252,10 @@ useEffect(() => {
             </tr>
           ))}
 
-          {upcomingItems.length === 0 && (
+          {upcomingItemsList.length === 0 && (
             <tr>
               <td className="py-6 text-zinc-400" colSpan={4}>
-                No bills due in the next {upcomingWindowDays} days.
+                No obligations due in the next {upcomingWindowDays} days.
               </td>
             </tr>
           )}
@@ -1277,8 +1265,7 @@ useEffect(() => {
   )}
 
   <div className="mt-3 text-xs text-zinc-500">
-    Phase 1: Bills are manual entries from Settings. Next step we’ll add minimum payments + recurring detection
-    and compute “money needed until next paycheck”.
+    Backend Financial OS now surfaces bills, manual obligations, and debt minimums from one upcoming-obligations window.
   </div>
 </div>
             {/* Debt strategy + caps */}
@@ -1480,10 +1467,10 @@ useEffect(() => {
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
             <div className="text-xs text-zinc-400">Total Cash</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">
-              {cashLoading ? "…" : fmtMoney(cashTotals.totalCash)}
+              {financialOsCashTotal == null ? "—" : fmtMoney(financialOsCashTotal)}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
-              Financial OS cash • {cashTotals.hasCash ? cashTotals.label : "—"}
+              Financial OS cash • {financialOsCashLabel}
             </div>
           </div>
 
@@ -1500,7 +1487,7 @@ useEffect(() => {
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
             <div className="text-xs text-zinc-400">Net Worth (V1)</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">
-              {cashLoading ? "…" : fmtMoney(netWorthV1)}
+              {netWorthV1 == null ? "—" : fmtMoney(netWorthV1)}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
               Cash − credit balances

@@ -1228,11 +1228,125 @@ def _summarize_upcoming_items(items: list[dict]) -> dict:
     }
 
 
+def _active_financial_os_clause(model):
+    """
+    Treat NULL as active so older rows created before defaults were enforced
+    still participate in Financial OS calculations.
+    """
+    return or_(model.active == True, model.active.is_(None))
+
+
+def _sum_account_balances(rows: list[dict], field: str) -> float:
+    return round(sum(_to_float(row.get(field), 0.0) for row in rows), 2)
+
+
+def _build_financial_os_breakdown(
+    *,
+    cash_total: float,
+    cash_sources: dict,
+    upcoming_summary: dict,
+    upcoming_total: float,
+    buffer: float,
+    final_safe_to_spend: float,
+) -> dict:
+    duplicates = cash_sources.get("plaid_duplicate_accounts_skipped") or []
+    return {
+        "total_cash": round(float(cash_total), 2),
+        "pdf_cash": round(_to_float(cash_sources.get("pdf_cash_total"), 0.0), 2),
+        "plaid_cash_counted": round(_to_float(cash_sources.get("plaid_cash_total"), 0.0), 2),
+        "duplicates_skipped": len(duplicates),
+        "duplicates_skipped_balance": _sum_account_balances(duplicates, "current_balance"),
+        "upcoming_total": round(float(upcoming_total), 2),
+        "upcoming_bills_total": round(_to_float(upcoming_summary.get("bill_total"), 0.0), 2),
+        "manual_obligations_total": round(_to_float(upcoming_summary.get("manual_bill_total"), 0.0), 2),
+        "debt_minimums_total": round(_to_float(upcoming_summary.get("debt_minimum_total"), 0.0), 2),
+        "buffer": round(float(buffer), 2),
+        "final_safe_to_spend": round(float(final_safe_to_spend), 2),
+    }
+
+
+def _resolve_schedule_due_date(
+    *,
+    frequency: Optional[str],
+    due_day: Optional[int] = None,
+    due_date_value: Optional[str] = None,
+    created_at: Optional[datetime] = None,
+    today: Optional[date] = None,
+):
+    """
+    Resolve the next due date for recurring bills/manual obligations.
+    If a stored ISO due date is stale, fall back to cadence math instead of
+    silently excluding the obligation from planning.
+    """
+    today = today or date.today()
+    freq = (frequency or "monthly").strip().lower()
+    parsed_due = _iso_to_date(due_date_value) if due_date_value else None
+
+    if freq in ("once", "one_time"):
+        return parsed_due if parsed_due and parsed_due >= today else None
+
+    if parsed_due and parsed_due >= today:
+        return parsed_due
+
+    anchor = parsed_due
+    try:
+        if not anchor and created_at:
+            anchor = created_at.date()
+    except Exception:
+        anchor = None
+
+    if freq in ("weekly", "biweekly"):
+        if not anchor:
+            return None
+        step_days = 7 if freq == "weekly" else 14
+        if anchor >= today:
+            return anchor
+        delta_days = (today - anchor).days
+        jumps = delta_days // step_days
+        candidate = anchor + timedelta(days=jumps * step_days)
+        if candidate < today:
+            candidate = candidate + timedelta(days=step_days)
+        return candidate
+
+    if freq in ("monthly", "quarterly", "yearly", "annual"):
+        step_months = 1
+        if freq == "quarterly":
+            step_months = 3
+        elif freq in ("yearly", "annual"):
+            step_months = 12
+
+        day = due_day
+        if not day and parsed_due:
+            day = parsed_due.day
+        if not day and anchor:
+            day = anchor.day
+        if not day:
+            return None
+
+        start_year = today.year
+        start_month = today.month
+        for i in range(0, 24):
+            month_value = start_month + i
+            year_value = start_year + (month_value - 1) // 12
+            month_mod = ((month_value - 1) % 12) + 1
+            last_day = monthrange(year_value, month_mod)[1]
+            candidate = date(year_value, month_mod, min(int(day), last_day))
+            if candidate < today:
+                continue
+            if step_months == 1 or not anchor:
+                return candidate
+            months_diff = (candidate.year - anchor.year) * 12 + (candidate.month - anchor.month)
+            if months_diff % step_months == 0:
+                return candidate
+        return None
+
+    return parsed_due
+
+
 def _plaid_cash_sources_payload(db: Session, user_id: str, cash_total: Optional[float] = None) -> dict:
     cash_breakdown = _plaid_cash_breakdown(db, user_id)
     plaid_cash_total = round(float(cash_breakdown["included_total"]), 2)
-    resolved_cash_total = round(float(cash_total if cash_total is not None else _cash_total_latest(db, user_id)), 2)
-    pdf_cash_total = round(float(resolved_cash_total - plaid_cash_total), 2)
+    pdf_cash_total = _pdf_cash_total_latest(db, user_id)
 
     return {
         "pdf_cash_total": pdf_cash_total,
@@ -5207,7 +5321,7 @@ def os_debt_utilization(
     Utilization per debt (if credit_limit provided) + totals.
     """
     user_id = _coerce_user_id(current_user, user_id)
-    debts = db.query(Debt).filter(Debt.user_id == user_id, Debt.active == True).all()
+    debts = db.query(Debt).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).all()
 
     items = []
     total_bal = 0.0
@@ -5500,10 +5614,10 @@ def _sum_essentials_monthly(db: Session, user_id: str):
     - sum active bills where essentials=True
     - plus sum minimum_due across active debts (as baseline obligations)
     """
-    bills = db.query(Bill).filter(Bill.user_id == user_id, Bill.active == True, Bill.essentials == True).all()
+    bills = db.query(Bill).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill), Bill.essentials == True).all()
     # include manual bills (monthly-equivalent) in essentials total
-    manual_bills = db.query(ManualBill).filter(ManualBill.user_id == user_id, ManualBill.active == True).all()
-    debts = db.query(Debt).filter(Debt.user_id == user_id, Debt.active == True).all()
+    manual_bills = db.query(ManualBill).filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill)).all()
+    debts = db.query(Debt).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).all()
 
     bills_total = sum(_to_float(b.amount, 0.0) for b in bills)
 
@@ -5560,6 +5674,17 @@ def _cash_total_latest(db: Session, user_id: str) -> float:
     """
     Use latest PDF cash import end balances plus non-duplicate Plaid cash-like balances.
     """
+    pdf_cash_total = _pdf_cash_total_latest(db, user_id)
+    plaid_cash_total = _plaid_cash_breakdown(db, user_id)["included_total"]
+
+    return round(float(pdf_cash_total + plaid_cash_total), 2)
+
+
+def _pdf_cash_total_latest(db: Session, user_id: str) -> float:
+    """
+    Latest PDF-imported checking + savings end balances only.
+    Kept separate so Financial OS can explain the combined cash total cleanly.
+    """
     rows = (
         db.query(CashAccount)
         .filter(CashAccount.user_id == user_id)
@@ -5575,17 +5700,15 @@ def _cash_total_latest(db: Session, user_id: str) -> float:
         chk = _to_float(r.checking_end_balance, 0.0)
         sav = _to_float(r.savings_end_balance, 0.0)
         pdf_cash_total = float(chk + sav)
-
-    plaid_cash_total = _plaid_cash_breakdown(db, user_id)["included_total"]
-
-    return round(float(pdf_cash_total + plaid_cash_total), 2)
+    return round(float(pdf_cash_total), 2)
 
 
 def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
     """
     Combine:
+    - bills due within window
     - manual bills due within window
-    - debt minimums due within window (if due_date exists and parseable)
+    - debt minimums due within window
     """
     today = date.today()
     horizon = today + timedelta(days=days)
@@ -5593,143 +5716,56 @@ def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
     items = []
 
     # Bills
-    bills = db.query(Bill).filter(Bill.user_id == user_id, Bill.active == True).all()
+    bills = db.query(Bill).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill)).all()
     for b in bills:
-        due = None
-
-        if b.next_due_date:
-            due = _iso_to_date(b.next_due_date)
-
-        # if monthly with due_day, compute next occurrence
-        if not due and b.due_day and (b.frequency or "monthly") == "monthly":
-            try:
-                # next occurrence this month or next month
-                y, m = today.year, today.month
-                candidate = date(y, m, int(b.due_day))
-                if candidate < today:
-                    # next month
-                    if m == 12:
-                        y += 1
-                        m = 1
-                    else:
-                        m += 1
-                    candidate = date(y, m, int(b.due_day))
-                due = candidate
-            except Exception:
-                due = None
+        due = _resolve_schedule_due_date(
+            frequency=b.frequency,
+            due_day=b.due_day,
+            due_date_value=b.next_due_date,
+            created_at=b.created_at,
+            today=today,
+        )
 
         if due and today <= due <= horizon:
             items.append({
                 "type": "bill",
+                "source": "bill_registry",
                 "name": b.name,
                 "amount": round(_to_float(b.amount, 0.0), 2),
                 "due_date": due.isoformat(),
+                "frequency": b.frequency,
+                "category": b.category,
+                "autopay": bool(b.autopay),
                 "id": b.id,
             })
 
     # Manual bills (user-entered)
-    manual_bills = db.query(ManualBill).filter(ManualBill.user_id == user_id, ManualBill.active == True).all()
+    manual_bills = db.query(ManualBill).filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill)).all()
     for mb in manual_bills:
-        due = None
-        freq = (mb.frequency or "monthly").lower()
-
-        # one_time
-        if freq == "one_time":
-            if mb.due_date:
-                due = _iso_to_date(mb.due_date)
-
-        # monthly-like (due_day preferred)
-        elif freq == "monthly" or freq == "quarterly" or freq == "yearly":
-            # use due_day if provided, else fallback to created_at day
-            day = mb.due_day if mb.due_day else None
-            if not day and mb.created_at:
-                try:
-                    day = int(mb.created_at.day)
-                except Exception:
-                    day = None
-
-            if day:
-                # for quarterly/yearly we step months
-                step = 1
-                if freq == "quarterly":
-                    step = 3
-                if freq == "yearly":
-                    step = 12
-
-                # try this month and advance until >= today
-                y = today.year
-                m = today.month
-                found = None
-                for i in range(0, 24):
-                    mm = m + i
-                    yy = y + (mm - 1) // 12
-                    mm_mod = ((mm - 1) % 12) + 1
-                    last = monthrange(yy, mm_mod)[1]
-                    d = min(int(day), last)
-                    candidate = date(yy, mm_mod, d)
-                    if candidate >= today:
-                        # ensure candidate matches cadence for quarterly/yearly relative to created_at
-                        if freq == "monthly":
-                            found = candidate
-                            break
-                        else:
-                            # if no anchor, use created_at month offset as anchor
-                            anchor = None
-                            try:
-                                if mb.created_at:
-                                    anchor = mb.created_at.date()
-                            except Exception:
-                                anchor = None
-
-                            if not anchor:
-                                found = candidate
-                                break
-
-                            # compute months difference from anchor
-                            months_diff = (candidate.year - anchor.year) * 12 + (candidate.month - anchor.month)
-                            if months_diff % step == 0:
-                                found = candidate
-                                break
-
-                due = found
-
-        # weekly / biweekly
-        elif freq == "weekly" or freq == "biweekly":
-            step_days = 7 if freq == "weekly" else 14
-            # anchor: use mb.due_date if present else created_at
-            anchor = None
-            if mb.due_date:
-                anchor = _iso_to_date(mb.due_date)
-            try:
-                if not anchor and mb.created_at:
-                    anchor = mb.created_at.date()
-            except Exception:
-                anchor = None
-
-            if anchor:
-                # find next occurrence >= today
-                delta = (today - anchor).days
-                if delta < 0:
-                    due = anchor
-                else:
-                    n = (delta // step_days) + 1 if (delta % step_days) != 0 else (delta // step_days)
-                    candidate = anchor + timedelta(days=n * step_days)
-                    if candidate < today:
-                        candidate = candidate + timedelta(days=step_days)
-                    due = candidate
+        due = _resolve_schedule_due_date(
+            frequency=mb.frequency,
+            due_day=mb.due_day,
+            due_date_value=mb.due_date,
+            created_at=mb.created_at,
+            today=today,
+        )
 
         # final inclusion
         if due and today <= due <= horizon:
             items.append({
                 "type": "manual_bill",
+                "source": "manual_bills",
                 "name": mb.name,
                 "amount": round(_to_float(mb.amount, 0.0), 2),
                 "due_date": due.isoformat(),
+                "frequency": mb.frequency,
+                "category": mb.category,
+                "autopay": bool(mb.autopay),
                 "id": mb.id,
             })
 
     # Debts minimums
-    debts = db.query(Debt).filter(Debt.user_id == user_id, Debt.active == True).all()
+    debts = db.query(Debt).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).all()
     for d in debts:
         if d.minimum_due is None:
             continue
@@ -5737,9 +5773,15 @@ def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
         if due and today <= due <= horizon:
             items.append({
                 "type": "debt_minimum",
+                "source": "debt_registry",
                 "name": f"{d.name} minimum",
                 "amount": round(_to_float(d.minimum_due, 0.0), 2),
                 "due_date": due.isoformat(),
+                "frequency": "monthly",
+                "category": "Debt",
+                "autopay": None,
+                "apr": d.apr,
+                "last4": d.last4,
                 "id": d.id,
             })
 
@@ -5764,7 +5806,7 @@ def os_next_best_dollar(
     """
     Next Best Dollar (Phase 2 minimal engine):
     1) Cash total (latest cash statement end balances)
-    2) Upcoming obligations in next N days (bills + debt minimums with due dates)
+    2) Upcoming obligations in next N days (bills + manual obligations + debt minimums)
     3) Safe-to-Spend = cash - upcoming - buffer
     4) If surplus > 0 => recommend extra payment to highest APR debt (avalanche)
     """
@@ -5775,6 +5817,14 @@ def os_next_best_dollar(
     upcoming_summary = _summarize_upcoming_items(items)
 
     sts_today = float(cash_total) - float(upcoming_total) - float(buffer)
+    breakdown = _build_financial_os_breakdown(
+        cash_total=cash_total,
+        cash_sources=cash_sources,
+        upcoming_summary=upcoming_summary,
+        upcoming_total=upcoming_total,
+        buffer=buffer,
+        final_safe_to_spend=sts_today,
+    )
 
     # determine stage quickly
     stage = "Stabilize" if sts_today < 0 else "Attack Debt"
@@ -5831,6 +5881,7 @@ def os_next_best_dollar(
         "upcoming_items": items,
         "cash_sources": cash_sources,
         "upcoming_summary": upcoming_summary,
+        "breakdown": breakdown,
         "calculation": {
             "formula": "safe_to_spend_today = cash_total - upcoming_total - buffer",
             "cash_total": round(float(cash_total), 2),
@@ -5859,7 +5910,7 @@ def os_state(
     bills_total, debt_mins_total, essentials_total = _sum_essentials_monthly(db, user_id)
 
     # include active manual bills list for UI
-    manual_bills_list = db.query(ManualBill).filter(ManualBill.user_id == user_id, ManualBill.active == True).order_by(ManualBill.name.asc()).all()
+    manual_bills_list = db.query(ManualBill).filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill)).order_by(ManualBill.name.asc()).all()
 
     util = os_debt_utilization(user_id=user_id, db=db, current_user=current_user)
     cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
