@@ -5,8 +5,12 @@ import {
   getCashAccountTransactions,
   getNextBestDollar,
   getOsState,
+  getPlaidAccounts,
+  getPlaidTransactions,
   NextBestDollarResponse,
   OsStateResponse,
+  PlaidAccountSummary,
+  PlaidTransactionSummary,
 } from "@/lib/api";
 import { useAuth } from "@/components/auth/AuthProvider";
 import type { CashTxn, CashAccount } from "@/types/cash";
@@ -526,6 +530,8 @@ useEffect(() => {
   const [osCashTotal, setOsCashTotal] = useState(0);
   const [osCashSources, setOsCashSources] = useState<OsStateResponse["cash_sources"] | null>(null);
   const [nextBestDollar, setNextBestDollar] = useState<NextBestDollarResponse | null>(null);
+  const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
+  const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
 
   useEffect(() => {
     setLoading(true);
@@ -638,23 +644,29 @@ useEffect(() => {
 
     (async () => {
       try {
-        const [stateRes, nbdRes] = await Promise.all([
+        const [stateRes, nbdRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.all([
           getOsState({ user_id: userId, window_days: upcomingWindowDays }),
           getNextBestDollar({
             user_id: userId,
             window_days: upcomingWindowDays,
             buffer: settings.buffer_enabled ? settings.buffer_amount : 0,
           }),
+          getPlaidAccounts(userId),
+          getPlaidTransactions({ user_id: userId, limit: 8 }),
         ]);
         if (cancelled) return;
         setOsCashTotal(Number(stateRes?.cash_total || 0));
         setOsCashSources(stateRes?.cash_sources || null);
         setNextBestDollar(nbdRes || null);
+        setPlaidAccounts(plaidAccountsRes?.accounts || []);
+        setPlaidTransactions(plaidTransactionsRes?.transactions || []);
       } catch {
         if (cancelled) return;
         setOsCashTotal(0);
         setOsCashSources(null);
         setNextBestDollar(null);
+        setPlaidAccounts([]);
+        setPlaidTransactions([]);
       }
     })();
 
@@ -698,6 +710,16 @@ useEffect(() => {
   const netWorthV1 = useMemo(() => {
     return cashTotals.totalCash - totals.totalOutstanding;
   }, [cashTotals.totalCash, totals.totalOutstanding]);
+
+  const plaidIncludedAccounts = useMemo(
+    () => osCashSources?.plaid_accounts_included || [],
+    [osCashSources]
+  );
+
+  const plaidDuplicateAccounts = useMemo(
+    () => osCashSources?.plaid_duplicate_accounts_skipped || [],
+    [osCashSources]
+  );
 
   /** =========================
    * Trend: sum balances by statement end-month
@@ -1067,7 +1089,7 @@ useEffect(() => {
                 <div className="text-sm font-semibold text-zinc-100">
                   Safe to Spend
                 </div>
-                <div className="text-xs text-zinc-400">Settings-driven</div>
+                <div className="text-xs text-zinc-400">Backend formula</div>
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
@@ -1075,30 +1097,46 @@ useEffect(() => {
               </div>
 
               <div className="mt-2 text-xs text-zinc-500">
-                Buffer rule:{" "}
+                Cash total{" "}
+                <span className="text-zinc-200">{fmtMoney(Number(nextBestDollar?.cash_total ?? cashTotals.totalCash))}</span>
+                {" = PDF "}
+                <span className="text-zinc-200">{fmtMoney(Number(osCashSources?.pdf_cash_total || 0))}</span>
+                {" + Plaid "}
+                <span className="text-zinc-200">{fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}</span>
+              </div>
+
+              <div className="mt-2 text-xs text-zinc-500">
+                Upcoming obligations{" "}
                 <span className="text-zinc-200">
-                  {settings.buffer_enabled ? fmtMoney(settings.buffer_amount) : "Off"}
+                  {fmtMoney(Number(nextBestDollar?.upcoming_total || upcomingTotal))}
                 </span>
-                {" • "}
-                Cash total:{" "}
-                <span className="text-zinc-200">{fmtMoney(cashTotals.totalCash)}</span>
-                {" • "}
-                Upcoming bills:{" "}
+                {" = Bills "}
                 <span className="text-zinc-200">
-                  {nextBestDollar ? fmtMoney(Number(nextBestDollar.upcoming_total || 0)) : fmtMoney(upcomingTotal)}
+                  {fmtMoney(Number(nextBestDollar?.upcoming_summary?.bill_total || 0))}
                 </span>
-                {" • "}
-                Month spend:{" "}
-                <span className="text-zinc-200">{fmtMoney(monthMetrics.monthSpend)}</span>
-                {" • "}
-                Detected income:{" "}
+                {" + Manual "}
                 <span className="text-zinc-200">
-                  {monthMetrics.monthIncome > 0 ? fmtMoney(monthMetrics.monthIncome) : "Not found yet"}
+                  {fmtMoney(Number(nextBestDollar?.upcoming_summary?.manual_bill_total || 0))}
+                </span>
+                {" + Debt minimums "}
+                <span className="text-zinc-200">
+                  {fmtMoney(Number(nextBestDollar?.upcoming_summary?.debt_minimum_total || 0))}
+                </span>
+              </div>
+
+              <div className="mt-2 text-xs text-zinc-500">
+                Buffer{" "}
+                <span className="text-zinc-200">
+                  {fmtMoney(Number(nextBestDollar?.buffer ?? (settings.buffer_enabled ? settings.buffer_amount : 0)))}
+                </span>
+                {" • Formula: "}
+                <span className="text-zinc-200">
+                  {nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer"}
                 </span>
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Financial OS uses backend cash totals, including non-duplicate Plaid cash, when available.
+                Financial OS reads backend cash totals, including non-duplicate Plaid cash accounts, before applying upcoming obligations and buffer.
               </div>
 
               {/* Small cash debug line (non-breaking) */}
@@ -1310,6 +1348,128 @@ useEffect(() => {
 
               <div className="mt-4 text-xs text-zinc-500">
                 Plaid cash feeds these backend Financial OS calculations without mixing into PDF transaction tables.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {settings.show_financial_os_panels && (
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Plaid Cash in Financial OS</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Backend source of truth. Plaid stays additive and separate from PDF transaction tables.
+                  </div>
+                </div>
+                <Link
+                  href="/plaid"
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
+                >
+                  Open Plaid →
+                </Link>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Plaid cash counted</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Included cash accounts</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">{plaidIncludedAccounts.length}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Duplicates skipped</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">{plaidDuplicateAccounts.length}</div>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-2">
+                {plaidIncludedAccounts.length ? (
+                  plaidIncludedAccounts.map((account) => (
+                    <div
+                      key={account.account_id}
+                      className="rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-3 text-xs text-zinc-300"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-zinc-100">{account.name}</div>
+                          <div className="mt-1 text-zinc-500">
+                            {account.institution_name || "Linked institution"}
+                            {account.mask ? ` • ****${account.mask}` : ""}
+                            {account.subtype ? ` • ${account.subtype}` : ""}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-mono text-sm text-zinc-100">
+                            {fmtMoney(Number(account.counted_balance || account.current_balance || 0))}
+                          </div>
+                          <div className="text-[11px] text-zinc-500">Counted in cash total</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-xl border border-dashed border-white/10 bg-[#0B0F14] px-3 py-4 text-xs text-zinc-400">
+                    No Plaid cash accounts are currently contributing to Financial OS cash.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Recent Plaid Transactions</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Rendered from backend `/plaid/transactions`, not mixed into PDF transaction tables.
+                  </div>
+                </div>
+                <div className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300">
+                  {plaidAccounts.length} account{plaidAccounts.length === 1 ? "" : "s"}
+                </div>
+              </div>
+
+              {plaidTransactions.length ? (
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full text-left text-xs text-zinc-300">
+                    <thead className="text-zinc-500">
+                      <tr className="border-b border-white/10">
+                        <th className="py-2 pr-3">date</th>
+                        <th className="py-2 pr-3">account</th>
+                        <th className="py-2 pr-3">merchant</th>
+                        <th className="py-2 pr-0 text-right">amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {plaidTransactions.map((txn) => (
+                        <tr key={txn.transaction_id} className="border-b border-white/5">
+                          <td className="py-2 pr-3 text-zinc-400">{txn.posted_date || txn.authorized_date || "—"}</td>
+                          <td className="py-2 pr-3">
+                            <div className="text-zinc-200">{txn.account_name || "Plaid account"}</div>
+                            <div className="text-[11px] text-zinc-500">{txn.institution_name || "Linked institution"}</div>
+                          </td>
+                          <td className="py-2 pr-3 text-zinc-300">{txn.merchant_name || txn.name || "—"}</td>
+                          <td className="py-2 pr-0 text-right font-mono text-zinc-100">
+                            {typeof txn.amount === "number" ? fmtMoney(txn.amount) : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="mt-4 rounded-xl border border-dashed border-white/10 bg-[#0B0F14] px-3 py-4 text-xs text-zinc-400">
+                  No Plaid transactions are currently rendered on the dashboard because none were returned by the backend.
+                </div>
+              )}
+
+              <div className="mt-4 text-xs text-zinc-500">
+                Trace: Plaid sync writes `plaid_items`, `plaid_accounts`, and `plaid_transactions`; Financial OS reads Plaid cash through `/os/state` and `/os/next-best-dollar`; this panel reads `/plaid/accounts` and `/plaid/transactions`.
               </div>
             </div>
           </div>

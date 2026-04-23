@@ -736,21 +736,53 @@ export type OsStateResponse = {
   cash_sources?: {
     pdf_cash_total?: number;
     plaid_cash_total?: number;
+    plaid_accounts_included?: Array<{
+      id?: number;
+      account_id: string;
+      item_id?: string | null;
+      institution_name?: string | null;
+      name: string;
+      official_name?: string | null;
+      mask?: string | null;
+      type?: string | null;
+      subtype?: string | null;
+      current_balance?: number | null;
+      available_balance?: number | null;
+      counted_balance?: number | null;
+      sync_status?: string | null;
+      last_balance_sync_at?: string | null;
+    }>;
     plaid_duplicate_accounts_skipped?: Array<{
       account_id: string;
       name?: string | null;
       mask?: string | null;
       institution_name?: string | null;
+      current_balance?: number | null;
+      available_balance?: number | null;
+      last_balance_sync_at?: string | null;
     }>;
   };
   upcoming_window_days?: number;
   upcoming_total?: number;
   upcoming_items?: any[];
+  upcoming_summary?: {
+    bill_total?: number;
+    manual_bill_total?: number;
+    debt_minimum_total?: number;
+    bill_count?: number;
+    manual_bill_count?: number;
+    debt_minimum_count?: number;
+  };
   manual_bills?: any[];
   essentials_cap_monthly?: {
     essentials_bills_total?: number;
     debt_minimums_total?: number;
     essentials_cap_total?: number;
+  };
+  calculation?: {
+    cash_total?: number;
+    upcoming_total?: number;
+    safe_to_spend_formula?: string;
   };
   debt_utilization?: any;
 };
@@ -772,6 +804,22 @@ export type NextBestDollarResponse = {
   safe_to_spend_today: number;
   stage?: string | null;
   upcoming_items?: any[];
+  upcoming_summary?: {
+    bill_total?: number;
+    manual_bill_total?: number;
+    debt_minimum_total?: number;
+    bill_count?: number;
+    manual_bill_count?: number;
+    debt_minimum_count?: number;
+  };
+  cash_sources?: OsStateResponse["cash_sources"];
+  calculation?: {
+    formula?: string | null;
+    cash_total?: number;
+    upcoming_total?: number;
+    buffer?: number;
+    safe_to_spend_today?: number;
+  };
   recommendation?: {
     debt_id?: number;
     name?: string | null;
