@@ -436,8 +436,9 @@ export type Bill = {
   due_day?: number | null;   // for monthly bills: 1..31
   next_due_date?: string | null; // optional "YYYY-MM-DD" (if you store it)
   category?: string | null;  // optional: "Housing", etc
-  is_active?: boolean;       // default true
+  active?: boolean;          // default true
   autopay?: boolean;         // optional
+  essentials?: boolean;      // included in essential obligations/STS
   notes?: string | null;
 
   created_at?: string;
@@ -523,6 +524,51 @@ export async function updateManualBill(
 export async function deleteManualBill(mb_id: string | number, params: { user_id: string }) {
   const q = new URLSearchParams({ user_id: params.user_id }).toString();
   return apiDelete(`/os/manual-bills/${mb_id}?${q}`);
+}
+
+/* =========================
+   Manual Transactions
+========================= */
+
+export type ManualTransaction = {
+  id: number;
+  user_id: string;
+  amount: number;
+  date: string;
+  category?: string | null;
+  description?: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function listManualTransactions(params: { user_id: string }): Promise<ManualTransaction[]> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiGet<ManualTransaction[]>(`/manual-transactions?${q}`);
+}
+
+export async function createManualTransaction(
+  payload: Omit<ManualTransaction, "id" | "created_at" | "updated_at">,
+  params: { user_id: string }
+): Promise<ManualTransaction> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiPost<ManualTransaction>(`/manual-transactions?${q}`, payload);
+}
+
+export async function updateManualTransaction(
+  transaction_id: string | number,
+  patch: Partial<Omit<ManualTransaction, "id" | "user_id" | "created_at" | "updated_at">>,
+  params: { user_id: string }
+): Promise<ManualTransaction> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiPatch<ManualTransaction>(`/manual-transactions/${transaction_id}?${q}`, patch);
+}
+
+export async function deleteManualTransaction(
+  transaction_id: string | number,
+  params: { user_id: string }
+): Promise<any> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiDelete(`/manual-transactions/${transaction_id}?${q}`);
 }
 
 /* =========================
