@@ -1,8 +1,10 @@
 "use client";
 
 import {
+  FinancialOsIntelligenceResponse,
   getCashAccounts,
   getCashAccountTransactions,
+  getFinancialOsIntelligence,
   getNextBestDollar,
   getOsState,
   getPlaidAccounts,
@@ -379,6 +381,39 @@ function stageBadge(stage: Stage) {
   }
 }
 
+function clamp01(n: number) {
+  return Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
+}
+
+function scoreTone(score?: number | null) {
+  const value = Number(score ?? 0);
+  if (value >= 80) return "text-emerald-300 bg-emerald-500/10 border-emerald-500/20";
+  if (value >= 60) return "text-sky-300 bg-sky-500/10 border-sky-500/20";
+  if (value >= 40) return "text-amber-300 bg-amber-500/10 border-amber-500/20";
+  return "text-red-300 bg-red-500/10 border-red-500/20";
+}
+
+function stabilityTone(label?: string | null) {
+  switch ((label || "").toLowerCase()) {
+    case "strong":
+      return "text-emerald-300 bg-emerald-500/10 border-emerald-500/20";
+    case "stable":
+      return "text-sky-300 bg-sky-500/10 border-sky-500/20";
+    case "stabilizing":
+      return "text-amber-300 bg-amber-500/10 border-amber-500/20";
+    case "fragile":
+      return "text-red-300 bg-red-500/10 border-red-500/20";
+    default:
+      return "text-zinc-300 bg-white/5 border-white/10";
+  }
+}
+
+function fmtMonthsCompact(months?: number | null) {
+  if (months == null) return "Needs data";
+  if (months <= 0) return "Debt-free";
+  return `${months} mo`;
+}
+
 /** =========================
  * Latest statement per card helpers
  * ========================= */
@@ -464,6 +499,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
   const [txErr, setTxErr] = useState<string | null>(null);
   const [osState, setOsState] = useState<OsStateResponse | null>(null);
   const [nextBestDollar, setNextBestDollar] = useState<NextBestDollarResponse | null>(null);
+  const [intelligence, setIntelligence] = useState<FinancialOsIntelligenceResponse | null>(null);
   const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
   const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
 
@@ -579,13 +615,19 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     (async () => {
       setBillsLoading(true);
       setBillsErr(null);
+      const bufferAmount = settings.buffer_enabled ? settings.buffer_amount : 0;
 
-      const [stateRes, nbdRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.allSettled([
+      const [stateRes, nbdRes, intelligenceRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.allSettled([
           getOsState({ user_id: userId, window_days: upcomingWindowDays }),
           getNextBestDollar({
             user_id: userId,
             window_days: upcomingWindowDays,
-            buffer: settings.buffer_enabled ? settings.buffer_amount : 0,
+            buffer: bufferAmount,
+          }),
+          getFinancialOsIntelligence({
+            user_id: userId,
+            window_days: upcomingWindowDays,
+            buffer: bufferAmount,
           }),
           getPlaidAccounts(userId),
           getPlaidTransactions({ user_id: userId, limit: 8 }),
@@ -609,6 +651,12 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
         setNextBestDollar(nbdRes.value || null);
       } else {
         setNextBestDollar(null);
+      }
+
+      if (intelligenceRes.status === "fulfilled") {
+        setIntelligence(intelligenceRes.value || null);
+      } else {
+        setIntelligence(null);
       }
 
       if (plaidAccountsRes.status === "fulfilled") {
@@ -683,6 +731,23 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     () => osCashSources?.plaid_duplicate_accounts_skipped || [],
     [osCashSources]
   );
+
+  const healthScore = intelligence?.financial_health?.score ?? null;
+  const healthComponents = useMemo(
+    () => (intelligence?.financial_health?.components || []).filter((component) => component.included).slice(0, 5),
+    [intelligence]
+  );
+  const stabilityMeter = intelligence?.stability_meter ?? null;
+  const debtCountdown = intelligence?.debt_free_countdown ?? null;
+  const fiProgress = intelligence?.fi_progress ?? null;
+  const fiProgressComponents = useMemo(
+    () => (fiProgress?.components || []).slice(0, 3),
+    [fiProgress]
+  );
+  const nextDollarImpact = intelligence?.next_best_dollar_impact ?? null;
+  const intelligenceContext = intelligence?.context ?? null;
+  const healthTone = scoreTone(healthScore);
+  const stabilityToneClass = stabilityTone(stabilityMeter?.label);
 
   /** =========================
    * Trend: sum balances by statement end-month
@@ -1040,6 +1105,240 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 <div className="mt-1 text-sm text-zinc-200/90">{a.body}</div>
               </div>
             ))}
+          </div>
+        )}
+
+        {settings.show_financial_os_panels && (
+          <div className="grid gap-3 xl:grid-cols-3">
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5 xl:col-span-2">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Financial Health Score</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Backend weighted score from current cash, runway, debt, and coverage data.
+                  </div>
+                </div>
+                <div className={`inline-flex items-center rounded-full border px-3 py-1 text-xs ${healthTone}`}>
+                  {healthScore != null ? `${healthScore}/100` : "Loading"}
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-end justify-between gap-3">
+                <div className="text-4xl font-semibold text-zinc-100">
+                  {healthScore != null ? healthScore : "--"}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {intelligence?.financial_health?.formula || "Waiting for backend score details."}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                {healthComponents.length ? (
+                  healthComponents.map((component) => (
+                    <div key={component.key} className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium text-zinc-100">{component.label}</div>
+                        <div className="text-xs font-mono text-zinc-400">
+                          {Math.round(Number(component.points || 0))}/{component.weight}
+                        </div>
+                      </div>
+                      <div className="mt-2 text-xs leading-5 text-zinc-400">
+                        {component.explanation}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-sm text-zinc-400 sm:col-span-2">
+                    Health score details are loading from the backend.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Stability Meter</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Fast read on near-term stability across cash, obligations, and runway.
+                  </div>
+                </div>
+                <div className={`inline-flex items-center rounded-full border px-3 py-1 text-xs ${stabilityToneClass}`}>
+                  {stabilityMeter?.label || "Loading"}
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-end justify-between gap-3">
+                <div className="text-4xl font-semibold text-zinc-100">
+                  {stabilityMeter?.value ?? "--"}
+                </div>
+                <div className="text-xs text-zinc-500">out of 100</div>
+              </div>
+
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/5">
+                <div
+                  className="h-full rounded-full bg-zinc-200 transition-all"
+                  style={{ width: `${clamp01(Number(stabilityMeter?.value || 0) / 100) * 100}%` }}
+                />
+              </div>
+
+              <div className="mt-4 text-sm leading-6 text-zinc-300">
+                {stabilityMeter?.explanation || "Loading backend stability explanation."}
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">STS today</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {fmtMoney(Number(intelligenceContext?.safe_to_spend_today || 0))}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Runway</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {intelligenceContext?.runway_months != null
+                      ? `${Number(intelligenceContext.runway_months).toFixed(1)} mo`
+                      : "--"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Debt-free Countdown</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Estimated from current balances, minimums, and the current extra-payment suggestion.
+                  </div>
+                </div>
+                {debtCountdown?.is_partial ? (
+                  <div className="inline-flex items-center rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs text-amber-300">
+                    Partial
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="mt-4 text-3xl font-semibold text-zinc-100">
+                {fmtMonthsCompact(debtCountdown?.estimated_months_remaining)}
+              </div>
+
+              <div className="mt-2 text-sm text-zinc-300">
+                {debtCountdown?.priority_debt?.name
+                  ? `Priority debt: ${debtCountdown.priority_debt.name}`
+                  : "No priority debt available"}
+              </div>
+
+              <div className="mt-4 text-sm leading-6 text-zinc-400">
+                {debtCountdown?.explanation || "Loading backend payoff projection."}
+              </div>
+
+              {Number(debtCountdown?.excluded_debts?.length || 0) > 0 ? (
+                <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-xs text-zinc-400">
+                  Excluded debts: {(debtCountdown?.excluded_debts || []).map((item) => item.name).filter(Boolean).join(", ")}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">FI Progress</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Conservative proxy, not a full FIRE calculation.
+                  </div>
+                </div>
+                <div className="text-xs text-zinc-400">
+                  {intelligenceContext?.fi_cash_target_label || "Proxy target"}
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-end justify-between gap-3">
+                <div className="text-4xl font-semibold text-zinc-100">
+                  {fiProgress?.percent != null ? `${fiProgress.percent}%` : "--"}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  {intelligenceContext?.fi_cash_target_amount
+                    ? `Target ${fmtMoney(Number(intelligenceContext.fi_cash_target_amount || 0))}`
+                    : "Target pending"}
+                </div>
+              </div>
+
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/5">
+                <div
+                  className="h-full rounded-full bg-zinc-200 transition-all"
+                  style={{ width: `${clamp01(Number(fiProgress?.percent || 0) / 100) * 100}%` }}
+                />
+              </div>
+
+              <div className="mt-4 text-sm leading-6 text-zinc-400">
+                {fiProgress?.explanation || "Loading backend FI proxy."}
+              </div>
+
+              <div className="mt-4 space-y-2">
+                {fiProgressComponents.map((component, idx) => (
+                  <div key={`${component.label}-${idx}`} className="flex items-start justify-between gap-3 text-xs text-zinc-400">
+                    <div>{component.label}</div>
+                    <div className="font-mono text-zinc-200">{Math.round(Number(component.progress || 0))}%</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Next Best Dollar Impact</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Uses the current recommended target debt and current debt inputs only.
+                  </div>
+                </div>
+                <div className="text-xs text-zinc-400">
+                  {nextDollarImpact?.target_debt?.name || nextBestDollar?.recommendation?.name || "No target"}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Recommended extra</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {fmtMoney(Number(nextDollarImpact?.recommended_extra_payment || 0))}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Months faster</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {nextDollarImpact?.estimated_months_faster != null
+                      ? `${nextDollarImpact.estimated_months_faster} mo`
+                      : "--"}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Interest saved</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {nextDollarImpact?.estimated_interest_saved != null
+                      ? fmtMoney(Number(nextDollarImpact.estimated_interest_saved || 0))
+                      : "--"}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Payoff with extra</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {nextDollarImpact?.estimated_payoff_months_with_extra != null
+                      ? `${nextDollarImpact.estimated_payoff_months_with_extra} mo`
+                      : "--"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 text-sm leading-6 text-zinc-400">
+                {nextDollarImpact?.explanation || "Loading backend impact estimate."}
+              </div>
+
+              <div className="mt-3 text-xs text-zinc-500">
+                Approximation assumes the current extra-payment recommendation can repeat monthly and debt APRs stay flat.
+              </div>
+            </div>
           </div>
         )}
 

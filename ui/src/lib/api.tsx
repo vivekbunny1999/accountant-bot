@@ -924,3 +924,106 @@ export async function getNextBestDollar(params: {
   if (params.buffer != null) qs.set("buffer", String(params.buffer));
   return apiGet<NextBestDollarResponse>(`/os/next-best-dollar?${qs.toString()}`);
 }
+
+export type FinancialHealthComponent = {
+  key: string;
+  label: string;
+  weight: number;
+  points: number;
+  included: boolean;
+  formula?: string | null;
+  explanation?: string | null;
+};
+
+export type FinancialOsIntelligenceResponse = {
+  ok: boolean;
+  user_id: string;
+  window_days: number;
+  buffer: number;
+  context?: {
+    cash_total?: number;
+    upcoming_total?: number;
+    safe_to_spend_today?: number;
+    monthly_essentials_total?: number;
+    monthly_essential_bills_total?: number;
+    monthly_debt_minimums_total?: number;
+    runway_months?: number | null;
+    runway_target_months?: number | null;
+    emergency_target_amount?: number | null;
+    fi_cash_target_amount?: number | null;
+    fi_cash_target_label?: string | null;
+    debt_total_balance?: number;
+    weighted_apr?: number | null;
+    total_utilization_pct?: number | null;
+  };
+  financial_health?: {
+    score?: number;
+    formula?: string | null;
+    components?: FinancialHealthComponent[];
+  };
+  stability_meter?: {
+    label?: string | null;
+    value?: number;
+    formula?: string | null;
+    explanation?: string | null;
+  };
+  debt_free_countdown?: {
+    estimated_months_remaining?: number | null;
+    priority_debt?: {
+      id?: number;
+      name?: string | null;
+      apr?: number | null;
+      balance?: number | null;
+    } | null;
+    modeled_debt_count?: number;
+    excluded_debts?: Array<{
+      id?: number;
+      name?: string | null;
+      reason?: string | null;
+      balance?: number | null;
+    }>;
+    is_partial?: boolean;
+    formula?: string | null;
+    explanation?: string | null;
+  };
+  fi_progress?: {
+    percent?: number;
+    formula?: string | null;
+    explanation?: string | null;
+    components?: Array<{
+      label?: string | null;
+      weight?: number;
+      progress?: number;
+      explanation?: string | null;
+    }>;
+  };
+  next_best_dollar_impact?: {
+    recommended_extra_payment?: number;
+    target_debt?: {
+      id?: number;
+      name?: string | null;
+      apr?: number | null;
+      balance?: number | null;
+      minimum_due?: number | null;
+    } | null;
+    estimated_interest_saved?: number | null;
+    estimated_months_faster?: number | null;
+    estimated_payoff_months_with_extra?: number | null;
+    formula?: string | null;
+    assumptions?: string[];
+    explanation?: string | null;
+  };
+  recommendation?: NextBestDollarResponse["recommendation"];
+};
+
+export async function getFinancialOsIntelligence(params: {
+  user_id: string;
+  window_days?: number;
+  buffer?: number;
+}): Promise<FinancialOsIntelligenceResponse> {
+  const qs = new URLSearchParams();
+  qs.set("user_id", params.user_id);
+  if (params.window_days != null) qs.set("window_days", String(params.window_days));
+  if (params.buffer != null) qs.set("buffer", String(params.buffer));
+  return apiGet<FinancialOsIntelligenceResponse>(`/os/intelligence?${qs.toString()}`);
+}
