@@ -664,6 +664,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
   const financialOsCashTotal = nextBestDollar?.cash_total ?? osState?.cash_total ?? null;
   const stsBreakdown = nextBestDollar?.breakdown || null;
   const upcomingSummary = nextBestDollar?.upcoming_summary ?? osState?.upcoming_summary ?? null;
+  const upcomingItemsList = upcomingItems ?? [];
   const financialOsCashLabel = osCashSources
     ? `PDF ${fmtMoney(Number(osCashSources?.pdf_cash_total || 0))} | Plaid ${fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}`
     : (cashTotals.hasCash ? `Latest PDF import ${cashTotals.label}` : "Backend Financial OS cash");
@@ -1230,7 +1231,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
           </tr>
         </thead>
         <tbody className="text-zinc-200">
-          {upcomingItems.map((b: any) => (
+          {upcomingItemsList.map((b: any) => (
             <tr key={b.id} className="border-b border-white/5 hover:bg-white/5">
               <td className="py-3 pr-4">
                 <div className="text-zinc-100">{b.name}</div>
@@ -1251,7 +1252,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
             </tr>
           ))}
 
-          {upcomingItems.length === 0 && (
+          {upcomingItemsList.length === 0 && (
             <tr>
               <td className="py-6 text-zinc-400" colSpan={4}>
                 No obligations due in the next {upcomingWindowDays} days.
