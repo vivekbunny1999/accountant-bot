@@ -4,14 +4,19 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/components/auth/AuthProvider";
 
-const nav = [
+const primaryNav = [
   { href: "/dashboard", label: "Dashboard" },
+  { href: "/accounts", label: "Accounts" },
+  { href: "/activity", label: "Activity" },
   { href: "/bills", label: "Bills" },
+  { href: "/debts", label: "Debts" },
+  { href: "/settings", label: "Settings" },
+];
+
+const sourceNav = [
   { href: "/plaid", label: "Plaid" },
   { href: "/cash-accounts", label: "Cash Accounts" },
   { href: "/statements", label: "Statements" },
-  { href: "/transactions", label: "Transactions" },
-  { href: "/settings", label: "Settings" },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -36,7 +41,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="my-3 h-px bg-white/10" />
 
           <nav className="flex flex-col gap-1">
-            {nav.map((i) => {
+            {primaryNav.map((i) => {
               const active =
                 pathname === i.href || (i.href !== "/" && pathname?.startsWith(i.href));
 
@@ -56,6 +61,33 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
+
+          <div className="mt-6">
+            <div className="px-2 pb-2 text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+              Source Views
+            </div>
+            <nav className="flex flex-col gap-1">
+              {sourceNav.map((i) => {
+                const active =
+                  pathname === i.href || (i.href !== "/" && pathname?.startsWith(i.href));
+
+                return (
+                  <Link
+                    key={i.href}
+                    href={i.href}
+                    className={[
+                      "rounded-xl px-3 py-2 text-sm transition-colors",
+                      active
+                        ? "bg-white/10 text-zinc-100"
+                        : "text-zinc-400 hover:bg-white/5 hover:text-zinc-100",
+                    ].join(" ")}
+                  >
+                    {i.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          </div>
 
           <div className="mt-6 border-t border-white/10 pt-4">
             <button

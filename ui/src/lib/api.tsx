@@ -616,6 +616,14 @@ export async function updateDebt(
   return apiPatch<Debt>(`/debts/${debt_id}?${q}`, patch);
 }
 
+export async function deleteDebt(
+  debt_id: string | number,
+  params: { user_id: string }
+): Promise<any> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiDelete(`/debts/${debt_id}?${q}`);
+}
+
 /* =========================
            Plaid
 ========================= */

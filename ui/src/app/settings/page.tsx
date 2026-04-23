@@ -2051,18 +2051,21 @@ export default function SettingsPage() {
             <Card>
               <SectionTitle
                 title="Debt Registry"
-                subtitle="Keep card balances, APRs, minimums, and due timing accurate without leaving Settings."
+                subtitle="Debt management now has a dedicated workflow page. Settings keeps the system controls and quick visibility."
                 right={
-                  <button
-                    type="button"
-                    onClick={startCreateDebt}
+                  <Link
+                    href="/debts"
                     className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
                   >
-                    Add debt
-                  </button>
+                    Open Debts
+                  </Link>
                 }
               />
               <Divider />
+
+              <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 text-sm text-zinc-300">
+                Debt add/edit/delete now belongs on the dedicated <Link href="/debts" className="text-zinc-100 underline underline-offset-4">Debts</Link> page so the product flow matches the rest of Financial OS.
+              </div>
 
               <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
                 <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">

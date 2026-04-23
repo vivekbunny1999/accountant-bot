@@ -34,11 +34,6 @@ function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function safeTime(s?: string | null) {
-  const t = new Date(s ?? "").getTime();
-  return Number.isFinite(t) ? t : 0;
-}
-
 function parseDateLoose(s?: string | null): Date | null {
   if (!s) return null;
 
@@ -577,7 +572,7 @@ export default function TransactionsPage() {
 
     const a = document.createElement("a");
     a.href = url;
-    a.download = `transactions_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `activity_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -589,9 +584,9 @@ export default function TransactionsPage() {
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-lg font-semibold">Transactions</div>
+              <div className="text-lg font-semibold">Activity</div>
               <div className="mt-1 text-sm text-zinc-400">
-                One place to search + filter across all cards with low cognitive load.
+                A product-facing view of recent activity, with imported statement transactions and manual entries kept clearly separate.
               </div>
             </div>
 
@@ -602,9 +597,9 @@ export default function TransactionsPage() {
                   setManualFormOpen((prev) => !prev);
                 }}
                 className="rounded-xl border border-white/10 bg-white/10 px-3 py-2 text-xs text-zinc-100 hover:bg-white/15"
-                title="Add a manual transaction"
+                title="Add a manual activity entry"
               >
-                Add Transaction
+                Add Activity
               </button>
               <button
                 onClick={exportCsv}
@@ -618,8 +613,43 @@ export default function TransactionsPage() {
                 className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
                 title="Go to statements"
               >
-                Statements
+                Statement Source
               </Link>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-sm font-semibold text-zinc-100">Statement / PDF Activity</div>
+            <div className="mt-1 text-xs text-zinc-400">
+              Imported card transactions stay grouped here. Source tables remain separate in the backend.
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2 text-xs text-zinc-400">
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                Statements: <span className="text-zinc-200">{statements.length}</span>
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                Imported rows: <span className="text-zinc-200">{rows.length}</span>
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">
+                Source: Imported
+              </span>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-sm font-semibold text-zinc-100">Manual Activity</div>
+            <div className="mt-1 text-xs text-zinc-400">
+              User-entered activity stays separate from imports and Plaid so the workflow is clearer without changing behavior.
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2 text-xs text-zinc-400">
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                Saved manual rows: <span className="text-zinc-200">{manualTransactions.length}</span>
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">
+                Source: Manual
+              </span>
             </div>
           </div>
         </div>
@@ -627,7 +657,7 @@ export default function TransactionsPage() {
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <div className="text-sm font-semibold text-zinc-100">Manual Transactions</div>
+              <div className="text-sm font-semibold text-zinc-100">Manual Activity</div>
               <div className="mt-1 text-xs text-zinc-400">
                 Stored separately from Plaid and statement imports so cash/manual activity has its own source.
               </div>
@@ -691,7 +721,7 @@ export default function TransactionsPage() {
                   disabled={manualSaving}
                   className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm text-zinc-100 hover:bg-white/15 disabled:opacity-60"
                 >
-                  {manualSaving ? "Saving..." : "Save Transaction"}
+                  {manualSaving ? "Saving..." : "Save Activity"}
                 </button>
                 <button
                   type="button"
@@ -734,13 +764,13 @@ export default function TransactionsPage() {
                 {manualLoading ? (
                   <tr>
                     <td colSpan={5} className="py-6 text-zinc-400">
-                      Loading manual transactions...
+                      Loading manual activity...
                     </td>
                   </tr>
                 ) : manualTransactions.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="py-6 text-zinc-400">
-                      No manual transactions saved yet.
+                      No manual activity saved yet.
                     </td>
                   </tr>
                 ) : (
@@ -777,7 +807,7 @@ export default function TransactionsPage() {
         {/* Loading / error */}
         {loading && (
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5 text-sm text-zinc-400">
-            Loading transactions…
+            Loading activity...
           </div>
         )}
         {err && (
@@ -823,7 +853,7 @@ export default function TransactionsPage() {
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-                <div className="text-xs text-zinc-400">Transactions</div>
+                <div className="text-xs text-zinc-400">Imported transactions</div>
                 <div className="mt-2 text-2xl font-semibold text-zinc-100">
                   {kpis.count}
                 </div>
@@ -984,7 +1014,7 @@ export default function TransactionsPage() {
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-semibold text-zinc-100">
-                  Results
+                  Imported statement activity
                 </div>
                 <div className="text-xs text-zinc-400">
                   {filtered.length} rows • page {page}/{totalPages}
