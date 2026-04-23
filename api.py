@@ -48,6 +48,7 @@ import tempfile
 import json
 import time
 import threading
+import logging
 from datetime import date, datetime, timedelta
 from typing import Optional, List
 from calendar import monthrange
@@ -86,6 +87,7 @@ WEEKLY_BUFFER = 25.0          # safety cushion
 EXTRA_DEBT_TARGET = 50.0     # suggested extra payment
 
 app = FastAPI()
+logger = logging.getLogger("accountant_bot.plaid")
 
 def _is_placeholder(v: str) -> bool:
     if v is None:
@@ -417,6 +419,70 @@ def health():
     return {"ok": True}
 
 
+def _safe_database_url() -> str:
+    try:
+        return engine.url.render_as_string(hide_password=True)
+    except Exception:
+        return f"{engine.dialect.name}://<unavailable>"
+
+
+def _plaid_table_counts(db: Session, user_id: Optional[str] = None) -> dict:
+    filters = []
+    if user_id:
+        filters.append(PlaidItem.user_id == user_id)
+    item_q = db.query(func.count(PlaidItem.id))
+    if filters:
+        item_q = item_q.filter(*filters)
+
+    account_q = db.query(func.count(PlaidAccount.id))
+    transaction_q = db.query(func.count(PlaidTransaction.id))
+    if user_id:
+        account_q = account_q.filter(PlaidAccount.user_id == user_id)
+        transaction_q = transaction_q.filter(PlaidTransaction.user_id == user_id)
+
+    return {
+        "plaid_items": int(item_q.scalar() or 0),
+        "plaid_accounts": int(account_q.scalar() or 0),
+        "plaid_transactions": int(transaction_q.scalar() or 0),
+    }
+
+
+def _plaid_log(event: str, **fields) -> None:
+    try:
+        logger.info("plaid_sync.%s %s", event, json.dumps(fields, default=str, sort_keys=True))
+    except Exception:
+        logger.info("plaid_sync.%s %s", event, fields)
+
+
+@app.get("/debug/runtime-db")
+def debug_runtime_db(
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    """
+    Temporary deployment diagnostic. Does not expose secrets; database URL is password-masked.
+    """
+    user_id = _coerce_user_id(current_user, user_id)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "database": {
+            "dialect": engine.dialect.name,
+            "driver": engine.dialect.driver,
+            "url": _safe_database_url(),
+            "database": engine.url.database,
+            "host": engine.url.host,
+        },
+        "plaid_env": _plaid_env_name(),
+        "plaid_products": _plaid_products(),
+        "plaid_configured": bool((os.getenv("PLAID_CLIENT_ID") or "").strip() and (os.getenv("PLAID_SECRET") or "").strip()),
+        "plaid_token_encryption_ready": plaid_encryption_key_ready(),
+        "table_counts_for_user": _plaid_table_counts(db, user_id),
+        "table_counts_all_users": _plaid_table_counts(db),
+    }
+
+
 def _coerce_user_id(current_user: User, requested_user_id: Optional[str] = None) -> str:
     return resolve_user_id(current_user, requested_user_id)
 
@@ -640,6 +706,7 @@ def _load_plaid_sdk():
         from plaid.api import plaid_api
         from plaid.model.accounts_get_request import AccountsGetRequest
         from plaid.model.transactions_get_request import TransactionsGetRequest
+        from plaid.model.transactions_get_request_options import TransactionsGetRequestOptions
         from plaid.model.country_code import CountryCode
         from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
         from plaid.model.link_token_create_request import LinkTokenCreateRequest
@@ -656,6 +723,7 @@ def _load_plaid_sdk():
         "plaid_api": plaid_api,
         "AccountsGetRequest": AccountsGetRequest,
         "TransactionsGetRequest": TransactionsGetRequest,
+        "TransactionsGetRequestOptions": TransactionsGetRequestOptions,
         "CountryCode": CountryCode,
         "ItemPublicTokenExchangeRequest": ItemPublicTokenExchangeRequest,
         "LinkTokenCreateRequest": LinkTokenCreateRequest,
@@ -1103,6 +1171,90 @@ def _plaid_cash_breakdown(db: Session, user_id: str) -> dict:
     }
 
 
+def _plaid_assert_user_ownership(kind: str, existing_user_id: Optional[str], requested_user_id: str, external_id: Optional[str]) -> None:
+    if existing_user_id and existing_user_id != requested_user_id:
+        suffix = f" {external_id}" if external_id else ""
+        raise HTTPException(
+            status_code=409,
+            detail=f"{kind}{suffix} is already linked to another user.",
+        )
+
+
+def _serialize_plaid_cash_source_account(row: PlaidAccount) -> dict:
+    return {
+        "id": row.id,
+        "account_id": row.plaid_account_id,
+        "item_id": row.item.plaid_item_id if row.item else None,
+        "institution_name": row.institution_name or (row.item.institution_name if row.item else None),
+        "name": row.name,
+        "official_name": row.official_name,
+        "mask": row.mask,
+        "type": row.type,
+        "subtype": row.subtype,
+        "current_balance": round(_to_float(row.current_balance, 0.0), 2),
+        "available_balance": row.available_balance,
+        "counted_balance": round(_to_float(row.current_balance, 0.0), 2),
+        "last_balance_sync_at": row.last_balance_sync_at.isoformat() if row.last_balance_sync_at else None,
+        "sync_status": row.sync_status,
+    }
+
+
+def _summarize_upcoming_items(items: list[dict]) -> dict:
+    summary = {
+        "bill_total": 0.0,
+        "manual_bill_total": 0.0,
+        "debt_minimum_total": 0.0,
+        "bill_count": 0,
+        "manual_bill_count": 0,
+        "debt_minimum_count": 0,
+    }
+
+    for item in items:
+        item_type = (item.get("type") or "").strip()
+        amount = round(_to_float(item.get("amount"), 0.0), 2)
+        if item_type == "bill":
+            summary["bill_total"] += amount
+            summary["bill_count"] += 1
+        elif item_type == "manual_bill":
+            summary["manual_bill_total"] += amount
+            summary["manual_bill_count"] += 1
+        elif item_type == "debt_minimum":
+            summary["debt_minimum_total"] += amount
+            summary["debt_minimum_count"] += 1
+
+    return {
+        key: (round(value, 2) if isinstance(value, float) else value)
+        for key, value in summary.items()
+    }
+
+
+def _plaid_cash_sources_payload(db: Session, user_id: str, cash_total: Optional[float] = None) -> dict:
+    cash_breakdown = _plaid_cash_breakdown(db, user_id)
+    plaid_cash_total = round(float(cash_breakdown["included_total"]), 2)
+    resolved_cash_total = round(float(cash_total if cash_total is not None else _cash_total_latest(db, user_id)), 2)
+    pdf_cash_total = round(float(resolved_cash_total - plaid_cash_total), 2)
+
+    return {
+        "pdf_cash_total": pdf_cash_total,
+        "plaid_cash_total": plaid_cash_total,
+        "plaid_accounts_included": [
+            _serialize_plaid_cash_source_account(row) for row in cash_breakdown["included"]
+        ],
+        "plaid_duplicate_accounts_skipped": [
+            {
+                "account_id": row.plaid_account_id,
+                "name": row.name,
+                "mask": row.mask,
+                "institution_name": row.institution_name or (row.item.institution_name if row.item else None),
+                "current_balance": round(_to_float(row.current_balance, 0.0), 2),
+                "available_balance": row.available_balance,
+                "last_balance_sync_at": row.last_balance_sync_at.isoformat() if row.last_balance_sync_at else None,
+            }
+            for row in cash_breakdown["skipped"]
+        ],
+    }
+
+
 def _plaid_sync_window(start_date: Optional[date], end_date: Optional[date], lookback_days: int) -> tuple[date, date]:
     today = datetime.utcnow().date()
     safe_lookback = max(1, min(int(lookback_days or 30), 365))
@@ -1177,6 +1329,48 @@ def _recent_plaid_transactions_for_item(db: Session, item_row: PlaidItem, limit:
         .all()
     )
     return [_serialize_plaid_transaction(row) for row in rows]
+
+
+def _fetch_plaid_transactions(db: Session, client, sdk, item_row: PlaidItem, start_date: date, end_date: date) -> tuple[list[dict], dict]:
+    page_size = 500
+    offset = 0
+    transactions: list[dict] = []
+    page_count = 0
+    total_transactions = 0
+
+    while True:
+        options = sdk["TransactionsGetRequestOptions"](count=page_size, offset=offset)
+        request = sdk["TransactionsGetRequest"](
+            access_token=_get_plaid_access_token(item_row, db),
+            start_date=start_date,
+            end_date=end_date,
+            options=options,
+        )
+        response = _plaid_to_dict(client.transactions_get(request))
+        batch = [_plaid_to_dict(txn) for txn in response.get("transactions", [])]
+        page_count += 1
+        transactions.extend(batch)
+
+        total_transactions = int(response.get("total_transactions") or len(transactions))
+        _plaid_log(
+            "transactions_page",
+            item_id=item_row.plaid_item_id,
+            page=page_count,
+            offset=offset,
+            batch_count=len(batch),
+            total_transactions=total_transactions,
+        )
+        offset += len(batch)
+        if not batch or offset >= total_transactions:
+            break
+
+    meta = {
+        "page_count": page_count,
+        "returned_count": len(transactions),
+        "reported_total_transactions": total_transactions,
+    }
+    _plaid_log("transactions_fetch_complete", item_id=item_row.plaid_item_id, **meta)
+    return transactions, meta
 
 
 def _sync_plaid_item_resilient(
@@ -1265,6 +1459,8 @@ def _upsert_plaid_account(
         .filter(PlaidAccount.plaid_account_id == plaid_account_id)
         .one_or_none()
     )
+    if row is not None:
+        _plaid_assert_user_ownership("Plaid account", row.user_id, item_row.user_id, plaid_account_id)
     if row is None:
         row = _plaid_find_existing_account_candidate(db, item_row, account_payload)
     if row is None:
@@ -1349,13 +1545,9 @@ def _sync_plaid_transactions_for_item(
     end_date: date,
 ) -> int:
     synced_at = _plaid_now()
+    fetch_meta = {}
     try:
-        request = sdk["TransactionsGetRequest"](
-            access_token=_get_plaid_access_token(item_row, db),
-            start_date=start_date,
-            end_date=end_date,
-        )
-        response = _plaid_to_dict(client.transactions_get(request))
+        transactions, fetch_meta = _fetch_plaid_transactions(db, client, sdk, item_row, start_date, end_date)
     except sdk["plaid"].ApiException as exc:
         item_row.status = "error"
         item_row.last_sync_error = str(getattr(exc, "body", None) or exc)
@@ -1369,26 +1561,39 @@ def _sync_plaid_transactions_for_item(
     }
 
     synced = 0
-    for txn in response.get("transactions", []):
-        txn_data = _plaid_to_dict(txn)
+    inserted = 0
+    updated = 0
+    skipped_missing_account = 0
+    skipped_missing_transaction_id = 0
+    for txn_data in transactions:
         account_row = account_map.get(txn_data.get("account_id"))
         if account_row is None:
+            skipped_missing_account += 1
+            continue
+
+        plaid_transaction_id = txn_data.get("transaction_id")
+        if not plaid_transaction_id:
+            skipped_missing_transaction_id += 1
             continue
 
         row = (
             db.query(PlaidTransaction)
-            .filter(PlaidTransaction.plaid_transaction_id == txn_data.get("transaction_id"))
+            .filter(PlaidTransaction.plaid_transaction_id == plaid_transaction_id)
             .one_or_none()
         )
+        if row is not None:
+            _plaid_assert_user_ownership("Plaid transaction", row.user_id, item_row.user_id, plaid_transaction_id)
+            updated += 1
         if row is None:
             row = PlaidTransaction(
                 user_id=item_row.user_id,
                 plaid_item_id=item_row.id,
                 plaid_account_id=account_row.id,
-                plaid_transaction_id=txn_data["transaction_id"],
+                plaid_transaction_id=plaid_transaction_id,
                 created_at=synced_at,
             )
             db.add(row)
+            inserted += 1
 
         categories = txn_data.get("personal_finance_category") or {}
         if not isinstance(categories, dict):
@@ -1421,6 +1626,25 @@ def _sync_plaid_transactions_for_item(
     item_row.updated_at = synced_at
     _plaid_mark_duplicate_accounts_superseded(db, item_row.user_id, synced_at)
     db.flush()
+    db_count = (
+        db.query(func.count(PlaidTransaction.id))
+        .filter(PlaidTransaction.user_id == item_row.user_id, PlaidTransaction.plaid_item_id == item_row.id)
+        .scalar()
+        or 0
+    )
+    _plaid_log(
+        "transactions_db_flush",
+        item_id=item_row.plaid_item_id,
+        returned_count=fetch_meta.get("returned_count"),
+        reported_total_transactions=fetch_meta.get("reported_total_transactions"),
+        page_count=fetch_meta.get("page_count"),
+        inserted_count=inserted,
+        updated_count=updated,
+        upserted_count=synced,
+        skipped_missing_account=skipped_missing_account,
+        skipped_missing_transaction_id=skipped_missing_transaction_id,
+        db_count_for_item=int(db_count),
+    )
     return synced
 
 
@@ -1493,6 +1717,8 @@ def exchange_plaid_public_token(
         .filter(PlaidItem.plaid_item_id == plaid_item_id)
         .one_or_none()
     )
+    if item_row is not None:
+        _plaid_assert_user_ownership("Plaid item", item_row.user_id, user_id, plaid_item_id)
     if item_row is None:
         item_row = _plaid_find_existing_item_candidate(db, user_id, payload.institution_name)
     if item_row is None:
@@ -1515,6 +1741,11 @@ def exchange_plaid_public_token(
 
     db.commit()
     db.refresh(item_row)
+    _plaid_log(
+        "exchange_initial_commit_success",
+        item_id=item_row.plaid_item_id,
+        table_counts_for_user=_plaid_table_counts(db, user_id),
+    )
 
     start_date, end_date = _plaid_sync_window(None, None, 30)
     sync_result = _sync_plaid_item_resilient(
@@ -1528,6 +1759,13 @@ def exchange_plaid_public_token(
     )
     db.commit()
     db.refresh(item_row)
+    table_counts = _plaid_table_counts(db, user_id)
+    _plaid_log(
+        "exchange_sync_commit_success",
+        item_id=item_row.plaid_item_id,
+        transactions_synced=sync_result["transactions_synced"],
+        table_counts_for_user=table_counts,
+    )
 
     return {
         "ok": True,
@@ -1544,6 +1782,7 @@ def exchange_plaid_public_token(
         "last_accounts_sync_at": sync_result["last_accounts_sync_at"],
         "last_balances_sync_at": sync_result["last_balances_sync_at"],
         "last_transactions_sync_at": sync_result["last_transactions_sync_at"],
+        "table_counts_for_user": table_counts,
     }
 
 
@@ -1559,6 +1798,7 @@ def list_plaid_accounts(
         .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
         .filter(
             PlaidAccount.user_id == user_id,
+            PlaidItem.user_id == user_id,
             or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
             or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
         )
@@ -1614,6 +1854,15 @@ def sync_plaid_data(
         warnings.extend(result["warnings"])
 
     db.commit()
+    table_counts = _plaid_table_counts(db, user_id)
+    _plaid_log(
+        "sync_commit_success",
+        user_id=user_id,
+        items_synced=len(items),
+        accounts_synced=len(synced_accounts),
+        transactions_synced=total_transactions,
+        table_counts_for_user=table_counts,
+    )
     return {
         "ok": True,
         "user_id": user_id,
@@ -1625,6 +1874,7 @@ def sync_plaid_data(
         "item_results": item_results,
         "warnings": warnings,
         "last_sync_at": max((result["last_sync_at"] for result in item_results if result.get("last_sync_at")), default=None),
+        "table_counts_for_user": table_counts,
     }
 
 
@@ -1674,6 +1924,14 @@ def sync_plaid_transactions(
         total_transactions += _sync_plaid_transactions_for_item(db, client, sdk, item_row, start_date, end_date)
 
     db.commit()
+    table_counts = _plaid_table_counts(db, user_id)
+    _plaid_log(
+        "transactions_commit_success",
+        user_id=user_id,
+        items_synced=len(items),
+        transactions_synced=total_transactions,
+        table_counts_for_user=table_counts,
+    )
     return {
         "ok": True,
         "user_id": user_id,
@@ -1681,6 +1939,7 @@ def sync_plaid_transactions(
         "transactions_synced": total_transactions,
         "start_date": start_date,
         "end_date": end_date,
+        "table_counts_for_user": table_counts,
     }
 
 
@@ -1700,6 +1959,8 @@ def list_plaid_transactions(
         .join(PlaidItem, PlaidTransaction.plaid_item_id == PlaidItem.id)
         .filter(
             PlaidTransaction.user_id == user_id,
+            PlaidAccount.user_id == user_id,
+            PlaidItem.user_id == user_id,
             or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
             or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
         )
@@ -5510,6 +5771,8 @@ def os_next_best_dollar(
     user_id = _coerce_user_id(current_user, user_id)
     cash_total = _cash_total_latest(db, user_id)
     items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
+    cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
+    upcoming_summary = _summarize_upcoming_items(items)
 
     sts_today = float(cash_total) - float(upcoming_total) - float(buffer)
 
@@ -5566,6 +5829,15 @@ def os_next_best_dollar(
         "safe_to_spend_today": round(float(sts_today), 2),
         "stage": stage,
         "upcoming_items": items,
+        "cash_sources": cash_sources,
+        "upcoming_summary": upcoming_summary,
+        "calculation": {
+            "formula": "safe_to_spend_today = cash_total - upcoming_total - buffer",
+            "cash_total": round(float(cash_total), 2),
+            "upcoming_total": round(float(upcoming_total), 2),
+            "buffer": round(float(buffer), 2),
+            "safe_to_spend_today": round(float(sts_today), 2),
+        },
         "recommendation": rec,
     }
 
@@ -5590,36 +5862,28 @@ def os_state(
     manual_bills_list = db.query(ManualBill).filter(ManualBill.user_id == user_id, ManualBill.active == True).order_by(ManualBill.name.asc()).all()
 
     util = os_debt_utilization(user_id=user_id, db=db, current_user=current_user)
-    cash_breakdown = _plaid_cash_breakdown(db, user_id)
-    plaid_cash_total = cash_breakdown["included_total"]
-    cash_total = _cash_total_latest(db, user_id)
-    pdf_cash_total = round(float(cash_total - plaid_cash_total), 2)
+    cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
+    upcoming_summary = _summarize_upcoming_items(upcoming_items)
 
     return {
         "ok": True,
         "user_id": user_id,
         "cash_total": round(float(cash_total), 2),
-        "cash_sources": {
-            "pdf_cash_total": pdf_cash_total,
-            "plaid_cash_total": plaid_cash_total,
-            "plaid_duplicate_accounts_skipped": [
-                {
-                    "account_id": row.plaid_account_id,
-                    "name": row.name,
-                    "mask": row.mask,
-                    "institution_name": row.institution_name or (row.item.institution_name if row.item else None),
-                }
-                for row in cash_breakdown["skipped"]
-            ],
-        },
+        "cash_sources": cash_sources,
         "upcoming_window_days": window_days,
         "upcoming_total": round(float(upcoming_total), 2),
         "upcoming_items": upcoming_items,
+        "upcoming_summary": upcoming_summary,
         "manual_bills": manual_bills_list,
         "essentials_cap_monthly": {
             "essentials_bills_total": bills_total,
             "debt_minimums_total": debt_mins_total,
             "essentials_cap_total": essentials_total,
+        },
+        "calculation": {
+            "cash_total": round(float(cash_total), 2),
+            "upcoming_total": round(float(upcoming_total), 2),
+            "safe_to_spend_formula": "Use /os/next-best-dollar to apply buffer on top of cash_total and upcoming_total.",
         },
         "debt_utilization": util,
     }
