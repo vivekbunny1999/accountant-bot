@@ -23,6 +23,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
+  const primaryIdentity = user?.display_name || user?.username || user?.email || "Signed in";
+  const secondaryIdentity =
+    user?.email && user.email !== primaryIdentity
+      ? user.email
+      : user?.username && `@${user.username}`;
 
   async function handleLogout() {
     await logout();
@@ -35,7 +40,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <aside className="w-64 shrink-0 rounded-2xl border border-white/10 bg-[#0E141C] p-4">
           <div className="px-2 py-2">
             <div className="text-sm font-semibold">Accountant Bot</div>
-            <div className="text-xs text-zinc-400">{user?.display_name || user?.email || "Signed in"}</div>
+            <div className="text-xs text-zinc-200">{primaryIdentity}</div>
+            {secondaryIdentity ? <div className="mt-1 text-[11px] text-zinc-500">{secondaryIdentity}</div> : null}
           </div>
 
           <div className="my-3 h-px bg-white/10" />

@@ -2,8 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import { PasswordGuidance } from "@/components/auth/PasswordGuidance";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { getPasswordPolicy, PasswordPolicy } from "@/lib/api";
+import { FALLBACK_PASSWORD_POLICY, validatePasswordAgainstPolicy } from "@/lib/password-policy";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -11,11 +14,25 @@ export default function SignupPage() {
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [policy, setPolicy] = useState<PasswordPolicy>(FALLBACK_PASSWORD_POLICY);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    getPasswordPolicy()
+      .then((res) => {
+        if (res?.policy) setPolicy(res.policy);
+      })
+      .catch(() => {});
+  }, []);
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    const passwordError = validatePasswordAgainstPolicy(password, policy);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -54,14 +71,16 @@ export default function SignupPage() {
           />
           <input
             className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
-            placeholder="Password (8+ characters)"
+            placeholder={`Password (${policy.min_length}+ characters)`}
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
-            minLength={8}
+            minLength={policy.min_length}
           />
         </div>
+
+        <PasswordGuidance password={password} policy={policy} className="mt-4" />
 
         {error ? <div className="mt-4 text-sm text-rose-300">{error}</div> : null}
 

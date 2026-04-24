@@ -5,6 +5,7 @@ import {
   AuthBootstrapResponse,
   AuthResponse,
   AuthUser,
+  changePassword as apiChangePassword,
   clearSessionToken,
   confirmPasswordReset as apiConfirmPasswordReset,
   getMe,
@@ -15,6 +16,7 @@ import {
   sessionEventName,
   setSessionToken,
   signup as apiSignup,
+  updateAccountProfile as apiUpdateAccountProfile,
 } from "@/lib/api";
 
 type AuthState = "loading" | "authenticated" | "unauthenticated";
@@ -27,6 +29,13 @@ type AuthContextValue = {
   signup: (input: { email: string; password: string; display_name?: string }) => Promise<AuthResponse>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
+  updateProfile: (input: {
+    display_name?: string;
+    username?: string;
+    email?: string;
+    current_password?: string;
+  }) => Promise<AuthUser>;
+  changePassword: (input: { current_password: string; new_password: string }) => Promise<AuthResponse>;
   requestPasswordReset: (input: { email: string }) => ReturnType<typeof apiRequestPasswordReset>;
   confirmPasswordReset: (input: { token: string; password: string }) => Promise<AuthResponse>;
 };
@@ -113,6 +122,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return res;
   }
 
+  async function handleUpdateProfile(input: {
+    display_name?: string;
+    username?: string;
+    email?: string;
+    current_password?: string;
+  }) {
+    const res = await apiUpdateAccountProfile(input);
+    setUser(res.user);
+    await refresh();
+    return res.user;
+  }
+
+  async function handleChangePassword(input: { current_password: string; new_password: string }) {
+    const res = await apiChangePassword(input);
+    setSessionToken(res.token, res.expires_at);
+    setUser(res.user);
+    setStatus("authenticated");
+    await refresh();
+    return res;
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -123,6 +153,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signup: handleSignup,
         logout: handleLogout,
         refresh,
+        updateProfile: handleUpdateProfile,
+        changePassword: handleChangePassword,
         requestPasswordReset: apiRequestPasswordReset,
         confirmPasswordReset: handleConfirmPasswordReset,
       }}

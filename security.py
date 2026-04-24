@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -11,6 +12,8 @@ from cryptography.fernet import Fernet, InvalidToken
 
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "30") or "30")
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_TTL_MINUTES", "30") or "30")
+PASSWORD_MIN_LENGTH = int(os.getenv("AUTH_PASSWORD_MIN_LENGTH", "8") or "8")
+USERNAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$")
 PLAID_KEY_PLACEHOLDERS = {
     "",
     "replace_with_a_long_random_secret_or_fernet_key",
@@ -27,6 +30,43 @@ def _b64url(data: bytes) -> str:
 
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
+
+
+def normalize_username(username: str) -> str:
+    return (username or "").strip().lower()
+
+
+def username_is_valid(username: str) -> bool:
+    return bool(USERNAME_PATTERN.fullmatch(normalize_username(username)))
+
+
+def password_policy() -> dict:
+    return {
+        "min_length": PASSWORD_MIN_LENGTH,
+        "requires_uppercase": False,
+        "requires_lowercase": False,
+        "requires_number": False,
+        "requires_special": False,
+    }
+
+
+def validate_password_rules(password: str) -> list[str]:
+    errors: list[str] = []
+    policy = password_policy()
+    value = password or ""
+
+    if len(value) < policy["min_length"]:
+        errors.append(f"Password must be at least {policy['min_length']} characters.")
+    if policy["requires_uppercase"] and not any(ch.isupper() for ch in value):
+        errors.append("Password must include at least one uppercase letter.")
+    if policy["requires_lowercase"] and not any(ch.islower() for ch in value):
+        errors.append("Password must include at least one lowercase letter.")
+    if policy["requires_number"] and not any(ch.isdigit() for ch in value):
+        errors.append("Password must include at least one number.")
+    if policy["requires_special"] and not any(not ch.isalnum() for ch in value):
+        errors.append("Password must include at least one special character.")
+
+    return errors
 
 
 def hash_password(password: str) -> str:

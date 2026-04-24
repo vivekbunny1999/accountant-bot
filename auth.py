@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from db import SessionLocal
 from models import PasswordResetToken, User, UserSession, UserSettings
 from security import (
-    hash_password,
     hash_password_reset_token,
     hash_session_token,
     new_password_reset_token,
@@ -43,15 +42,26 @@ def _bearer_token(authorization: Optional[str]) -> Optional[str]:
 
 
 def public_user(user: User) -> dict:
+    email_verification_required = _email_verification_required()
+    email_verification_status = "verification_not_configured"
+    if email_verification_required:
+        email_verification_status = "verified" if user.email_verified_at else "not_verified"
+
     return {
         "id": user.id,
         "email": user.email,
+        "username": getattr(user, "username", None),
         "display_name": user.display_name,
         "auth_enabled": bool(user.auth_enabled),
-        "email_verified": bool(user.email_verified_at),
+        "email_verified": bool(user.email_verified_at) if email_verification_required else False,
         "email_verified_at": user.email_verified_at.isoformat() if user.email_verified_at else None,
+        "email_verification_required": email_verification_required,
+        "email_verification_status": email_verification_status,
+        "can_resend_verification": False,
         "beta_access_approved": bool(user.beta_access_approved),
+        "password_changed_at": user.password_changed_at.isoformat() if user.password_changed_at else None,
         "created_at": user.created_at.isoformat() if user.created_at else None,
+        "updated_at": user.updated_at.isoformat() if user.updated_at else None,
     }
 
 

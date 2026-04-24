@@ -78,5 +78,29 @@ def ensure_column(table: str, col_name: str, col_sql: str) -> bool:
     return True
 
 
+def ensure_unique_index(table: str, index_name: str, columns: list[str]) -> bool:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    if table not in table_names:
+        return False
+
+    for index in inspector.get_indexes(table):
+        if index["name"] == index_name:
+            return False
+        if index.get("unique") and list(index.get("column_names") or []) == columns:
+            return False
+
+    for constraint in inspector.get_unique_constraints(table):
+        if constraint.get("name") == index_name:
+            return False
+        if list(constraint.get("column_names") or []) == columns:
+            return False
+
+    cols_sql = ", ".join(columns)
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} ({cols_sql})"))
+    return True
+
+
 def initialize_database() -> None:
     Base.metadata.create_all(bind=engine)

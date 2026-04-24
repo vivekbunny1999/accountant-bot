@@ -8,12 +8,18 @@ const SESSION_EVENT = "accountantbot:session-changed";
 export type AuthUser = {
   id: string;
   email: string;
+  username?: string | null;
   display_name?: string | null;
   auth_enabled?: boolean;
   email_verified?: boolean;
   email_verified_at?: string | null;
+  email_verification_required?: boolean;
+  email_verification_status?: "verified" | "not_verified" | "verification_not_configured" | string;
+  can_resend_verification?: boolean;
   beta_access_approved?: boolean;
+  password_changed_at?: string | null;
   created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type AuthResponse = {
@@ -31,8 +37,17 @@ export type AuthBootstrapResponse = {
   beta?: {
     signup_mode?: string;
     email_verification_required?: boolean;
+    email_verification_configured?: boolean;
     password_reset_delivery?: string;
   };
+};
+
+export type PasswordPolicy = {
+  min_length: number;
+  requires_uppercase: boolean;
+  requires_lowercase: boolean;
+  requires_number: boolean;
+  requires_special: boolean;
 };
 
 export function getSessionToken(): string | null {
@@ -259,6 +274,16 @@ export async function signup(body: {
   return apiPost<AuthResponse>("/auth/signup", body);
 }
 
+export async function getPasswordPolicy(): Promise<{
+  ok: boolean;
+  policy: PasswordPolicy;
+  guidance?: {
+    recommended_mix?: string[];
+  };
+}> {
+  return apiGet("/auth/password-policy");
+}
+
 export async function login(body: {
   email: string;
   password: string;
@@ -279,10 +304,30 @@ export async function getMe(): Promise<{
   beta?: {
     signup_mode?: string;
     email_verification_required?: boolean;
+    email_verification_configured?: boolean;
     password_reset_delivery?: string;
   };
 }> {
   return apiGet("/auth/me");
+}
+
+export async function updateAccountProfile(body: {
+  display_name?: string;
+  username?: string;
+  email?: string;
+  current_password?: string;
+}): Promise<{
+  ok: boolean;
+  user: AuthUser;
+}> {
+  return apiPatch("/auth/profile", body);
+}
+
+export async function changePassword(body: {
+  current_password: string;
+  new_password: string;
+}): Promise<AuthResponse> {
+  return apiPost<AuthResponse>("/auth/password/change", body);
 }
 
 export async function requestPasswordReset(body: { email: string }): Promise<{
