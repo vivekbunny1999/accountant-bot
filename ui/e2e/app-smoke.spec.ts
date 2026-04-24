@@ -1,6 +1,20 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type ConsoleMessage, type Page, type Request, type Response } from "@playwright/test";
 import { runStepWithArtifacts } from "./support/artifacts";
 import { getE2ECredentials } from "./support/env";
+
+const LOGIN_TIMEOUT_MS = 15_000;
+
+type LoginConsoleError = {
+  text: string;
+  location?: string;
+};
+
+type LoginNetworkFailure = {
+  url: string;
+  method: string;
+  resourceType: string;
+  reason: string;
+};
 
 function main(page: Page) {
   return page.locator("main");
@@ -29,11 +43,149 @@ async function openLogin(page: Page) {
   });
 }
 
+function formatConsoleLocation(message: ConsoleMessage) {
+  const location = message.location();
+  if (!location.url) return undefined;
+  const line = typeof location.lineNumber === "number" ? location.lineNumber + 1 : null;
+  const column = typeof location.columnNumber === "number" ? location.columnNumber + 1 : null;
+  return `${location.url}${line != null ? `:${line}` : ""}${column != null ? `:${column}` : ""}`;
+}
+
+function formatNetworkFailure(record: LoginNetworkFailure) {
+  return `${record.method} ${record.url} [${record.resourceType}] -> ${record.reason}`;
+}
+
+async function getVisibleLoginError(page: Page) {
+  const errorMessage = page.locator("form div.text-rose-300").first();
+  const isVisible = await errorMessage.isVisible().catch(() => false);
+  if (!isVisible) return null;
+  return (await errorMessage.textContent())?.trim() || null;
+}
+
 async function signIn(page: Page) {
   const { email, password } = getE2ECredentials();
+  const consoleErrors: LoginConsoleError[] = [];
+  const failedNetworkRequests: LoginNetworkFailure[] = [];
+  const seenFailures = new Set<string>();
+
+  const pushFailedRequest = (record: LoginNetworkFailure) => {
+    const key = `${record.method}|${record.url}|${record.resourceType}|${record.reason}`;
+    if (seenFailures.has(key)) return;
+    seenFailures.add(key);
+    failedNetworkRequests.push(record);
+  };
+
+  const onConsole = (message: ConsoleMessage) => {
+    if (message.type() !== "error") return;
+    consoleErrors.push({
+      text: message.text(),
+      location: formatConsoleLocation(message),
+    });
+  };
+
+  const onRequestFailed = (request: Request) => {
+    const failure = request.failure();
+    pushFailedRequest({
+      url: request.url(),
+      method: request.method(),
+      resourceType: request.resourceType(),
+      reason: failure?.errorText || "Request failed",
+    });
+  };
+
+  const onResponse = (response: Response) => {
+    if (response.ok()) return;
+    const request = response.request();
+    pushFailedRequest({
+      url: response.url(),
+      method: request.method(),
+      resourceType: request.resourceType(),
+      reason: `HTTP ${response.status()} ${response.statusText()}`.trim(),
+    });
+  };
+
+  page.on("console", onConsole);
+  page.on("requestfailed", onRequestFailed);
+  page.on("response", onResponse);
+
   await page.getByPlaceholder("Email").fill(email);
   await page.getByPlaceholder("Password").fill(password);
-  await page.getByRole("button", { name: /^log in$/i }).click();
+
+  try {
+    await page.getByRole("button", { name: /^log in$/i }).click();
+
+    await page.waitForFunction(
+      () => {
+        if (window.location.pathname.startsWith("/dashboard")) return true;
+        const errorNode = document.querySelector("form div.text-rose-300");
+        if (!(errorNode instanceof HTMLElement)) return false;
+        return Boolean(errorNode.offsetWidth || errorNode.offsetHeight || errorNode.getClientRects().length);
+      },
+      undefined,
+      { timeout: LOGIN_TIMEOUT_MS }
+    );
+
+    if (page.url().includes("/dashboard")) return;
+
+    const visibleAuthError = await getVisibleLoginError(page);
+    const pageText = await page.evaluate(() => document.body?.innerText || "");
+    const failedRequestsSummary = failedNetworkRequests.length
+      ? failedNetworkRequests.map((record) => `- ${formatNetworkFailure(record)}`).join("\n")
+      : "- none";
+    const consoleErrorsSummary = consoleErrors.length
+      ? consoleErrors
+          .map((record) => `- ${record.text}${record.location ? ` (${record.location})` : ""}`)
+          .join("\n")
+      : "- none";
+
+    throw new Error(
+      [
+        `Login stayed on ${page.url()} instead of reaching /dashboard within ${LOGIN_TIMEOUT_MS}ms.`,
+        `Visible auth error: ${visibleAuthError || "none"}`,
+        "Failed network requests:",
+        failedRequestsSummary,
+        "Console errors:",
+        consoleErrorsSummary,
+        "Visible login page text:",
+        pageText || "(empty)",
+      ].join("\n")
+    );
+  } catch (error) {
+    if (error instanceof Error && /Login stayed on/.test(error.message)) {
+      throw error;
+    }
+
+    const visibleAuthError = await getVisibleLoginError(page);
+    const pageText = await page.evaluate(() => document.body?.innerText || "");
+    const failedRequestsSummary = failedNetworkRequests.length
+      ? failedNetworkRequests.map((record) => `- ${formatNetworkFailure(record)}`).join("\n")
+      : "- none";
+    const consoleErrorsSummary = consoleErrors.length
+      ? consoleErrors
+          .map((record) => `- ${record.text}${record.location ? ` (${record.location})` : ""}`)
+          .join("\n")
+      : "- none";
+
+    const originalMessage = error instanceof Error ? error.message : String(error);
+
+    throw new Error(
+      [
+        `Login did not reach /dashboard. Last URL: ${page.url()}.`,
+        `Reason: ${originalMessage}`,
+        `Visible auth error: ${visibleAuthError || "none"}`,
+        "Failed network requests:",
+        failedRequestsSummary,
+        "Console errors:",
+        consoleErrorsSummary,
+        "Visible login page text:",
+        pageText || "(empty)",
+      ].join("\n")
+    );
+  } finally {
+    page.off("console", onConsole);
+    page.off("requestfailed", onRequestFailed);
+    page.off("response", onResponse);
+  }
 }
 
 test.describe.serial("Accountant Bot preview QA", () => {
