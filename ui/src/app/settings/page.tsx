@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { PasswordGuidance } from "@/components/auth/PasswordGuidance";
 import { AppShell } from "@/components/layout/AppShell";
 import { useAuth } from "@/components/auth/AuthProvider";
 import {
@@ -10,10 +11,12 @@ import {
   Debt,
   exchangePlaidPublicToken,
   getOsState,
+  getPasswordPolicy,
   getUserSettings,
   getPlaidAccounts,
   getPlaidTransactions,
   listDebts,
+  PasswordPolicy,
   PlaidAccountSummary,
   PlaidItemSummary,
   PlaidTransactionSummary,
@@ -21,6 +24,7 @@ import {
   syncPlaidData,
   updateDebt,
 } from "@/lib/api";
+import { FALLBACK_PASSWORD_POLICY, validatePasswordAgainstPolicy } from "@/lib/password-policy";
 
 type PlaidLinkOnSuccessMetadata = {
   institution?: { name?: string | null } | null;
@@ -135,7 +139,6 @@ type SettingsModel = {
 
   /** 1) Profile / Basics */
   profile: {
-    displayName: string;
     homeCurrency: Currency;
     timezone: string; // just display; browser is truth for now
     monthStartsOn: 1 | 2 | 3 | 4 | 5 | 6 | 7; // 1=Mon ... 7=Sun (ISO style)
@@ -306,12 +309,33 @@ function fileToText(file: File) {
   });
 }
 
+function emailVerificationMeta(status?: string) {
+  if (status === "verified") {
+    return {
+      label: "Verified",
+      tone: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+      detail: "This account has a verified email on record.",
+    };
+  }
+  if (status === "not_verified") {
+    return {
+      label: "Not verified",
+      tone: "border-amber-500/30 bg-amber-500/10 text-amber-200",
+      detail: "Email verification is required, but this address has not been verified yet.",
+    };
+  }
+  return {
+    label: "Verification not configured",
+    tone: "border-white/10 bg-white/5 text-zinc-300",
+    detail: "This environment does not have real email verification or resend flow configured yet.",
+  };
+}
+
 /** ------- defaults ------- */
 function defaultSettings(): SettingsModel {
   return {
     version: 1,
     profile: {
-      displayName: "Vivek",
       homeCurrency: "USD",
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Detroit",
       monthStartsOn: 1,
@@ -497,18 +521,21 @@ function Input({
   value,
   onChange,
   placeholder,
+  type = "text",
 }: {
   label: string;
   desc?: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
+  type?: "text" | "password" | "email";
 }) {
   return (
     <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
       <div className="text-sm font-medium text-zinc-100">{label}</div>
       {desc ? <div className="mt-1 text-xs text-zinc-400">{desc}</div> : null}
       <input
+        type={type}
         className="mt-3 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
         value={value}
         placeholder={placeholder}
@@ -803,10 +830,28 @@ function DebtFormFields({
 }
 
 export default function SettingsPage() {
-  const { user } = useAuth();
+  const { user, bootstrap, updateProfile, changePassword } = useAuth();
   const USER_ID = user?.id ?? "";
   const [settings, setSettings] = useState<SettingsModel>(() => defaultSettings());
   const [loaded, setLoaded] = useState(false);
+  const [passwordPolicy, setPasswordPolicy] = useState<PasswordPolicy>(FALLBACK_PASSWORD_POLICY);
+  const [accountForm, setAccountForm] = useState({
+    display_name: "",
+    username: "",
+    email: "",
+    current_password: "",
+  });
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [accountStatus, setAccountStatus] = useState<string | null>(null);
+  const [securityForm, setSecurityForm] = useState({
+    current_password: "",
+    new_password: "",
+    confirm_password: "",
+  });
+  const [securityBusy, setSecurityBusy] = useState(false);
+  const [securityError, setSecurityError] = useState<string | null>(null);
+  const [securityStatus, setSecurityStatus] = useState<string | null>(null);
   const [debts, setDebts] = useState<Debt[]>([]);
   const [debtsLoading, setDebtsLoading] = useState(false);
   const [debtError, setDebtError] = useState<string | null>(null);
@@ -830,10 +875,27 @@ export default function SettingsPage() {
     const s = safeJsonParse<SettingsModel>(localStorage.getItem(SETTINGS_KEY));
     if (s?.version === 1) {
       // merge with defaults so new fields never break old saves
-      setSettings((prev) => ({ ...defaultSettings(), ...s }));
+      setSettings({ ...defaultSettings(), ...s });
     }
     setLoaded(true);
   }, []);
+
+  useEffect(() => {
+    getPasswordPolicy()
+      .then((res) => {
+        if (res?.policy) setPasswordPolicy(res.policy);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setAccountForm({
+      display_name: user?.display_name || "",
+      username: user?.username || "",
+      email: user?.email || "",
+      current_password: "",
+    });
+  }, [user?.display_name, user?.username, user?.email]);
 
   useEffect(() => {
     if (!USER_ID) return;
@@ -935,6 +997,92 @@ export default function SettingsPage() {
       alerts: settings.alerts.enabled ? settings.alerts.frequency : "Off",
     };
   }, [settings]);
+
+  const verificationMeta = emailVerificationMeta(user?.email_verification_status);
+
+  async function handleSaveAccount() {
+    if (!user) return;
+    setAccountBusy(true);
+    setAccountError(null);
+    setAccountStatus(null);
+
+    const trimmedDisplayName = accountForm.display_name.trim();
+    const trimmedUsername = accountForm.username.trim().toLowerCase();
+    const trimmedEmail = accountForm.email.trim().toLowerCase();
+
+    if (!trimmedDisplayName) {
+      setAccountBusy(false);
+      setAccountError("Display name is required.");
+      return;
+    }
+    if (trimmedUsername && !/^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$/.test(trimmedUsername)) {
+      setAccountBusy(false);
+      setAccountError("Username must be 3-32 characters and use only letters, numbers, dots, dashes, or underscores.");
+      return;
+    }
+    if (!trimmedEmail || !trimmedEmail.includes("@")) {
+      setAccountBusy(false);
+      setAccountError("A valid email address is required.");
+      return;
+    }
+    if (trimmedEmail !== (user.email || "").toLowerCase() && !accountForm.current_password) {
+      setAccountBusy(false);
+      setAccountError("Current password is required to change your email.");
+      return;
+    }
+
+    try {
+      await updateProfile({
+        display_name: trimmedDisplayName,
+        username: trimmedUsername || "",
+        email: trimmedEmail,
+        current_password: accountForm.current_password || undefined,
+      });
+      setAccountForm((prev) => ({ ...prev, current_password: "" }));
+      setAccountStatus("Profile saved.");
+    } catch (err) {
+      setAccountError(err instanceof Error ? err.message : "Could not save profile changes.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleChangePassword() {
+    setSecurityBusy(true);
+    setSecurityError(null);
+    setSecurityStatus(null);
+
+    if (!securityForm.current_password) {
+      setSecurityBusy(false);
+      setSecurityError("Enter your current password.");
+      return;
+    }
+    const passwordError = validatePasswordAgainstPolicy(securityForm.new_password, passwordPolicy);
+    if (passwordError) {
+      setSecurityBusy(false);
+      setSecurityError(passwordError);
+      return;
+    }
+    if (securityForm.new_password !== securityForm.confirm_password) {
+      setSecurityBusy(false);
+      setSecurityError("New password and confirmation do not match.");
+      return;
+    }
+
+    try {
+      await changePassword({
+        current_password: securityForm.current_password,
+        new_password: securityForm.new_password,
+      });
+      setSecurityForm({ current_password: "", new_password: "", confirm_password: "" });
+      setAccountForm((prev) => ({ ...prev, current_password: "" }));
+      setSecurityStatus("Password changed. Older sessions were signed out.");
+    } catch (err) {
+      setSecurityError(err instanceof Error ? err.message : "Could not change password.");
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
 
   function resetAll() {
     localStorage.removeItem(SETTINGS_KEY);
@@ -1977,22 +2125,172 @@ export default function SettingsPage() {
 
           {/* RIGHT: App, Categories, Alerts, Data, Privacy */}
           <div className="space-y-5">
-            {/* Profile */}
+            {/* Account */}
             <Card>
               <SectionTitle
-                title="Profile & Display"
-                subtitle="Small choices that reduce friction everywhere (formatting, week starts, currency)."
+                title="Account & Identity"
+                subtitle="This is the logged-in profile used by the sidebar and account session."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Input
                   label="Display name"
-                  desc="Used in dashboard greetings."
-                  value={settings.profile.displayName}
-                  onChange={(v) => setSettings((p) => ({ ...p, profile: { ...p.profile, displayName: v } }))}
+                  desc="Shown anywhere the product names the signed-in user."
+                  value={accountForm.display_name}
+                  onChange={(v) => {
+                    setAccountStatus(null);
+                    setAccountError(null);
+                    setAccountForm((prev) => ({ ...prev, display_name: v }));
+                  }}
                 />
+                <Input
+                  label="Username"
+                  desc="Optional public-style handle for this account."
+                  value={accountForm.username}
+                  onChange={(v) => {
+                    setAccountStatus(null);
+                    setAccountError(null);
+                    setAccountForm((prev) => ({ ...prev, username: v.toLowerCase() }));
+                  }}
+                  placeholder="vivek"
+                />
+              </div>
 
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <Input
+                  label="Email"
+                  desc="Used for sign-in."
+                  value={accountForm.email}
+                  type="email"
+                  onChange={(v) => {
+                    setAccountStatus(null);
+                    setAccountError(null);
+                    setAccountForm((prev) => ({ ...prev, email: v }));
+                  }}
+                  placeholder="you@example.com"
+                />
+                <Input
+                  label="Current password"
+                  desc="Required only when you change the email address."
+                  value={accountForm.current_password}
+                  type="password"
+                  onChange={(v) => {
+                    setAccountStatus(null);
+                    setAccountError(null);
+                    setAccountForm((prev) => ({ ...prev, current_password: v }));
+                  }}
+                  placeholder="Current password"
+                />
+              </div>
+
+              <div className="mt-4 rounded-2xl border p-4 text-sm text-zinc-300">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs uppercase tracking-[0.18em] text-zinc-500">Email verification</div>
+                    <div className="mt-1 text-zinc-100">{verificationMeta.label}</div>
+                    <div className="mt-1 text-xs text-zinc-400">{verificationMeta.detail}</div>
+                  </div>
+                  <div className={`rounded-full border px-3 py-1 text-xs ${verificationMeta.tone}`}>{verificationMeta.label}</div>
+                </div>
+                {!bootstrap?.beta?.email_verification_configured ? (
+                  <div className="mt-3 text-xs text-zinc-500">Resend verification is unavailable until real verification delivery is configured.</div>
+                ) : null}
+              </div>
+
+              <div className="mt-3 rounded-2xl border border-white/10 bg-black/10 p-4 text-xs text-zinc-400">
+                Phone is not shown here because this build does not currently support storing or verifying a phone number.
+              </div>
+
+              {accountError ? <div className="mt-3 text-xs text-red-300">{accountError}</div> : null}
+              {accountStatus ? <div className="mt-3 text-xs text-emerald-300">{accountStatus}</div> : null}
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleSaveAccount}
+                  disabled={accountBusy}
+                  className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                >
+                  {accountBusy ? "Saving..." : "Save profile"}
+                </button>
+              </div>
+            </Card>
+
+            <Card>
+              <SectionTitle
+                title="Account Security"
+                subtitle="Change password without breaking the existing session-based auth flow."
+              />
+              <Divider />
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Input
+                  label="Current password"
+                  value={securityForm.current_password}
+                  type="password"
+                  onChange={(v) => {
+                    setSecurityStatus(null);
+                    setSecurityError(null);
+                    setSecurityForm((prev) => ({ ...prev, current_password: v }));
+                  }}
+                  placeholder="Current password"
+                />
+                <Input
+                  label="New password"
+                  value={securityForm.new_password}
+                  type="password"
+                  onChange={(v) => {
+                    setSecurityStatus(null);
+                    setSecurityError(null);
+                    setSecurityForm((prev) => ({ ...prev, new_password: v }));
+                  }}
+                  placeholder={`New password (${passwordPolicy.min_length}+ characters)`}
+                />
+              </div>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <Input
+                  label="Confirm new password"
+                  value={securityForm.confirm_password}
+                  type="password"
+                  onChange={(v) => {
+                    setSecurityStatus(null);
+                    setSecurityError(null);
+                    setSecurityForm((prev) => ({ ...prev, confirm_password: v }));
+                  }}
+                  placeholder="Confirm new password"
+                />
+                <div className="rounded-2xl border border-white/10 bg-black/10 p-4 text-xs text-zinc-400">
+                  Changing your password rotates the current session and signs out older sessions.
+                </div>
+              </div>
+
+              <PasswordGuidance password={securityForm.new_password} policy={passwordPolicy} className="mt-4" />
+
+              {securityError ? <div className="mt-3 text-xs text-red-300">{securityError}</div> : null}
+              {securityStatus ? <div className="mt-3 text-xs text-emerald-300">{securityStatus}</div> : null}
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleChangePassword}
+                  disabled={securityBusy}
+                  className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                >
+                  {securityBusy ? "Updating..." : "Change password"}
+                </button>
+              </div>
+            </Card>
+
+            <Card>
+              <SectionTitle
+                title="Display & Calendar"
+                subtitle="Preferences for formatting, calendar rhythm, and how numbers are shown."
+              />
+              <Divider />
+
+              <div className="grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Home currency"
                   desc="Used for labels. (We can support multi-currency later.)"
@@ -2005,9 +2303,7 @@ export default function SettingsPage() {
                     { label: "GBP", value: "GBP" },
                   ]}
                 />
-              </div>
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Week starts on"
                   desc="Used for weekly summaries."
@@ -2023,13 +2319,19 @@ export default function SettingsPage() {
                     { label: "Sunday", value: "Sunday" },
                   ]}
                 />
+              </div>
 
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Input
                   label="Timezone (display)"
                   desc="Read from browser."
                   value={settings.profile.timezone}
                   onChange={(v) => setSettings((p) => ({ ...p, profile: { ...p.profile, timezone: v } }))}
                 />
+
+                <div className="rounded-2xl border border-white/10 bg-black/10 p-4 text-xs text-zinc-400">
+                  Account identity is now managed above, while these controls stay focused on UI preferences.
+                </div>
               </div>
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">

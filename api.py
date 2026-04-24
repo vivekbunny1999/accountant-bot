@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 # Database
-from db import SessionLocal, engine, ensure_column, initialize_database
+from db import SessionLocal, engine, ensure_column, ensure_unique_index, initialize_database
 
 def get_db():
     db = SessionLocal()
@@ -46,6 +46,7 @@ from pydantic import BaseModel
 import os
 import tempfile
 import json
+import secrets
 import time
 import threading
 import logging
@@ -77,8 +78,13 @@ from security import (
     hash_password,
     new_user_id,
     normalize_email,
+    normalize_username,
+    password_policy,
     plaid_encryption_key_ready,
     utcnow,
+    username_is_valid,
+    validate_password_rules,
+    verify_password,
 )
 
 
@@ -139,6 +145,18 @@ class PasswordResetRequestIn(BaseModel):
 class PasswordResetConfirmIn(BaseModel):
     token: str
     password: str
+
+
+class AccountProfileUpdateIn(BaseModel):
+    display_name: Optional[str] = None
+    username: Optional[str] = None
+    email: Optional[str] = None
+    current_password: Optional[str] = None
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class SettingsIn(BaseModel):
@@ -230,6 +248,41 @@ def _password_reset_debug_links_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _trim_display_name(value: Optional[str], fallback: Optional[str] = None) -> str:
+    trimmed = (value or "").strip()
+    if trimmed:
+        return trimmed[:80]
+    fallback_trimmed = (fallback or "").strip()
+    if fallback_trimmed:
+        return fallback_trimmed[:80]
+    return "Accountant Bot User"
+
+
+def _username_seed(email: str, display_name: Optional[str] = None) -> str:
+    local_part = (email or "").split("@", 1)[0]
+    source = display_name or local_part or "user"
+    candidate = normalize_username(re.sub(r"[^a-zA-Z0-9._-]+", "", source))
+    candidate = candidate.strip("._-")
+    if len(candidate) < 3:
+        candidate = normalize_username(re.sub(r"[^a-zA-Z0-9]+", "", local_part or "user")) or "user"
+    candidate = candidate[:32].strip("._-") or "user"
+    if not username_is_valid(candidate):
+        candidate = f"user{secrets.token_hex(2)}"
+    return candidate[:32]
+
+
+def _next_available_username(db: Session, email: str, display_name: Optional[str], current_user_id: Optional[str] = None) -> str:
+    base = _username_seed(email, display_name)
+    for attempt in range(0, 100):
+        suffix = "" if attempt == 0 else str(attempt + 1)
+        max_base_len = 32 - len(suffix)
+        candidate = f"{base[:max_base_len]}{suffix}"
+        existing = db.query(User).filter(User.username == candidate).first()
+        if not existing or existing.id == current_user_id:
+            return candidate
+    return f"user{secrets.token_hex(4)}"
+
+
 def _enforce_beta_signup_gate(email: str) -> bool:
     mode = _beta_signup_mode()
     if mode == "open":
@@ -255,11 +308,13 @@ def ensure_statement_card_columns():
     ensure_column("statements", "card_name", "card_name TEXT")
     ensure_column("statements", "card_last4", "card_last4 TEXT")
     ensure_column("plaid_items", "access_token_encrypted", "access_token_encrypted TEXT")
+    ensure_column("users", "username", "username TEXT")
     ensure_column("users", "email_verified_at", "email_verified_at TIMESTAMP")
     ensure_column("users", "beta_access_approved", "beta_access_approved BOOLEAN NOT NULL DEFAULT FALSE")
     ensure_column("users", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
     ensure_column("users", "password_changed_at", "password_changed_at TIMESTAMP")
     ensure_column("user_sessions", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
+    ensure_unique_index("users", "ix_users_username_unique", ["username"])
 
 
 def _require_plaid_encryption_ready() -> None:
@@ -517,19 +572,22 @@ def auth_signup(payload: SignupIn, request: Request, db: Session = Depends(get_d
     _enforce_rate_limit("signup_email", email or "unknown")
     if "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email address is required.")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    password_errors = validate_password_rules(password)
+    if password_errors:
+        raise HTTPException(status_code=400, detail=password_errors[0])
     _enforce_beta_signup_gate(email)
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
+    display_name = _trim_display_name(payload.display_name, email.split("@", 1)[0])
     user = User(
         id=new_user_id(),
         email=email,
+        username=_next_available_username(db, email, display_name),
         password_hash=hash_password(password),
-        display_name=(payload.display_name or "").strip() or email.split("@", 1)[0],
+        display_name=display_name,
         auth_enabled=True,
-        email_verified_at=None if _email_verification_required() else utcnow(),
+        email_verified_at=None,
         beta_access_approved=True,
         session_version=1,
         created_at=utcnow(),
@@ -546,6 +604,17 @@ def auth_signup(payload: SignupIn, request: Request, db: Session = Depends(get_d
         "token": token,
         "expires_at": session.expires_at.isoformat(),
         "user": public_user(user),
+    }
+
+
+@app.get("/auth/password-policy")
+def auth_password_policy():
+    return {
+        "ok": True,
+        "policy": password_policy(),
+        "guidance": {
+            "recommended_mix": ["uppercase", "lowercase", "number", "special"],
+        },
     }
 
 
@@ -615,14 +684,14 @@ def auth_password_reset_request(payload: PasswordResetRequestIn, request: Reques
 def auth_password_reset_confirm(payload: PasswordResetConfirmIn, request: Request, db: Session = Depends(get_db)):
     _enforce_rate_limit("reset_confirm_ip", _client_ip(request))
     password = payload.password or ""
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    password_errors = validate_password_rules(password)
+    if password_errors:
+        raise HTTPException(status_code=400, detail=password_errors[0])
 
     user = consume_password_reset(db, payload.token or "")
     user.password_hash = hash_password(password)
     user.password_changed_at = utcnow()
-    if not user.email_verified_at and not _email_verification_required():
-        user.email_verified_at = utcnow()
+    user.updated_at = utcnow()
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -649,7 +718,99 @@ def auth_me(current_user: User = Depends(require_current_user), db: Session = De
             "signup_mode": _beta_signup_mode(),
             "email_verification_required": _email_verification_required(),
             "password_reset_delivery": _password_reset_delivery_mode(),
+            "email_verification_configured": False,
         },
+    }
+
+
+@app.patch("/auth/profile")
+def auth_update_profile(
+    payload: AccountProfileUpdateIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="No profile changes were provided.")
+
+    if "display_name" in data:
+        current_user.display_name = _trim_display_name(data.get("display_name"), current_user.display_name or current_user.email)
+
+    if "username" in data:
+        raw_username = normalize_username(data.get("username") or "")
+        if raw_username:
+            if not username_is_valid(raw_username):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Username must be 3-32 characters and use only letters, numbers, dots, dashes, or underscores.",
+                )
+            existing_username = db.query(User).filter(User.username == raw_username).first()
+            if existing_username and existing_username.id != current_user.id:
+                raise HTTPException(status_code=409, detail="That username is already taken.")
+            current_user.username = raw_username
+        else:
+            current_user.username = None
+
+    if "email" in data:
+        email = normalize_email(data.get("email") or "")
+        if "@" not in email:
+            raise HTTPException(status_code=400, detail="A valid email address is required.")
+        if email != (current_user.email or ""):
+            password = data.get("current_password") or ""
+            if not current_user.password_hash or not verify_password(password, current_user.password_hash):
+                raise HTTPException(status_code=400, detail="Current password is required to change your email.")
+            existing_email = db.query(User).filter(User.email == email).first()
+            if existing_email and existing_email.id != current_user.id:
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
+            current_user.email = email
+            if _email_verification_required():
+                current_user.email_verified_at = None
+
+    current_user.updated_at = utcnow()
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "ok": True,
+        "user": public_user(current_user),
+    }
+
+
+@app.post("/auth/password/change")
+def auth_change_password(
+    payload: PasswordChangeIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    current_password = payload.current_password or ""
+    new_password = payload.new_password or ""
+
+    if not current_user.password_hash or not verify_password(current_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    password_errors = validate_password_rules(new_password)
+    if password_errors:
+        raise HTTPException(status_code=400, detail=password_errors[0])
+    if verify_password(new_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Choose a new password that is different from your current password.")
+
+    current_user.password_hash = hash_password(new_password)
+    current_user.password_changed_at = utcnow()
+    current_user.updated_at = utcnow()
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
+    revoke_all_sessions(db, current_user.id)
+    current_user = bump_session_version(db, current_user)
+    token, session = create_session(db, current_user, request.headers.get("user-agent"))
+    return {
+        "ok": True,
+        "token": token,
+        "expires_at": session.expires_at.isoformat(),
+        "user": public_user(current_user),
     }
 
 

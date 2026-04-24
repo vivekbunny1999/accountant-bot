@@ -46,6 +46,7 @@ class User(Base):
 
     id = Column(String, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=True)
+    username = Column(String, unique=True, index=True, nullable=True)
     password_hash = Column(Text, nullable=True)
     display_name = Column(String, nullable=True)
     auth_enabled = Column(Boolean, default=False, nullable=False)

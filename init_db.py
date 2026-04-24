@@ -2,7 +2,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from db import SessionLocal, ensure_column, initialize_database
+from db import SessionLocal, ensure_column, ensure_unique_index, initialize_database
 from models import (
     AdviceLog,
     Bill,
@@ -95,11 +95,13 @@ def main():
     ensure_column("statements", "card_name", "card_name TEXT")
     ensure_column("statements", "card_last4", "card_last4 TEXT")
     ensure_column("plaid_items", "access_token_encrypted", "access_token_encrypted TEXT")
+    ensure_column("users", "username", "username TEXT")
     ensure_column("users", "email_verified_at", "email_verified_at TIMESTAMP")
     ensure_column("users", "beta_access_approved", "beta_access_approved BOOLEAN NOT NULL DEFAULT FALSE")
     ensure_column("users", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
     ensure_column("users", "password_changed_at", "password_changed_at TIMESTAMP")
     ensure_column("user_sessions", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
+    ensure_unique_index("users", "ix_users_username_unique", ["username"])
     _backfill_legacy_users()
 
     print("DB initialized/updated")
