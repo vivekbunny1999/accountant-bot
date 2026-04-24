@@ -63,6 +63,14 @@ Backend local URL: `http://127.0.0.1:8000`
   Local example: `http://127.0.0.1:3000,http://localhost:3000`
   Staging example: `https://accountant-bot-staging.vercel.app`
 
+- `FRONTEND_URL`
+  Optional single frontend origin to append to the CORS allowlist.
+  Example: `https://accountant-bot.vercel.app`
+
+- `CORS_ORIGIN_REGEX`
+  Optional regex for preview deployments when Vercel URLs change per branch.
+  Example: `https://accountant-bot-.*\.vercel\.app`
+
 ### Frontend
 
 - `NEXT_PUBLIC_API_BASE_URL`
@@ -90,6 +98,8 @@ uvicorn api:app --host 0.0.0.0 --port $PORT
 
 - `DATABASE_URL=<managed Postgres URL>`
 - `CORS_ORIGINS=<your staging frontend URL>`
+- `FRONTEND_URL=<your main Vercel frontend URL>`
+- `CORS_ORIGIN_REGEX=<optional Vercel preview regex>`
 
 3. Install dependencies from `requirements.txt`.
 

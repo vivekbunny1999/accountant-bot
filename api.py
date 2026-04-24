@@ -239,6 +239,10 @@ def _email_verification_required() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _email_verification_configured() -> bool:
+    return False
+
+
 def _password_reset_delivery_mode() -> str:
     return (os.getenv("AUTH_PASSWORD_RESET_DELIVERY", "manual_beta") or "manual_beta").strip().lower()
 
@@ -295,14 +299,35 @@ def _enforce_beta_signup_gate(email: str) -> bool:
 
 def _cors_origins_from_env() -> list[str]:
     raw = os.getenv("CORS_ORIGINS", "http://127.0.0.1:3000,http://localhost:3000").strip()
-    if not raw:
-        return ["http://127.0.0.1:3000", "http://localhost:3000"]
-    if raw == "*":
-        allow_all = (os.getenv("CORS_ALLOW_ALL", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
-        if allow_all:
-            return ["*"]
-        return ["http://127.0.0.1:3000", "http://localhost:3000"]
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    origins: list[str] = []
+    if raw:
+        if raw == "*":
+            allow_all = (os.getenv("CORS_ALLOW_ALL", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+            if allow_all:
+                return ["*"]
+            origins.extend(["http://127.0.0.1:3000", "http://localhost:3000"])
+        else:
+            origins.extend([origin.strip() for origin in raw.split(",") if origin.strip()])
+
+    frontend_url = (os.getenv("FRONTEND_URL") or "").strip()
+    if frontend_url:
+        origins.append(frontend_url.rstrip("/"))
+
+    if not origins:
+        origins = ["http://127.0.0.1:3000", "http://localhost:3000"]
+
+    deduped: list[str] = []
+    seen = set()
+    for origin in origins:
+        if origin not in seen:
+            deduped.append(origin)
+            seen.add(origin)
+    return deduped
+
+
+def _cors_origin_regex_from_env() -> Optional[str]:
+    raw = (os.getenv("CORS_ORIGIN_REGEX") or "").strip()
+    return raw or None
 
 def ensure_statement_card_columns():
     ensure_column("statements", "card_name", "card_name TEXT")
@@ -419,6 +444,7 @@ _scrub_plaintext_plaid_tokens()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins_from_env(),
+    allow_origin_regex=_cors_origin_regex_from_env(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -718,7 +744,7 @@ def auth_me(current_user: User = Depends(require_current_user), db: Session = De
             "signup_mode": _beta_signup_mode(),
             "email_verification_required": _email_verification_required(),
             "password_reset_delivery": _password_reset_delivery_mode(),
-            "email_verification_configured": False,
+            "email_verification_configured": _email_verification_configured(),
         },
     }
 
