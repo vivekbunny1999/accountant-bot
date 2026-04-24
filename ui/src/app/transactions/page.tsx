@@ -6,10 +6,12 @@ import { AppShell } from "@/components/layout/AppShell";
 import {
   createManualTransaction,
   deleteManualTransaction,
+  getPlaidTransactions,
   listStatements,
   listStatementTransactions,
   listManualTransactions,
   ManualTransaction,
+  PlaidTransactionSummary,
   Statement,
   Transaction,
 } from "@/lib/api";
@@ -66,6 +68,35 @@ function monthLabel(key: string) {
 
 function amountAbs(t: Transaction) {
   return Math.abs(Number(t.amount) || 0);
+}
+
+function isRecentDate(dateValue: Date | null, days: number) {
+  if (!dateValue) return false;
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - Math.max(0, days - 1));
+  return dateValue >= cutoff;
+}
+
+function plaidTxnDate(txn: PlaidTransactionSummary) {
+  return parseDateLoose(txn.posted_date ?? txn.authorized_date ?? null);
+}
+
+function plaidLooksLikeNonSpend(txn: PlaidTransactionSummary) {
+  const text = `${txn.merchant_name ?? ""} ${txn.name ?? ""} ${txn.category_primary ?? ""}`.toLowerCase();
+  return (
+    text.includes("payment") ||
+    text.includes("refund") ||
+    text.includes("reversal") ||
+    text.includes("credit") ||
+    text.includes("deposit") ||
+    text.includes("transfer") ||
+    text.includes("payroll")
+  );
+}
+
+function isPlaidSpend(txn: PlaidTransactionSummary) {
+  return Number(txn.amount || 0) > 0 && !txn.pending && !plaidLooksLikeNonSpend(txn);
 }
 
 /** =========================
@@ -212,6 +243,9 @@ export default function TransactionsPage() {
   const [manualTransactions, setManualTransactions] = useState<ManualTransaction[]>([]);
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
+  const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
+  const [plaidLoading, setPlaidLoading] = useState(false);
+  const [plaidError, setPlaidError] = useState<string | null>(null);
   const [manualFormOpen, setManualFormOpen] = useState(false);
   const [manualSaving, setManualSaving] = useState(false);
   const [manualForm, setManualForm] = useState<ManualTransactionForm>({
@@ -268,6 +302,31 @@ export default function TransactionsPage() {
     if (!userId) return;
     loadManualEntries();
   }, [userId, loadManualEntries]);
+
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+
+    (async () => {
+      setPlaidLoading(true);
+      setPlaidError(null);
+      try {
+        const res = await getPlaidTransactions({ user_id: userId, limit: 50 });
+        if (!cancelled) setPlaidTransactions(res.transactions || []);
+      } catch (error) {
+        if (!cancelled) {
+          setPlaidTransactions([]);
+          setPlaidError(getErrorMessage(error, "Failed to load Plaid transactions"));
+        }
+      } finally {
+        if (!cancelled) setPlaidLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   useEffect(() => {
     setLoading(true);
@@ -343,6 +402,34 @@ export default function TransactionsPage() {
     }
     return Array.from(set.values()).sort((a, b) => a.localeCompare(b));
   }, [rows]);
+
+  const sourceSummary = useMemo(() => {
+    const statementSpend = rows.reduce((sum, row) => {
+      return isRecentDate(row._date ?? null, 30) && !isCreditLike(row) ? sum + amountAbs(row) : sum;
+    }, 0);
+
+    const plaidSpend = plaidTransactions.reduce((sum, txn) => {
+      return isRecentDate(plaidTxnDate(txn), 30) && isPlaidSpend(txn) ? sum + Number(txn.amount || 0) : sum;
+    }, 0);
+
+    const manualSpend = manualTransactions.reduce((sum, row) => {
+      const dateValue = parseDateLoose(row.date);
+      const amount = Number(row.amount || 0);
+      return isRecentDate(dateValue, 30) && amount < 0 ? sum + Math.abs(amount) : sum;
+    }, 0);
+
+    const plaidRecentRows = plaidTransactions
+      .filter((txn) => isPlaidSpend(txn))
+      .slice(0, 10);
+
+    return {
+      statementSpend,
+      plaidSpend,
+      manualSpend,
+      totalVisibleSpend: statementSpend + plaidSpend + manualSpend,
+      plaidRecentRows,
+    };
+  }, [rows, plaidTransactions, manualTransactions]);
 
   // Filter + sort
   const filtered = useMemo(() => {
@@ -586,7 +673,7 @@ export default function TransactionsPage() {
             <div>
               <div className="text-lg font-semibold">Activity</div>
               <div className="mt-1 text-sm text-zinc-400">
-                A product-facing view of recent activity, with imported statement transactions and manual entries kept clearly separate.
+                A source-aware activity view with Plaid, statement/PDF, and manual activity kept separate so it matches dashboard intelligence.
               </div>
             </div>
 
@@ -619,38 +706,97 @@ export default function TransactionsPage() {
           </div>
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-sm font-semibold text-zinc-100">Statement / PDF Activity</div>
-            <div className="mt-1 text-xs text-zinc-400">
-              Imported card transactions stay grouped here. Source tables remain separate in the backend.
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2 text-xs text-zinc-400">
-              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                Statements: <span className="text-zinc-200">{statements.length}</span>
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                Imported rows: <span className="text-zinc-200">{rows.length}</span>
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">
-                Source: Imported
-              </span>
+            <div className="text-xs text-zinc-400">Plaid recent spend</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.plaidSpend)}</div>
+            <div className="mt-1 text-xs text-zinc-500">
+              {plaidLoading ? "Loading Plaid activity..." : `${sourceSummary.plaidRecentRows.length} recent spend rows shown`}
             </div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-sm font-semibold text-zinc-100">Manual Activity</div>
-            <div className="mt-1 text-xs text-zinc-400">
-              User-entered activity stays separate from imports and Plaid so the workflow is clearer without changing behavior.
+            <div className="text-xs text-zinc-400">Statement / PDF spend</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.statementSpend)}</div>
+            <div className="mt-1 text-xs text-zinc-500">
+              {statements.length} statements • {rows.length} imported rows
             </div>
-            <div className="mt-4 flex flex-wrap gap-2 text-xs text-zinc-400">
-              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                Saved manual rows: <span className="text-zinc-200">{manualTransactions.length}</span>
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">
-                Source: Manual
-              </span>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-xs text-zinc-400">Manual spend</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.manualSpend)}</div>
+            <div className="mt-1 text-xs text-zinc-500">
+              {manualTransactions.length} manual rows kept separate from imports
             </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-xs text-zinc-400">Total visible activity spend</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.totalVisibleSpend)}</div>
+            <div className="mt-1 text-xs text-zinc-500">Last 30 days across visible source sections</div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-zinc-100">Plaid Activity</div>
+              <div className="mt-1 text-xs text-zinc-400">
+                Dashboard coaching uses Plaid transactions too, so this page now shows a recent Plaid section without merging backend tables.
+              </div>
+            </div>
+            <div className="text-xs text-zinc-500">Source: Plaid</div>
+          </div>
+
+          {plaidError ? (
+            <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              {plaidError}
+            </div>
+          ) : null}
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs text-zinc-400">
+                <tr className="border-b border-white/10">
+                  <th className="py-3 pr-4">date</th>
+                  <th className="py-3 pr-4">account</th>
+                  <th className="py-3 pr-4">merchant</th>
+                  <th className="py-3 pr-0 text-right">amount</th>
+                </tr>
+              </thead>
+              <tbody className="text-zinc-200">
+                {plaidLoading ? (
+                  <tr>
+                    <td colSpan={4} className="py-6 text-zinc-400">
+                      Loading Plaid activity...
+                    </td>
+                  </tr>
+                ) : sourceSummary.plaidRecentRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="py-6 text-zinc-400">
+                      No recent Plaid spend is visible right now.
+                    </td>
+                  </tr>
+                ) : (
+                  sourceSummary.plaidRecentRows.map((txn) => (
+                    <tr key={txn.transaction_id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="py-3 pr-4 text-zinc-300">
+                        {txn.posted_date || txn.authorized_date || "-"}
+                      </td>
+                      <td className="py-3 pr-4">
+                        <div className="text-zinc-100">{txn.account_name || "Plaid account"}</div>
+                        <div className="mt-1 text-xs text-zinc-500">{txn.institution_name || "Linked institution"}</div>
+                      </td>
+                      <td className="py-3 pr-4 text-zinc-300">{txn.merchant_name || txn.name || "-"}</td>
+                      <td className="py-3 pr-0 text-right font-mono text-zinc-100">
+                        {fmtMoney(Number(txn.amount || 0))}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -823,7 +969,7 @@ export default function TransactionsPage() {
              * ========================= */}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-                <div className="text-xs text-zinc-400">Spend (filtered view)</div>
+                <div className="text-xs text-zinc-400">Statement / PDF spend</div>
                 <div className="mt-2 text-2xl font-semibold text-zinc-100">
                   {fmtMoney(kpis.spendTotal)}
                 </div>
@@ -833,7 +979,7 @@ export default function TransactionsPage() {
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-                <div className="text-xs text-zinc-400">Credits / Payments</div>
+                <div className="text-xs text-zinc-400">Statement credits / payments</div>
                 <div className="mt-2 text-2xl font-semibold text-zinc-100">
                   {fmtMoney(kpis.creditTotal)}
                 </div>
@@ -843,7 +989,7 @@ export default function TransactionsPage() {
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-                <div className="text-xs text-zinc-400">Net (Spend - Credits)</div>
+                <div className="text-xs text-zinc-400">Statement net (spend - credits)</div>
                 <div className="mt-2 text-2xl font-semibold text-zinc-100">
                   {fmtMoney(kpis.net)}
                 </div>
@@ -853,7 +999,7 @@ export default function TransactionsPage() {
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-                <div className="text-xs text-zinc-400">Imported transactions</div>
+                <div className="text-xs text-zinc-400">Statement / PDF transactions</div>
                 <div className="mt-2 text-2xl font-semibold text-zinc-100">
                   {kpis.count}
                 </div>

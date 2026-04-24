@@ -5903,12 +5903,18 @@ def os_next_best_dollar(
     4) If surplus > 0 => recommend extra payment to highest APR debt (avalanche)
     """
     user_id = _coerce_user_id(current_user, user_id)
+    settings = _user_settings_payload(db, user_id)
+    minimum_extra_payment = _to_float(
+        _settings_value(settings, ["financialOS", "debt", "minExtraPayment"], 0.0),
+        0.0,
+    )
     cash_total = _cash_total_latest(db, user_id)
     items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
     cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
     upcoming_summary = _summarize_upcoming_items(items)
 
     sts_today = float(cash_total) - float(upcoming_total) - float(buffer)
+    available_sts = round(max(sts_today, 0.0), 2)
     breakdown = _build_financial_os_breakdown(
         cash_total=cash_total,
         cash_sources=cash_sources,
@@ -5920,8 +5926,6 @@ def os_next_best_dollar(
 
     # determine stage quickly
     stage = "Stabilize" if sts_today < 0 else "Attack Debt"
-
-    extra = round(max(sts_today, 0.0), 2)
 
     # IMPORTANT FIX:
     # Treat active=NULL as active (common when rows were inserted before defaults were set)
@@ -5951,14 +5955,20 @@ def os_next_best_dollar(
                 target = d
 
     rec = None
-    if target and extra > 0:
+    extra_details = _recommended_extra_payment_details(
+        available_sts=available_sts,
+        debt_balance=_to_float(getattr(target, "balance", None), 0.0) if target else 0.0,
+        minimum_extra_payment=minimum_extra_payment,
+    )
+    if target and extra_details["recommended_extra_payment"] > 0:
         rec = {
             "debt_id": target.id,
             "name": target.name,
             "last4": target.last4,
             "apr": target.apr,
-            "recommended_extra_payment": extra,
-            "why": "Highest APR debt first (avalanche) after protecting upcoming bills + buffer."
+            "available_sts": extra_details["available_sts"],
+            "recommended_extra_payment": extra_details["recommended_extra_payment"],
+            "why": "Highest APR debt first (avalanche) after protecting upcoming bills and buffer. Recommendation is capped so it stays realistic month to month.",
         }
 
     return {
@@ -5969,17 +5979,20 @@ def os_next_best_dollar(
         "cash_total": round(float(cash_total), 2),
         "upcoming_total": round(float(upcoming_total), 2),
         "safe_to_spend_today": round(float(sts_today), 2),
+        "available_sts": available_sts,
         "stage": stage,
         "upcoming_items": items,
         "cash_sources": cash_sources,
         "upcoming_summary": upcoming_summary,
         "breakdown": breakdown,
         "calculation": {
-            "formula": "safe_to_spend_today = cash_total - upcoming_total - buffer",
+            "formula": "safe_to_spend_today = cash_total - upcoming_total - buffer; recommended_extra_payment uses a capped slice of positive STS instead of the full STS balance.",
             "cash_total": round(float(cash_total), 2),
             "upcoming_total": round(float(upcoming_total), 2),
             "buffer": round(float(buffer), 2),
             "safe_to_spend_today": round(float(sts_today), 2),
+            "available_sts": available_sts,
+            "recommended_extra_payment": extra_details["recommended_extra_payment"],
         },
         "recommendation": rec,
     }
@@ -6131,6 +6144,69 @@ def _debt_totals_snapshot(debts: list) -> dict:
         "weighted_apr": weighted_apr,
         "positive_balance_count": positive_balance_count,
         "apr_known_count": apr_known_count,
+    }
+
+
+def _user_settings_payload(db: Session, user_id: str) -> dict:
+    row = ensure_user_settings(db, user_id)
+    return parse_settings_json(getattr(row, "settings_json", "{}") or "{}")
+
+
+def _settings_value(settings: Optional[dict], path: list[str], default=None):
+    current = settings or {}
+    for key in path:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+    return current if current is not None else default
+
+
+def _recommended_extra_payment_details(
+    *,
+    available_sts: float,
+    debt_balance: float,
+    minimum_extra_payment: Optional[float] = None,
+) -> dict:
+    available_sts_value = round(max(_to_float(available_sts, 0.0), 0.0), 2)
+    debt_balance_value = round(max(_to_float(debt_balance, 0.0), 0.0), 2)
+    minimum_setting = round(max(_to_float(minimum_extra_payment, 0.0), 0.0), 2)
+
+    # Keep extra-pay recommendations intentionally conservative. STS is a liquidity measure,
+    # not a promise that the same full amount can be repeated toward debt every month.
+    capped_recommendation = 0.0
+    if available_sts_value > 0 and debt_balance_value > 0:
+        capped_recommendation = round(
+            min(available_sts_value * 0.05, debt_balance_value, 500.0),
+            2,
+        )
+
+    recommended_extra_payment = capped_recommendation
+
+    # Respect the user's minimum-extra preference only when current STS can actually fund it
+    # and the hard balance / $500 guardrails still allow it.
+    if minimum_setting > 0 and debt_balance_value > 0:
+        feasible_floor = round(min(minimum_setting, debt_balance_value, 500.0), 2)
+        if feasible_floor > 0 and available_sts_value >= feasible_floor:
+            recommended_extra_payment = max(recommended_extra_payment, feasible_floor)
+
+    recommended_extra_payment = round(
+        min(
+            recommended_extra_payment,
+            debt_balance_value,
+            available_sts_value if available_sts_value > 0 else 0.0,
+            500.0,
+        ),
+        2,
+    )
+
+    return {
+        "available_sts": available_sts_value,
+        "recommended_extra_payment": recommended_extra_payment,
+        "minimum_extra_payment_setting": minimum_setting or None,
+        "formula": (
+            "recommended_extra_payment = min(max(available_sts, 0) * 0.05, debt_balance, 500), "
+            "then raise to the user's minimum extra payment only when current STS can safely fund that floor."
+        ),
     }
 
 
@@ -6549,7 +6625,38 @@ def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dic
     return out, coverage
 
 
-def _build_spending_leak_insight(source_activity: dict[str, list[dict]]) -> Optional[dict]:
+def _leak_severity(
+    *,
+    leak_total: float,
+    source_total_spend: float,
+    safe_to_spend: float,
+) -> str:
+    leak_value = round(max(_to_float(leak_total, 0.0), 0.0), 2)
+    source_total = round(max(_to_float(source_total_spend, 0.0), 0.0), 2)
+    available_sts = round(max(_to_float(safe_to_spend, 0.0), 0.0), 2)
+
+    # Keep tiny leaks low-noise when liquidity is very strong so the page does not
+    # simultaneously say "you have huge cushion" and "panic about $35 of Uber".
+    if leak_value < 50 and available_sts > 0 and leak_value < (available_sts * 0.01):
+        return "info"
+
+    meaningful_vs_spend = leak_value >= max(60.0, source_total * 0.08)
+    meaningful_vs_sts = available_sts <= 0 or leak_value >= max(50.0, available_sts * 0.05)
+    severe_vs_spend = leak_value >= max(250.0, source_total * 0.18)
+    severe_vs_sts = available_sts <= 0 or leak_value >= max(150.0, available_sts * 0.1)
+
+    if severe_vs_spend and severe_vs_sts:
+        return "critical"
+    if meaningful_vs_spend or meaningful_vs_sts:
+        return "warning"
+    return "info"
+
+
+def _build_spending_leak_insight(
+    source_activity: dict[str, list[dict]],
+    *,
+    safe_to_spend: float,
+) -> Optional[dict]:
     candidates = []
 
     for source, rows in source_activity.items():
@@ -6573,10 +6680,12 @@ def _build_spending_leak_insight(source_activity: dict[str, list[dict]]) -> Opti
             category_total = round(by_category[top_category], 2)
             category_share = category_total / max(total_spend, 1.0)
             if top_category not in {"Other"} and category_total >= 100 and category_share >= 0.35 and category_counts[top_category] >= 2:
-                severity = "warning"
-                if category_total >= 250 or category_share >= 0.55:
-                    severity = "critical"
-                elif category_share < 0.45 and category_total < 180:
+                severity = _leak_severity(
+                    leak_total=category_total,
+                    source_total_spend=total_spend,
+                    safe_to_spend=safe_to_spend,
+                )
+                if severity != "critical" and category_share < 0.45 and category_total < 180:
                     severity = "info"
                 candidates.append(_build_os_insight(
                     key=f"spending_leak_category_{source}",
@@ -6605,7 +6714,13 @@ def _build_spending_leak_insight(source_activity: dict[str, list[dict]]) -> Opti
             if total < 30 or avg_amount < 3 or avg_amount > 25:
                 continue
             merchant_name = (items[-1].get("merchant") or "Small charges").strip()
-            severity = "warning" if total >= 60 or count >= 5 else "info"
+            severity = _leak_severity(
+                leak_total=total,
+                source_total_spend=total_spend,
+                safe_to_spend=safe_to_spend,
+            )
+            if severity == "critical" and total < 120:
+                severity = "warning"
             candidates.append(_build_os_insight(
                 key=f"spending_leak_small_{source}_{merchant_norm[:18]}",
                 title=f"Small {merchant_name} charges are stacking up.",
@@ -6646,6 +6761,8 @@ def _build_burn_rate_insight(
 
         daily_burn = recent_spend / 14.0
         projected_window_spend = round(daily_burn * normalized_window_days, 2)
+        normal_weekly_baseline = round(recent_spend / 2.0, 2)
+        conservative_weekly_target = round(min(max(normal_weekly_baseline * 0.9, 50.0), 750.0), 2)
 
         if safe_to_spend <= 0:
             severity = "warning"
@@ -6656,7 +6773,6 @@ def _build_burn_rate_insight(
         else:
             severity = "success"
 
-        weekly_cap = round((max(safe_to_spend, 0.0) / normalized_window_days) * 7, 2)
         candidates.append(_build_os_insight(
             key=f"burn_rate_{source}",
             title=(
@@ -6671,12 +6787,12 @@ def _build_burn_rate_insight(
                 f"{_insight_recency_note(latest_date)}"
             ),
             suggested_action=(
-                f"Keep discretionary spending under about ${weekly_cap:.0f} per week until the projected pace fits under STS."
+                f"Trim discretionary spending toward about ${conservative_weekly_target:.0f}/week until the projected pace fits inside STS."
                 if severity in {"warning", "critical"}
-                else f"Keep weekly discretionary spending near ${weekly_cap:.0f} or lower to stay inside STS."
+                else "Your recent pace is affordable, but keep discretionary spending near your normal baseline."
             ),
             sources=[source],
-            rule="Use the latest 14-day spend window for one source, convert it to a daily pace, then project it across the STS window and compare it with current STS.",
+            rule="Use the latest 14-day spend window for one source, convert it to a daily pace, then project it across the STS window. Guidance stays anchored to recent baseline spend instead of raw STS.",
             score=projected_window_spend,
         ))
 
@@ -6794,6 +6910,51 @@ def _build_stability_insight(
     )
 
 
+def _build_high_apr_drag_insight(
+    *,
+    stability_label: str,
+    stability_value: float,
+    weighted_apr: Optional[float],
+    high_apr_threshold: float,
+    priority_debt: Optional[Debt],
+    recurring_extra_payment: float,
+) -> Optional[dict]:
+    apr_value = _to_float(weighted_apr, 0.0)
+    threshold = max(_to_float(high_apr_threshold, 18.0), 1.0)
+    if apr_value <= 0 or apr_value < threshold:
+        return None
+
+    lowered = (stability_label or "").strip().lower()
+    debt_name = priority_debt.name if priority_debt and priority_debt.name else "your highest-cost debt"
+    strong_cash = lowered in {"strong", "stable"} and stability_value >= 60
+
+    return _build_os_insight(
+        key="high_apr_drag",
+        title=(
+            "Strong cash position, but high-cost debt is dragging your score."
+            if strong_cash
+            else "High-cost debt is still expensive to carry."
+        ),
+        severity="warning" if apr_value >= threshold + 4 else "info",
+        explanation=(
+            f"Weighted APR is {apr_value:.1f}% across active debts, above the {threshold:.1f}% high-cost threshold."
+            + (
+                f" Cash is stable enough to press the advantage on {debt_name}."
+                if strong_cash
+                else ""
+            )
+        ),
+        suggested_action=(
+            f"Keep the recommended extra payment on {debt_name} while cash stays steady."
+            if recurring_extra_payment > 0
+            else f"Prioritize {debt_name} for the next extra payment once cash remains repeatably positive."
+        ),
+        sources=["financial_os"],
+        rule="Show a separate debt-cost insight when weighted APR is above the configured high-cost threshold so strong stability does not hide expensive debt.",
+        score=apr_value * 10.0,
+    )
+
+
 def _build_spending_data_insight(source_coverage: dict[str, dict]) -> dict:
     loaded_sources = [
         details.get("source_label")
@@ -6816,6 +6977,7 @@ def _build_spending_data_insight(source_coverage: dict[str, dict]) -> dict:
 def _build_what_to_do_next_insight(
     *,
     safe_to_spend: float,
+    available_sts: float,
     buffer: float,
     upcoming_total: float,
     stability_value: float,
@@ -6874,14 +7036,14 @@ def _build_what_to_do_next_insight(
         debt_name = priority_debt.name or "your highest-APR debt"
         return _build_os_insight(
             key="what_to_do_next",
-            title=f"Put extra ${recurring_extra_payment:.0f} toward {debt_name}.",
+            title=f"Put an extra ${recurring_extra_payment:.0f} toward {debt_name}.",
             severity="success" if stability_value >= 60 else "info",
             explanation=(
-                f"STS is healthy at ${safe_to_spend:.0f}, and the current priority debt is {debt_name}."
+                f"STS is ${available_sts:.0f}, but only ${recurring_extra_payment:.0f} is being treated as a repeatable monthly extra payment so bills and buffer stay protected."
             ),
-            suggested_action=f"Apply the extra payment to {debt_name} after bills, minimums, and buffer stay protected.",
+            suggested_action=f"Apply that extra payment to {debt_name} after bills, minimums, and buffer stay protected.",
             sources=["financial_os"],
-            rule="If STS is positive and bills/minimums are covered, direct the extra amount to the highest-APR active debt.",
+            rule="If STS is positive and bills/minimums are covered, direct the capped extra-payment recommendation to the highest-APR active debt.",
             score=recurring_extra_payment,
         )
 
@@ -6906,6 +7068,7 @@ def _build_coaching_insights_payload(
     cash_total: float,
     upcoming_total: float,
     safe_to_spend: float,
+    available_sts: float,
     stability_label: str,
     stability_value: float,
     stability_explanation: str,
@@ -6915,11 +7078,14 @@ def _build_coaching_insights_payload(
     recurring_extra_payment: float,
     upcoming_debt_minimum_total: float,
     available_for_minimums: float,
+    weighted_apr: Optional[float],
+    high_apr_threshold: float,
 ) -> dict:
     source_activity, source_coverage = _collect_spending_activity_by_source(db, user_id)
 
     what_to_do_next = _build_what_to_do_next_insight(
         safe_to_spend=safe_to_spend,
+        available_sts=available_sts,
         buffer=buffer,
         upcoming_total=upcoming_total,
         stability_value=stability_value,
@@ -6948,7 +7114,18 @@ def _build_coaching_insights_payload(
             window_days=window_days,
             safe_to_spend=safe_to_spend,
         ),
-        _build_spending_leak_insight(source_activity),
+        _build_spending_leak_insight(
+            source_activity,
+            safe_to_spend=safe_to_spend,
+        ),
+        _build_high_apr_drag_insight(
+            stability_label=stability_label,
+            stability_value=stability_value,
+            weighted_apr=weighted_apr,
+            high_apr_threshold=high_apr_threshold,
+            priority_debt=priority_debt,
+            recurring_extra_payment=recurring_extra_payment,
+        ),
         _build_stability_insight(
             stability_label=stability_label,
             stability_value=stability_value,
@@ -7001,6 +7178,15 @@ def os_intelligence(
     All numbers are backend-computed from current Financial OS state.
     """
     user_id = _coerce_user_id(current_user, user_id)
+    settings = _user_settings_payload(db, user_id)
+    minimum_extra_payment = _to_float(
+        _settings_value(settings, ["financialOS", "debt", "minExtraPayment"], 0.0),
+        0.0,
+    )
+    high_apr_threshold = _to_float(
+        _settings_value(settings, ["financialOS", "stageTargets", "debtCostRateHighPct"], 18.0),
+        18.0,
+    )
 
     cash_total = _cash_total_latest(db, user_id)
     upcoming_items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
@@ -7037,16 +7223,22 @@ def os_intelligence(
 
     recommendation = None
     priority_debt = _priority_debt_for_intelligence(debts)
-    recurring_extra_payment = 0.0
-    if priority_debt and safe_to_spend > 0:
-        recurring_extra_payment = round(max(safe_to_spend, 0.0), 2)
+    extra_payment_details = _recommended_extra_payment_details(
+        available_sts=safe_to_spend,
+        debt_balance=_to_float(getattr(priority_debt, "balance", None), 0.0) if priority_debt else 0.0,
+        minimum_extra_payment=minimum_extra_payment,
+    )
+    available_sts = extra_payment_details["available_sts"]
+    recurring_extra_payment = extra_payment_details["recommended_extra_payment"]
+    if priority_debt and recurring_extra_payment > 0:
         recommendation = {
             "debt_id": priority_debt.id,
             "name": priority_debt.name,
             "last4": priority_debt.last4,
             "apr": priority_debt.apr,
+            "available_sts": available_sts,
             "recommended_extra_payment": recurring_extra_payment,
-            "why": "Highest APR debt first (avalanche) after upcoming obligations and buffer are protected.",
+            "why": "Highest APR debt first (avalanche) after upcoming obligations and buffer are protected. Recommendation is capped so it stays realistic month to month.",
         }
 
     health_components = []
@@ -7213,7 +7405,7 @@ def os_intelligence(
             countdown_explanation = "No active debt balance is on file right now."
         else:
             countdown_explanation = (
-                f"Assumes each debt keeps its current minimum and the current extra payment suggestion of ${recurring_extra_payment:.0f}/month can repeat."
+                f"Assumes this extra amount can be repeated monthly: ${recurring_extra_payment:.0f}/month on top of current minimums."
                 if recurring_extra_payment > 0
                 else "Assumes each debt keeps its current minimum payment and rates stay flat."
             )
@@ -7230,7 +7422,7 @@ def os_intelligence(
             "modeled_debt_count": portfolio_projection.get("modeled_debt_count", 0),
             "excluded_debts": portfolio_projection.get("excluded_debts", []),
             "is_partial": excluded_count > 0,
-            "formula": "Simulated month by month: accrue interest, pay minimums, then apply the current extra-payment recommendation to the highest-APR balance.",
+            "formula": "Simulated month by month: accrue interest, pay minimums, then apply the capped repeatable extra-payment recommendation to the highest-APR balance.",
             "explanation": countdown_explanation,
         }
     else:
@@ -7284,6 +7476,7 @@ def os_intelligence(
     fi_progress_value = _round_clean(sum(item["weight"] * item["progress"] for item in fi_components) / max(fi_weight, 1))
 
     impact_payload = {
+        "available_sts": available_sts,
         "recommended_extra_payment": recurring_extra_payment,
         "target_debt": {
             "id": priority_debt.id,
@@ -7295,12 +7488,12 @@ def os_intelligence(
         "estimated_interest_saved": None,
         "estimated_months_faster": None,
         "estimated_payoff_months_with_extra": None,
-        "formula": "Compare target debt payoff using minimum only versus minimum plus the current extra-payment recommendation each month.",
+        "formula": "Compare target debt payoff using minimum only versus minimum plus the capped repeatable extra-payment recommendation each month.",
         "assumptions": [
             "APR and minimum payment stay constant.",
-            "The current extra-payment recommendation can be repeated monthly.",
+            "Assumes this extra amount can be repeated monthly.",
         ],
-        "explanation": "No extra debt payment is recommended right now.",
+        "explanation": "No realistic extra debt payment is recommended right now, so the debt-free countdown stays on minimum-only assumptions.",
     }
 
     if priority_debt and recurring_extra_payment > 0:
@@ -7317,7 +7510,7 @@ def os_intelligence(
                     "estimated_months_faster": months_faster,
                     "estimated_payoff_months_with_extra": int(accelerated_projection["months"]),
                     "explanation": (
-                        f"Keeping the extra ${recurring_extra_payment:.0f}/month on {priority_debt.name} is estimated to cut "
+                        f"Keeping the capped extra ${recurring_extra_payment:.0f}/month on {priority_debt.name} is estimated to cut "
                         f"{months_faster} month(s) and save about ${interest_saved:.0f} on that balance."
                     ),
                 })
@@ -7334,6 +7527,7 @@ def os_intelligence(
         cash_total=cash_total,
         upcoming_total=upcoming_total,
         safe_to_spend=safe_to_spend,
+        available_sts=available_sts,
         stability_label=stability_label,
         stability_value=stability_value,
         stability_explanation=stability_explanation,
@@ -7343,6 +7537,8 @@ def os_intelligence(
         recurring_extra_payment=recurring_extra_payment,
         upcoming_debt_minimum_total=upcoming_debt_minimum_total,
         available_for_minimums=available_for_minimums,
+        weighted_apr=debt_snapshot["weighted_apr"],
+        high_apr_threshold=high_apr_threshold,
     )
 
     return {
@@ -7354,6 +7550,7 @@ def os_intelligence(
             "cash_total": round(float(cash_total), 2),
             "upcoming_total": round(float(upcoming_total), 2),
             "safe_to_spend_today": round(float(safe_to_spend), 2),
+            "available_sts": available_sts,
             "monthly_essentials_total": round(float(essentials_total), 2),
             "monthly_essential_bills_total": round(float(bills_total), 2),
             "monthly_debt_minimums_total": round(float(debt_mins_total), 2),
@@ -7364,6 +7561,7 @@ def os_intelligence(
             "fi_cash_target_label": fi_target_label,
             "debt_total_balance": debt_snapshot["total_balance"],
             "weighted_apr": debt_snapshot["weighted_apr"],
+            "high_apr_threshold": high_apr_threshold,
             "total_utilization_pct": utilization.get("total_utilization_pct"),
         },
         "financial_health": {

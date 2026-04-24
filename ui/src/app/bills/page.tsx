@@ -1,13 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { useAuth } from "@/components/auth/AuthProvider";
 import {
   createManualBill,
   deleteManualBill,
+  getOsState,
   listManualBills,
   ManualBill,
+  OsStateResponse,
   updateManualBill,
 } from "@/lib/api";
 
@@ -60,6 +62,7 @@ export default function BillsPage() {
   const userId = user?.id ?? "";
 
   const [bills, setBills] = useState<ManualBill[]>([]);
+  const [osState, setOsState] = useState<OsStateResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +88,47 @@ export default function BillsPage() {
     if (!userId) return;
     loadBills();
   }, [userId, loadBills]);
+
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const state = await getOsState({ user_id: userId });
+        if (!cancelled) setOsState(state);
+      } catch {
+        if (!cancelled) setOsState(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  const billContext = useMemo(() => {
+    const essentialTotal = bills.reduce((sum, bill) => {
+      const isDiscretionary = (bill.category || "").toLowerCase() === "discretionary";
+      return isDiscretionary ? sum : sum + Number(bill.amount || 0);
+    }, 0);
+    const discretionaryTotal = bills.reduce((sum, bill) => {
+      const isDiscretionary = (bill.category || "").toLowerCase() === "discretionary";
+      return isDiscretionary ? sum + Number(bill.amount || 0) : sum;
+    }, 0);
+
+    const upcomingSummary = osState?.upcoming_summary || {};
+    const upcomingWindowTotal = Number(upcomingSummary.bill_total || 0) + Number(upcomingSummary.manual_bill_total || 0);
+    const nextDueItem = (osState?.upcoming_items || []).find((item) => item.type === "bill" || item.type === "manual_bill") || null;
+
+    return {
+      essentialTotal,
+      discretionaryTotal,
+      upcomingWindowTotal,
+      upcomingWindowDays: Number(osState?.upcoming_window_days || 21),
+      nextDueItem,
+    };
+  }, [bills, osState]);
 
   function openCreateForm() {
     setEditingId(null);
@@ -193,6 +237,45 @@ export default function BillsPage() {
             >
               Add Bill
             </button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-xs text-zinc-400">STS window obligations</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(billContext.upcomingWindowTotal)}</div>
+            <div className="mt-1 text-xs text-zinc-500">Next {billContext.upcomingWindowDays} days from Financial OS</div>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-xs text-zinc-400">Essential total</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(billContext.essentialTotal)}</div>
+            <div className="mt-1 text-xs text-zinc-500">Recurring essentials tracked on this page</div>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-xs text-zinc-400">Discretionary total</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(billContext.discretionaryTotal)}</div>
+            <div className="mt-1 text-xs text-zinc-500">Optional bills and subscriptions</div>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-xs text-zinc-400">Next due item</div>
+            <div className="mt-2 text-lg font-semibold text-zinc-100">
+              {billContext.nextDueItem?.name || "No due item in window"}
+            </div>
+            <div className="mt-1 text-xs text-zinc-500">
+              {billContext.nextDueItem?.due_date
+                ? `${billContext.nextDueItem.due_date} | ${fmtMoney(Number(billContext.nextDueItem.amount || 0))}`
+                : "This updates from the current upcoming-obligations window."}
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+          <div className="text-sm font-semibold text-zinc-100">This feeds Safe-to-Spend</div>
+          <div className="mt-2 text-sm leading-6 text-zinc-400">
+            Financial OS pulls upcoming bills and manual obligations from this page into the current STS window, then protects that total before recommending extra debt payments.
+          </div>
+          <div className="mt-3 text-xs text-zinc-500">
+            Window total now: {fmtMoney(billContext.upcomingWindowTotal)} across the next {billContext.upcomingWindowDays} days.
           </div>
         </div>
 
