@@ -32,6 +32,10 @@ def _email_verification_required() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _email_verification_configured() -> bool:
+    return False
+
+
 def _bearer_token(authorization: Optional[str]) -> Optional[str]:
     if not authorization:
         return None
@@ -43,8 +47,9 @@ def _bearer_token(authorization: Optional[str]) -> Optional[str]:
 
 def public_user(user: User) -> dict:
     email_verification_required = _email_verification_required()
+    email_verification_configured = _email_verification_configured()
     email_verification_status = "verification_not_configured"
-    if email_verification_required:
+    if email_verification_configured:
         email_verification_status = "verified" if user.email_verified_at else "not_verified"
 
     return {
@@ -53,9 +58,10 @@ def public_user(user: User) -> dict:
         "username": getattr(user, "username", None),
         "display_name": user.display_name,
         "auth_enabled": bool(user.auth_enabled),
-        "email_verified": bool(user.email_verified_at) if email_verification_required else False,
+        "email_verified": bool(user.email_verified_at) if email_verification_configured else False,
         "email_verified_at": user.email_verified_at.isoformat() if user.email_verified_at else None,
-        "email_verification_required": email_verification_required,
+        "email_verification_required": email_verification_required and email_verification_configured,
+        "email_verification_configured": email_verification_configured,
         "email_verification_status": email_verification_status,
         "can_resend_verification": False,
         "beta_access_approved": bool(user.beta_access_approved),

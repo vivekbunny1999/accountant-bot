@@ -309,7 +309,14 @@ function fileToText(file: File) {
   });
 }
 
-function emailVerificationMeta(status?: string) {
+function emailVerificationMeta(status?: string, configured?: boolean) {
+  if (!configured) {
+    return {
+      label: "Verification not configured",
+      tone: "border-white/10 bg-white/5 text-zinc-300",
+      detail: "This environment does not have real email verification or resend flow configured yet.",
+    };
+  }
   if (status === "verified") {
     return {
       label: "Verified",
@@ -325,9 +332,9 @@ function emailVerificationMeta(status?: string) {
     };
   }
   return {
-    label: "Verification not configured",
-    tone: "border-white/10 bg-white/5 text-zinc-300",
-    detail: "This environment does not have real email verification or resend flow configured yet.",
+    label: "Not verified",
+    tone: "border-amber-500/30 bg-amber-500/10 text-amber-200",
+    detail: "Email verification is supported, but this address has not been verified yet.",
   };
 }
 
@@ -998,7 +1005,8 @@ export default function SettingsPage() {
     };
   }, [settings]);
 
-  const verificationMeta = emailVerificationMeta(user?.email_verification_status);
+  const verificationConfigured = Boolean(bootstrap?.beta?.email_verification_configured && user?.email_verification_configured);
+  const verificationMeta = emailVerificationMeta(user?.email_verification_status, verificationConfigured);
 
   async function handleSaveAccount() {
     if (!user) return;

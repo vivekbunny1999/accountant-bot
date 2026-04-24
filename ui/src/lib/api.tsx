@@ -14,6 +14,7 @@ export type AuthUser = {
   email_verified?: boolean;
   email_verified_at?: string | null;
   email_verification_required?: boolean;
+  email_verification_configured?: boolean;
   email_verification_status?: "verified" | "not_verified" | "verification_not_configured" | string;
   can_resend_verification?: boolean;
   beta_access_approved?: boolean;
@@ -93,15 +94,26 @@ function authHeaders(headers?: HeadersInit): Headers {
 }
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${BASE}${path}`, {
-    cache: "no-store",
-    ...init,
-    headers: authHeaders(init?.headers),
-  });
-  if (res.status === 401 && typeof window !== "undefined") {
-    clearSessionToken();
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      cache: "no-store",
+      credentials: "include",
+      ...init,
+      headers: authHeaders(init?.headers),
+    });
+    if (res.status === 401 && typeof window !== "undefined") {
+      clearSessionToken();
+    }
+    return res;
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message.trim()
+        ? error.message
+        : "Network request failed.";
+    throw new Error(
+      `Network error contacting ${BASE}. This usually means the API URL is unreachable or CORS is blocking this Vercel origin. Original error: ${message}`
+    );
   }
-  return res;
 }
 
 async function readApiError(res: Response, fallback: string): Promise<string> {
@@ -113,7 +125,9 @@ async function readApiError(res: Response, fallback: string): Promise<string> {
   } catch {}
 
   const text = await res.text().catch(() => "");
-  return text || fallback;
+  if (text) return text;
+  if (res.status >= 500) return "Server error. Please try again in a moment.";
+  return fallback;
 }
 
 /* =========================
