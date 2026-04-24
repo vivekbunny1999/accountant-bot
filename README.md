@@ -50,6 +50,63 @@ npm run dev
 Frontend local URL: `http://127.0.0.1:3000`  
 Backend local URL: `http://127.0.0.1:8000`
 
+## Automated Preview QA
+
+The repo includes a Playwright-based QA loop for the deployed UI in `ui/`.
+
+### GitHub secrets required
+
+- `E2E_BASE_URL`
+- `E2E_TEST_EMAIL`
+- `E2E_TEST_PASSWORD`
+
+### Local commands
+
+Install UI dependencies and Playwright once:
+
+```bash
+cd ui
+npm install
+npm run test:e2e:install
+```
+
+Run the E2E suite against local UI or any deployed preview:
+
+```bash
+set E2E_BASE_URL=http://127.0.0.1:3000
+set E2E_TEST_EMAIL=your-test-user@example.com
+set E2E_TEST_PASSWORD=your-test-password
+npm run test:e2e
+npm run qa:bundle
+```
+
+Artifacts are generated in `ui/test-results/accountant-qa/`:
+
+- per-page screenshots
+- per-page visible text files
+- per-page console error and failed-request metadata
+- Playwright JSON summary
+- `qa_bundle.md`
+
+### Run against Vercel preview
+
+Set `E2E_BASE_URL` to the Vercel preview URL for the UI deployment and run the same commands above. The workflow in `.github/workflows/e2e-preview.yml` does this automatically on `pull_request` when the secrets are available.
+
+### How Codex should use failing artifacts
+
+1. Open `ui/test-results/accountant-qa/qa_bundle.md` first.
+2. Compare the failing test summary with the page screenshots and visible text.
+3. Use console errors and failed network requests to separate data/load problems from presentation problems.
+4. Fix the smallest safe issue first, rerun `npm run test:e2e`, then rebuild `npm run qa:bundle`.
+
+### Why this creates a Codex -> Vercel -> QA -> fix loop
+
+1. Codex changes the UI without changing business logic.
+2. Vercel builds a preview URL.
+3. Playwright hits that deployed URL with a stable test account.
+4. The run produces screenshots, page text, traces, and a markdown QA bundle.
+5. Codex can review those artifacts, fix regressions, and repeat the loop quickly.
+
 ## Environment Variables
 
 ### Backend
@@ -135,3 +192,4 @@ Before pushing to GitHub:
 - SQLite remains the default for local development.
 - Postgres is enabled by environment variable only, so local behavior stays the same.
 - SQLite-only startup schema helpers are skipped automatically in non-SQLite environments to avoid breaking staging.
+- The preview QA suite does not create Plaid links and expects an existing seeded test account.
