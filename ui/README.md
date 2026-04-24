@@ -1,36 +1,57 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Accountant Bot UI
 
-## Getting Started
-
-First, run the development server:
+## Local development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App URL: `http://127.0.0.1:3000`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+If the backend is local, set `NEXT_PUBLIC_API_BASE_URL` in `ui/.env.local` to `http://127.0.0.1:8000`.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Playwright E2E QA
 
-## Learn More
+Install Playwright browsers once after `npm install`:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run test:e2e:install
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Required env vars:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `E2E_BASE_URL`
+- `E2E_TEST_EMAIL`
+- `E2E_TEST_PASSWORD`
 
-## Deploy on Vercel
+Run the preview or local smoke suite:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run test:e2e
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Build the markdown QA bundle after the test run:
+
+```bash
+npm run qa:bundle
+```
+
+Artifacts are written to:
+
+- `ui/test-results/accountant-qa/pages/`
+- `ui/test-results/accountant-qa/qa_bundle.md`
+
+Playwright traces and failure screenshots are written under `ui/test-results/` and `ui/playwright-report/`.
+
+## Vercel preview usage
+
+Point `E2E_BASE_URL` at the deployed preview URL, then run:
+
+```powershell
+$env:E2E_BASE_URL="https://your-preview.vercel.app"
+npm run test:e2e
+npm run qa:bundle
+```
+
+The suite is intentionally read-only for product behavior. It signs in with an existing test account and does not require creating new Plaid links.
