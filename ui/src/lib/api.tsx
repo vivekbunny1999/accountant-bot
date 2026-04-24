@@ -884,6 +884,7 @@ export type NextBestDollarResponse = {
   cash_total: number;
   upcoming_total: number;
   safe_to_spend_today: number;
+  available_sts?: number;
   stage?: string | null;
   upcoming_items?: FinancialOsUpcomingItem[];
   upcoming_summary?: {
@@ -901,6 +902,8 @@ export type NextBestDollarResponse = {
     upcoming_total?: number;
     buffer?: number;
     safe_to_spend_today?: number;
+    available_sts?: number;
+    recommended_extra_payment?: number | null;
   };
   breakdown?: FinancialOsBreakdown;
   recommendation?: {
@@ -908,6 +911,7 @@ export type NextBestDollarResponse = {
     name?: string | null;
     last4?: string | null;
     apr?: number | null;
+    available_sts?: number;
     recommended_extra_payment?: number | null;
     why?: string | null;
   } | null;
@@ -954,6 +958,7 @@ export type FinancialOsIntelligenceResponse = {
     cash_total?: number;
     upcoming_total?: number;
     safe_to_spend_today?: number;
+    available_sts?: number;
     monthly_essentials_total?: number;
     monthly_essential_bills_total?: number;
     monthly_debt_minimums_total?: number;
@@ -964,6 +969,7 @@ export type FinancialOsIntelligenceResponse = {
     fi_cash_target_label?: string | null;
     debt_total_balance?: number;
     weighted_apr?: number | null;
+    high_apr_threshold?: number | null;
     total_utilization_pct?: number | null;
   };
   financial_health?: {
@@ -1008,6 +1014,7 @@ export type FinancialOsIntelligenceResponse = {
     }>;
   };
   next_best_dollar_impact?: {
+    available_sts?: number;
     recommended_extra_payment?: number;
     target_debt?: {
       id?: number;

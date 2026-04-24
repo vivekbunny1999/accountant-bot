@@ -25,10 +25,24 @@ const DEBT_KIND_OPTIONS = [
   { value: "loan", label: "Loan" },
   { value: "other", label: "Other" },
 ];
+const HIGH_APR_THRESHOLD = 18;
 
 function fmtMoney(value?: number | null) {
   const amount = Number(value ?? 0);
   return `$${amount.toFixed(2)}`;
+}
+
+function debtKindLabel(kind?: string | null) {
+  const value = (kind || "other").toLowerCase();
+  if (value === "credit_card") return "Credit card";
+  if (value === "loan") return "Loan";
+  return "Other debt";
+}
+
+function dueLabel(debt: Debt) {
+  if (debt.due_date) return debt.due_date;
+  if (debt.due_day != null) return `Day ${debt.due_day}`;
+  return "Not set";
 }
 
 function emptyDebtForm(): DebtFormState {
@@ -249,11 +263,13 @@ export default function DebtsPage() {
 
   const summary = useMemo(() => {
     const activeDebts = debts.filter((debt) => debt.active !== false);
+    const highAprCount = activeDebts.filter((debt) => Number(debt.apr || 0) > HIGH_APR_THRESHOLD).length;
     return {
       count: debts.length,
       activeCount: activeDebts.length,
       totalBalance: activeDebts.reduce((sum, debt) => sum + Number(debt.balance || 0), 0),
       totalMinimumDue: activeDebts.reduce((sum, debt) => sum + Number(debt.minimum_due || 0), 0),
+      highAprCount,
     };
   }, [debts]);
 
@@ -384,9 +400,9 @@ export default function DebtsPage() {
             <div className="mt-1 text-xs text-zinc-500">Used by upcoming obligation planning</div>
           </div>
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Workflow</div>
-            <div className="mt-2 text-2xl font-semibold text-zinc-100">CRUD</div>
-            <div className="mt-1 text-xs text-zinc-500">Add, edit, and delete debt rows here</div>
+            <div className="text-xs text-zinc-400">High APR debts</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{summary.highAprCount}</div>
+            <div className="mt-1 text-xs text-zinc-500">APR above {HIGH_APR_THRESHOLD}%</div>
           </div>
         </div>
 
@@ -465,10 +481,30 @@ export default function DebtsPage() {
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-medium text-zinc-100">{debt.name}</div>
-                        <div className="mt-1 text-xs text-zinc-400">
-                          {[debt.kind || "Debt", debt.lender || null, debt.last4 ? `•••• ${debt.last4}` : null]
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">
+                            {debtKindLabel(debt.kind)}
+                          </span>
+                          {debt.lender ? (
+                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">
+                              {debt.lender}
+                            </span>
+                          ) : null}
+                          {debt.last4 ? (
+                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">
+                              **** {debt.last4}
+                            </span>
+                          ) : null}
+                          {Number(debt.apr || 0) > HIGH_APR_THRESHOLD ? (
+                            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-200">
+                              High APR
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="hidden">
+                          {[debt.kind || "Debt", debt.lender || null, debt.last4 ? `**** ${debt.last4}` : null]
                             .filter(Boolean)
-                            .join(" • ")}
+                            .join(" | ")}
                         </div>
                       </div>
 
@@ -500,7 +536,36 @@ export default function DebtsPage() {
                       </div>
                     </div>
 
-                    <div className="mt-3 grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 xl:grid-cols-6">
+                    <div className="mt-3 grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 xl:grid-cols-5">
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[11px] text-zinc-500">Balance</div>
+                        <div className="mt-1 font-medium text-zinc-100">{fmtMoney(debt.balance)}</div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[11px] text-zinc-500">APR</div>
+                        <div className="mt-1 font-medium text-zinc-100">
+                          {debt.apr != null ? `${Number(debt.apr).toFixed(2)}%` : "-"}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[11px] text-zinc-500">Minimum</div>
+                        <div className="mt-1 font-medium text-zinc-100">
+                          {debt.minimum_due != null ? fmtMoney(debt.minimum_due) : "-"}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[11px] text-zinc-500">Due</div>
+                        <div className="mt-1 font-medium text-zinc-100">{dueLabel(debt)}</div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[11px] text-zinc-500">Credit limit</div>
+                        <div className="mt-1 font-medium text-zinc-100">
+                          {debt.credit_limit != null ? fmtMoney(debt.credit_limit) : "-"}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="hidden mt-3 grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 xl:grid-cols-6">
                       <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
                         Balance: {fmtMoney(debt.balance)}
                       </div>

@@ -759,6 +759,10 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
   );
   const nextDollarImpact = intelligence?.next_best_dollar_impact ?? null;
   const intelligenceContext = intelligence?.context ?? null;
+  const availableStsForDebt = nextDollarImpact?.available_sts
+    ?? intelligenceContext?.available_sts
+    ?? nextBestDollar?.available_sts
+    ?? null;
   const healthTone = scoreTone(healthScore);
   const stabilityToneClass = stabilityTone(stabilityMeter?.label);
   const osInsights = useMemo(
@@ -1386,9 +1390,9 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 </div>
               </div>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Recommended extra</div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Repeatable extra</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {fmtMoney(Number(nextDollarImpact?.recommended_extra_payment || 0))}
                   </div>
@@ -1424,7 +1428,13 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Approximation assumes the current extra-payment recommendation can repeat monthly and debt APRs stay flat.
+                {availableStsForDebt != null
+                  ? `Available STS today is ${fmtMoney(Number(availableStsForDebt || 0))}, but only the smaller repeatable extra above is assumed for debt payoff.`
+                  : "The payoff view uses the smaller repeatable extra payment, not the full STS balance."}
+              </div>
+
+              <div className="mt-3 text-xs text-zinc-500">
+                Approximation assumes this extra amount can be repeated monthly and debt APRs stay flat.
               </div>
             </div>
           </div>
@@ -1716,6 +1726,9 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                   </div>
                   <div className="mt-1 text-xs text-zinc-500">
                     {nextBestDollar?.recommendation?.why || "This card updates from backend Financial OS cash after bills and buffer."}
+                    {nextBestDollar?.recommendation?.available_sts != null
+                      ? ` Available STS today: ${fmtMoney(Number(nextBestDollar.recommendation.available_sts || 0))}.`
+                      : ""}
                   </div>
                 </div>
               </div>
