@@ -2,335 +2,349 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useSearchParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
+import { useAuth } from "@/components/auth/AuthProvider";
 import {
+  getCashAccountTransactions,
+  getCashAccounts,
+  getPlaidTransactions,
+  listManualTransactions,
   listStatements,
   listStatementTransactions,
   Statement,
-  Transaction,
 } from "@/lib/api";
+import {
+  amountAbs,
+  categoryForCash,
+  categoryForManual,
+  categoryForPlaid,
+  categoryForStatement,
+  CATEGORY_OPTIONS,
+  isCashSpend,
+  isManualSpend,
+  isPlaidSpend,
+  isStatementCreditLike,
+  parseDateLoose,
+  signatureForParts,
+  SpendingCategory,
+} from "@/lib/financial-os-display";
 
-/** ===== Categories (same list you finalized) ===== */
-type Category =
-  | "Uncategorized"
-  | "Housing"
-  | "Utilities"
-  | "Groceries"
-  | "Dining"
-  | "Fuel"
-  | "Transport"
-  | "Insurance"
-  | "Medical"
-  | "Personal Care"
-  | "Subscriptions"
-  | "Shopping"
-  | "Debt Payment"
-  | "Fees & Interest"
-  | "Income"
-  | "Loan"
-  | "Entertainment"
-  | "Travel"
-  | "Education"
-  | "Gifts/Donations"
-  | "Kids/Family"
-  | "Business"
-  | "Taxes"
-  | "Other";
+type Category = SpendingCategory;
 
-/** ===== localStorage rules ===== */
 const RULES_KEY = "accountantbot_category_rules_v1";
 
 function loadRules(): Record<string, Category> {
   try {
-    const s = localStorage.getItem(RULES_KEY);
-    if (!s) return {};
-    return JSON.parse(s);
+    const raw = localStorage.getItem(RULES_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw);
   } catch {
     return {};
   }
 }
+
 function saveRules(rules: Record<string, Category>) {
   localStorage.setItem(RULES_KEY, JSON.stringify(rules));
 }
 
-const CATEGORY_OPTIONS: Category[] = [
-  "Uncategorized",
-  "Housing",
-  "Utilities",
-  "Groceries",
-  "Dining",
-  "Fuel",
-  "Transport",
-  "Insurance",
-  "Medical",
-  "Personal Care",
-  "Subscriptions",
-  "Shopping",
-  "Debt Payment",
-  "Fees & Interest",
-  "Income",
-  "Loan",
-  "Entertainment",
-  "Travel",
-  "Education",
-  "Gifts/Donations",
-  "Kids/Family",
-  "Business",
-  "Taxes",
-  "Other",
-];
-
-/** ===== Helpers ===== */
-function signatureFor(t: Transaction): string {
-  const raw = `${t.merchant ?? ""} ${t.description ?? ""}`.trim().toLowerCase();
-  return (
-    raw.replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim() || "unknown"
-  );
-}
-
-function parseDateLoose(s?: string | null): Date | null {
-  if (!s) return null;
-
-  // YYYY-MM-DD or YYYY/MM/DD
-  let m = /^(\d{4})[-\/](\d{2})[-\/](\d{2})/.exec(s);
-  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-
-  // MM/DD/YYYY
-  m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(s);
-  if (m) return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
-
-  // "Jan 05, 2026" etc
-  const d = new Date(s);
-  if (!Number.isNaN(d.getTime())) return d;
-
-  return null;
-}
-
-function fmtDate(s?: string | null) {
-  const d = parseDateLoose(s ?? "");
-  if (!d) return s ?? "—";
-  return d.toLocaleDateString(undefined, {
+function fmtDate(value?: string | null) {
+  const dateValue = parseDateLoose(value ?? "");
+  if (!dateValue) return value ?? "-";
+  return dateValue.toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",
     day: "2-digit",
   });
 }
 
-function isCreditLike(t: Transaction) {
-  const a = Number(t.amount);
-  const text = `${t.description ?? ""} ${t.merchant ?? ""}`.toLowerCase();
-  return (
-    a < 0 ||
-    text.includes("pymt") ||
-    text.includes("payment") ||
-    text.includes("refund") ||
-    text.includes("reversal") ||
-    text.includes("credit")
-  );
-}
-
-function defaultCategoryFor(t: Transaction): Category {
-  const text = `${t.description ?? ""} ${t.merchant ?? ""}`.toLowerCase();
-
-  if (text.includes("pymt") || text.includes("payment")) return "Debt Payment";
-
-  if (
-    text.includes("interest") ||
-    text.includes("late fee") ||
-    text.includes("annual fee") ||
-    text.includes("fee")
-  )
-    return "Fees & Interest";
-
-  return "Uncategorized";
-}
-
-function categoryFor(t: Transaction, rules: Record<string, Category>): Category {
-  const sig = signatureFor(t);
-  return rules[sig] ?? defaultCategoryFor(t);
-}
-
-function amountAbs(t: Transaction) {
-  return Math.abs(Number(t.amount) || 0);
-}
-
-function monthKeyFromTxn(t: Transaction): string | null {
-  const d = parseDateLoose(t.posted_date ?? t.date);
-  if (!d) return null;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`; // YYYY-MM
-}
-
 function labelFromMonthKey(key: string) {
-  const m = /^(\d{4})-(\d{2})$/.exec(key);
-  if (!m) return key;
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, 1);
-  return d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  const match = /^(\d{4})-(\d{2})$/.exec(key);
+  if (!match) return key;
+  const dateValue = new Date(Number(match[1]), Number(match[2]) - 1, 1);
+  return dateValue.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
 
-/** We attach “card identity” onto each txn row */
-type EnrichedTxn = Transaction & {
-  _statement_id: number;
-  _card_label: string; // e.g. "CapitalOne • Savor • 3090"
+function monthKeyFromDate(dateValue: Date | null) {
+  if (!dateValue) return null;
+  return `${dateValue.getFullYear()}-${String(dateValue.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function cardLabelFromStatement(statement: Statement) {
+  return [
+    statement.account_label || "Statement import",
+    statement.card_name || null,
+    statement.card_last4 ? `•••• ${statement.card_last4}` : null,
+  ]
+    .filter(Boolean)
+    .join(" • ");
+}
+
+type CategoryActivityRow = {
+  id: string;
+  dateRaw: string;
+  dateValue: Date | null;
+  monthKey: string;
+  source: "Statement" | "Imported Cash" | "Manual" | "Plaid";
+  sourceDetail: string;
+  description: string;
+  merchant: string;
+  amount: number;
+  isSpend: boolean;
+  category: Category;
+  signature: string;
 };
 
-function cardLabelFromStatement(s: Statement) {
-  const parts = [
-    s.account_label || "Account",
-    s.card_name || "",
-    s.card_last4 ? s.card_last4 : "",
-  ].filter(Boolean);
-  return parts.join(" • ");
-}
-
 export default function CategoryDrilldownPage() {
+  const { user } = useAuth();
+  const userId = user?.id ?? "";
   const params = useParams<{ category: string }>();
   const router = useRouter();
-  const sp = useSearchParams();
+  const searchParams = useSearchParams();
 
   const category = useMemo(() => {
-    const raw = decodeURIComponent(params?.category ?? "");
-    return raw as Category;
+    return decodeURIComponent(params?.category ?? "") as Category;
   }, [params]);
 
-  const monthParam = sp.get("month") ?? "all"; // "all" or YYYY-MM
+  const monthParam = searchParams.get("month") ?? "all";
 
   const [rules, setRules] = useState<Record<string, Category>>({});
-  const [statements, setStatements] = useState<Statement[]>([]);
-  const [txns, setTxns] = useState<EnrichedTxn[]>([]);
+  const [rows, setRows] = useState<CategoryActivityRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // toolbar state (same as statement page)
   const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState<"all" | "spend" | "credit">(
-    "all"
-  );
+  const [typeFilter, setTypeFilter] = useState<"all" | "spend" | "credit">("all");
   const [sortBy, setSortBy] = useState<"date" | "amount">("date");
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
-  const [highlightThreshold, setHighlightThreshold] = useState<number>(100);
+  const [highlightThreshold, setHighlightThreshold] = useState(100);
 
   useEffect(() => {
     setRules(loadRules());
   }, []);
 
-  // Load: statements -> txns per statement -> enrich with card identity
   useEffect(() => {
-    setLoading(true);
-    setErr(null);
+    if (!userId) {
+      setRows([]);
+      setLoading(false);
+      return;
+    }
 
-    listStatements()
-      .then(async (ss) => {
-        setStatements(ss);
+    let cancelled = false;
 
-        // pull txns for every statement (V1 approach; optimize later)
-        const all: EnrichedTxn[] = [];
-        for (const s of ss) {
-          try {
-            const list = await listStatementTransactions(s.id);
-            const label = cardLabelFromStatement(s);
+    (async () => {
+      setLoading(true);
+      setError(null);
 
-            for (const t of list) {
-              all.push({
-                ...t,
-                _statement_id: s.id,
-                _card_label: label,
+      try {
+        const [statementRes, cashAccountsRes, manualRes, plaidRes] = await Promise.all([
+          listStatements(),
+          getCashAccounts({ user_id: userId, limit: 100 }),
+          listManualTransactions({ user_id: userId }),
+          getPlaidTransactions({ user_id: userId, limit: 250 }),
+        ]);
+
+        const currentRules = loadRules();
+        const nextRows: CategoryActivityRow[] = [];
+
+        const statementRows = await Promise.all(
+          statementRes.map(async (statement) => {
+            try {
+              const txns = await listStatementTransactions(statement.id);
+              const sourceDetail = cardLabelFromStatement(statement);
+              return txns.map((txn) => {
+                const dateRaw = String((txn as any).posted_date ?? (txn as any).date ?? "");
+                const dateValue = parseDateLoose(dateRaw);
+                return {
+                  id: `statement-${statement.id}-${(txn as any).id ?? signatureForParts((txn as any).merchant, (txn as any).description, dateRaw)}`,
+                  dateRaw,
+                  dateValue,
+                  monthKey: monthKeyFromDate(dateValue) ?? "unknown",
+                  source: "Statement" as const,
+                  sourceDetail,
+                  description: String((txn as any).description ?? ""),
+                  merchant: String((txn as any).merchant ?? ""),
+                  amount: Number((txn as any).amount || 0),
+                  isSpend: !isStatementCreditLike(txn as any),
+                  category: categoryForStatement(txn as any, currentRules),
+                  signature: signatureForParts((txn as any).merchant, (txn as any).description),
+                };
               });
+            } catch {
+              return [] as CategoryActivityRow[];
             }
-          } catch {
-            // ignore statement txn fetch failures individually; keep going
-          }
+          })
+        );
+        nextRows.push(...statementRows.flat());
+
+        const cashRows = await Promise.all(
+          (cashAccountsRes as any[]).map(async (account) => {
+            try {
+              const txns = await getCashAccountTransactions(account.id, { user_id: userId, limit: 500 });
+              const sourceDetail = [
+                account.account_label || account.account_name || account.institution || "Imported cash",
+                account.statement_end_date || account.statement_period || null,
+              ]
+                .filter(Boolean)
+                .join(" • ");
+
+              return (txns as any[]).map((txn) => {
+                const dateRaw = String(txn.posted_date ?? txn.transaction_date ?? txn.date ?? "");
+                const dateValue = parseDateLoose(dateRaw);
+                return {
+                  id: `cash-${account.id}-${txn.id ?? signatureForParts(txn.description, txn.merchant, txn.name, dateRaw)}`,
+                  dateRaw,
+                  dateValue,
+                  monthKey: monthKeyFromDate(dateValue) ?? "unknown",
+                  source: "Imported Cash" as const,
+                  sourceDetail,
+                  description: String(txn.description ?? txn.name ?? ""),
+                  merchant: String(txn.merchant ?? txn.name ?? ""),
+                  amount: Number(txn.amount || 0),
+                  isSpend: isCashSpend(txn),
+                  category: categoryForCash(txn, currentRules),
+                  signature: signatureForParts(txn.description, txn.merchant, txn.name),
+                };
+              });
+            } catch {
+              return [] as CategoryActivityRow[];
+            }
+          })
+        );
+        nextRows.push(...cashRows.flat());
+
+        nextRows.push(
+          ...(manualRes || []).map((txn) => {
+            const dateValue = parseDateLoose(txn.date);
+            return {
+              id: `manual-${txn.id}`,
+              dateRaw: txn.date,
+              dateValue,
+              monthKey: monthKeyFromDate(dateValue) ?? "unknown",
+              source: "Manual" as const,
+              sourceDetail: "Manual activity",
+              description: String(txn.description || "Manual activity"),
+              merchant: "",
+              amount: Number(txn.amount || 0),
+              isSpend: isManualSpend(txn),
+              category: categoryForManual(txn, currentRules),
+              signature: signatureForParts(txn.description, txn.category),
+            };
+          })
+        );
+
+        nextRows.push(
+          ...((plaidRes.transactions || []).map((txn) => {
+            const dateRaw = String(txn.posted_date ?? txn.authorized_date ?? "");
+            const dateValue = parseDateLoose(dateRaw);
+            return {
+              id: `plaid-${txn.transaction_id}`,
+              dateRaw,
+              dateValue,
+              monthKey: monthKeyFromDate(dateValue) ?? "unknown",
+              source: "Plaid" as const,
+              sourceDetail: [txn.institution_name, txn.account_name].filter(Boolean).join(" • ") || "Linked account",
+              description: String(txn.name || txn.merchant_name || "Linked activity"),
+              merchant: String(txn.merchant_name || txn.name || ""),
+              amount: Number(txn.amount || 0),
+              isSpend: isPlaidSpend(txn),
+              category: categoryForPlaid(txn, currentRules),
+              signature: signatureForParts(txn.merchant_name, txn.name),
+            };
+          }) as CategoryActivityRow[])
+        );
+
+        if (!cancelled) {
+          setRows(
+            nextRows.sort((left, right) => {
+              const leftTime = left.dateValue?.getTime() ?? 0;
+              const rightTime = right.dateValue?.getTime() ?? 0;
+              return rightTime - leftTime;
+            })
+          );
         }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to load category activity.");
+          setRows([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
 
-        setTxns(all);
-      })
-      .catch((e) => setErr(e?.message || "Failed to load"))
-      .finally(() => setLoading(false));
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
-  function setCategoryRule(t: Transaction, cat: Category) {
-    const sig = signatureFor(t);
-    const next = { ...rules, [sig]: cat };
-    setRules(next);
-    saveRules(next);
-  }
-
-  // Month options from loaded txns (plus All)
   const monthOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const t of txns) {
-      const mk = monthKeyFromTxn(t);
-      if (mk) set.add(mk);
+    const keys = new Set<string>();
+    for (const row of rows) {
+      if (row.monthKey && row.monthKey !== "unknown") keys.add(row.monthKey);
     }
-    return Array.from(set).sort((a, b) => b.localeCompare(a)); // newest first
-  }, [txns]);
+    return Array.from(keys).sort((left, right) => right.localeCompare(left));
+  }, [rows]);
 
-  // Filter to this category + month
-  const txnsInCategory = useMemo(() => {
-    let list = txns.filter((t) => categoryFor(t, rules) === category);
+  const rowsInCategory = useMemo(() => {
+    return rows.filter((row) => {
+      if (row.category !== category) return false;
+      if (monthParam !== "all" && row.monthKey !== monthParam) return false;
+      return true;
+    });
+  }, [category, monthParam, rows]);
 
-    if (monthParam !== "all") {
-      list = list.filter((t) => monthKeyFromTxn(t) === monthParam);
-    }
-    return list;
-  }, [txns, rules, category, monthParam]);
-
-  // Insights on this category view
   const insights = useMemo(() => {
-    const spend = txnsInCategory
-      .filter((t) => Number(t.amount) > 0)
-      .reduce((sum, t) => sum + Number(t.amount), 0);
+    const spend = rowsInCategory.reduce((sum, row) => (row.isSpend ? sum + amountAbs(row.amount) : sum), 0);
+    const credits = rowsInCategory.reduce((sum, row) => (!row.isSpend ? sum + amountAbs(row.amount) : sum), 0);
+    return { spend, credits, count: rowsInCategory.length };
+  }, [rowsInCategory]);
 
-    const credits = txnsInCategory
-      .filter((t) => Number(t.amount) < 0)
-      .reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+  const filteredRows = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    let next = [...rowsInCategory];
 
-    return { spend, credits, count: txnsInCategory.length };
-  }, [txnsInCategory]);
+    if (typeFilter === "spend") next = next.filter((row) => row.isSpend);
+    if (typeFilter === "credit") next = next.filter((row) => !row.isSpend);
 
-  // Apply toolbar filters/sort/search/highlight
-  const filteredSortedTxns = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    let list = [...txnsInCategory];
-
-    if (typeFilter === "spend") list = list.filter((t) => !isCreditLike(t));
-    if (typeFilter === "credit") list = list.filter((t) => isCreditLike(t));
-
-    if (q) {
-      list = list.filter((t) => {
-        const text = `${t.description ?? ""} ${t.merchant ?? ""}`.toLowerCase();
-        return text.includes(q);
+    if (query) {
+      next = next.filter((row) => {
+        const haystack = `${row.description} ${row.merchant} ${row.source} ${row.sourceDetail}`.toLowerCase();
+        return haystack.includes(query);
       });
     }
 
-    list.sort((a, b) => {
+    next.sort((left, right) => {
       if (sortBy === "amount") {
-        const av = amountAbs(a);
-        const bv = amountAbs(b);
-        return sortDir === "asc" ? av - bv : bv - av;
+        const leftAmount = amountAbs(left.amount);
+        const rightAmount = amountAbs(right.amount);
+        return sortDir === "asc" ? leftAmount - rightAmount : rightAmount - leftAmount;
       }
-      const ad = parseDateLoose(a.posted_date ?? a.date)?.getTime() ?? 0;
-      const bd = parseDateLoose(b.posted_date ?? b.date)?.getTime() ?? 0;
-      return sortDir === "asc" ? ad - bd : bd - ad;
+
+      const leftTime = left.dateValue?.getTime() ?? 0;
+      const rightTime = right.dateValue?.getTime() ?? 0;
+      return sortDir === "asc" ? leftTime - rightTime : rightTime - leftTime;
     });
 
-    return list;
-  }, [txnsInCategory, search, typeFilter, sortBy, sortDir]);
+    return next;
+  }, [rowsInCategory, search, sortBy, sortDir, typeFilter]);
 
-  function updateMonth(next: string) {
-    // keep URL in sync
-    const path = `/dashboard/category/${encodeURIComponent(category)}?month=${encodeURIComponent(
-      next
-    )}`;
-    router.push(path);
+  function updateMonth(nextMonth: string) {
+    router.push(`/dashboard/category/${encodeURIComponent(category)}?month=${encodeURIComponent(nextMonth)}`);
+  }
+
+  function updateCategoryRule(row: CategoryActivityRow, nextCategory: Category) {
+    const nextRules = { ...rules, [row.signature]: nextCategory };
+    setRules(nextRules);
+    saveRules(nextRules);
+    setRows((current) =>
+      current.map((item) => (item.signature === row.signature ? { ...item, category: nextCategory } : item))
+    );
   }
 
   return (
     <AppShell>
       <div className="space-y-5">
-        {/* Top header with back */}
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="flex items-center justify-between gap-3">
             <Link
@@ -341,13 +355,9 @@ export default function CategoryDrilldownPage() {
               ← Back
             </Link>
 
-            <div className="flex-1" />
-
             <div className="text-right">
               <div className="text-xs text-zinc-400">Category</div>
-              <div className="mt-1 text-sm font-semibold text-zinc-100">
-                {category}
-              </div>
+              <div className="mt-1 text-sm font-semibold text-zinc-100">{category}</div>
             </div>
           </div>
 
@@ -355,258 +365,200 @@ export default function CategoryDrilldownPage() {
             <div>
               <div className="text-xs text-zinc-400">Month</div>
               <select
-                className="mt-2 w-full sm:w-60 rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20 sm:w-60"
                 value={monthParam}
                 onChange={(e) => updateMonth(e.target.value)}
-                title="Filter this category by month"
               >
                 <option value="all">All</option>
-                {monthOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {labelFromMonthKey(m)}
+                {monthOptions.map((monthKey) => (
+                  <option key={monthKey} value={monthKey}>
+                    {labelFromMonthKey(monthKey)}
                   </option>
                 ))}
               </select>
             </div>
 
-            <div className="text-sm text-zinc-300">
-              <div className="text-xs text-zinc-400">{insights.count} txns</div>
+            <div className="text-right text-sm text-zinc-300">
+              <div className="text-xs text-zinc-400">{insights.count} rows</div>
               <div className="mt-1">
-                Spend:{" "}
-                <span className="font-mono text-zinc-100">
-                  ${insights.spend.toFixed(2)}
-                </span>{" "}
-                <span className="text-zinc-500">•</span> Credits:{" "}
-                <span className="font-mono text-zinc-100">
-                  ${insights.credits.toFixed(2)}
-                </span>
+                Spend <span className="font-mono text-zinc-100">${insights.spend.toFixed(2)}</span>
+                <span className="px-2 text-zinc-500">•</span>
+                Money in <span className="font-mono text-zinc-100">${insights.credits.toFixed(2)}</span>
+              </div>
+              <div className="mt-1 text-xs text-zinc-500">
+                Source-aware view across statements, imported cash, manual activity, and linked activity.
               </div>
             </div>
           </div>
         </div>
 
-        {/* Main table */}
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-zinc-100">
-              Transactions
-            </div>
-            <div className="text-xs text-zinc-400">
-              {filteredSortedTxns.length} shown
-            </div>
+            <div className="text-sm font-semibold text-zinc-100">Category Activity</div>
+            <div className="text-xs text-zinc-400">{filteredRows.length} shown</div>
           </div>
 
-          {loading && (
-            <div className="mt-4 text-sm text-zinc-400">Loading…</div>
-          )}
-          {err && <div className="mt-4 text-sm text-red-400">Error: {err}</div>}
+          {loading ? <div className="mt-4 text-sm text-zinc-400">Loading…</div> : null}
+          {error ? <div className="mt-4 text-sm text-red-400">Error: {error}</div> : null}
 
-          {!loading && !err && (
+          {!loading && !error ? (
             <>
-              {/* Toolbar */}
               <div className="mt-4 flex flex-col gap-3">
-                {/* Row 1 */}
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
                   <input
-                    className="w-full lg:flex-1 rounded-xl border border-white/10 bg-[#0B0F14] px-4 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-white/20"
-                    placeholder="Search merchant / description…"
+                    className="w-full rounded-xl border border-white/10 bg-[#0B0F14] px-4 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-white/20 lg:flex-1"
+                    placeholder="Search merchant, description, or source…"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                   />
 
                   <div className="flex w-full flex-wrap gap-2 lg:w-auto">
-                    <button
-                      onClick={() => setTypeFilter("all")}
-                      className={[
-                        "rounded-xl border border-white/10 px-3 py-2 text-sm",
-                        typeFilter === "all"
-                          ? "bg-white/10 text-zinc-100"
-                          : "bg-white/5 text-zinc-300 hover:bg-white/10",
-                      ].join(" ")}
-                    >
-                      All
-                    </button>
-                    <button
-                      onClick={() => setTypeFilter("spend")}
-                      className={[
-                        "rounded-xl border border-white/10 px-3 py-2 text-sm",
-                        typeFilter === "spend"
-                          ? "bg-white/10 text-zinc-100"
-                          : "bg-white/5 text-zinc-300 hover:bg-white/10",
-                      ].join(" ")}
-                    >
-                      Spends
-                    </button>
-                    <button
-                      onClick={() => setTypeFilter("credit")}
-                      className={[
-                        "rounded-xl border border-white/10 px-3 py-2 text-sm",
-                        typeFilter === "credit"
-                          ? "bg-white/10 text-zinc-100"
-                          : "bg-white/5 text-zinc-300 hover:bg-white/10",
-                      ].join(" ")}
-                    >
-                      Credits
-                    </button>
+                    {[
+                      ["all", "All"],
+                      ["spend", "Spends"],
+                      ["credit", "Money in"],
+                    ].map(([value, label]) => (
+                      <button
+                        key={value}
+                        onClick={() => setTypeFilter(value as "all" | "spend" | "credit")}
+                        className={[
+                          "rounded-xl border border-white/10 px-3 py-2 text-sm",
+                          typeFilter === value
+                            ? "bg-white/10 text-zinc-100"
+                            : "bg-white/5 text-zinc-300 hover:bg-white/10",
+                        ].join(" ")}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
-                {/* Row 2 */}
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="flex w-full flex-col gap-2 sm:flex-row lg:w-auto">
+                  <div className="flex flex-col gap-2 sm:flex-row">
                     <select
-                      className="w-full sm:w-56 rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                      className="w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20 sm:w-56"
                       value={sortBy}
-                      onChange={(e) => setSortBy(e.target.value as any)}
+                      onChange={(e) => setSortBy(e.target.value as "date" | "amount")}
                     >
                       <option value="date">Sort: Date</option>
                       <option value="amount">Sort: Amount</option>
                     </select>
 
                     <button
-                      onClick={() =>
-                        setSortDir((d) => (d === "desc" ? "asc" : "desc"))
-                      }
-                      className="w-full sm:w-28 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 hover:bg-white/10"
-                      title="Toggle sort direction"
+                      onClick={() => setSortDir((current) => (current === "desc" ? "asc" : "desc"))}
+                      className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 hover:bg-white/10 sm:w-28"
                     >
                       {sortDir === "desc" ? "Desc ↓" : "Asc ↑"}
                     </button>
                   </div>
 
-                  <div className="flex w-full flex-wrap gap-2 lg:w-auto lg:justify-end">
-                    {[50, 100, 200].map((v) => (
+                  <div className="flex flex-wrap gap-2">
+                    {[50, 100, 200].map((value) => (
                       <button
-                        key={v}
-                        onClick={() => setHighlightThreshold(v)}
+                        key={value}
+                        onClick={() => setHighlightThreshold(value)}
                         className={[
                           "rounded-xl border border-white/10 px-3 py-2 text-sm",
-                          highlightThreshold === v
+                          highlightThreshold === value
                             ? "bg-white/10 text-zinc-100"
                             : "bg-white/5 text-zinc-300 hover:bg-white/10",
                         ].join(" ")}
-                        title="Highlight transactions >= threshold"
                       >
-                        ${v}
+                        ${value}
                       </button>
                     ))}
                   </div>
                 </div>
               </div>
 
-              {/* Table */}
               <div className="mt-4 overflow-x-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="text-xs text-zinc-400">
                     <tr className="border-b border-white/10">
                       <th className="py-3 pr-4">date</th>
                       <th className="py-3 pr-4">description</th>
-                      <th className="py-3 pr-4">card</th>
+                      <th className="py-3 pr-4">source</th>
                       <th className="py-3 pr-4">category</th>
-                      <th className="py-3 pr-4 text-right">amount</th>
+                      <th className="py-3 pr-0 text-right">amount</th>
                     </tr>
                   </thead>
 
                   <tbody className="text-zinc-200">
-                    {filteredSortedTxns.map((t, idx) => {
-                      const credit = isCreditLike(t);
-                      const abs = amountAbs(t);
-                      const highlight = abs >= highlightThreshold;
-                      const cat = categoryFor(t, rules);
-
+                    {filteredRows.map((row) => {
+                      const highlight = amountAbs(row.amount) >= highlightThreshold;
                       return (
                         <tr
-                          key={(t.id ?? idx) + "|" + t._statement_id}
+                          key={row.id}
                           className={[
                             "border-b border-white/5 hover:bg-white/5",
                             highlight ? "bg-white/[0.04]" : "",
                           ].join(" ")}
                         >
-                          <td className="py-3 pr-4 text-zinc-300">
-                            {fmtDate(t.posted_date ?? t.date) || "—"}
-                          </td>
+                          <td className="py-3 pr-4 text-zinc-300">{fmtDate(row.dateRaw)}</td>
 
                           <td className="py-3 pr-4 text-zinc-200">
                             <div className="flex items-center gap-2">
-                              <div className="truncate max-w-[520px]">
-                                {t.description ?? t.merchant ?? "—"}
-                              </div>
-                              {highlight && (
+                              <div className="max-w-[520px] truncate">{row.description || row.merchant || "-"}</div>
+                              {highlight ? (
                                 <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-zinc-300">
                                   Large
                                 </span>
-                              )}
+                              ) : null}
                             </div>
-                            <div className="mt-1 text-[11px] text-zinc-500">
-                              sig:{" "}
-                              <span className="font-mono">
-                                {signatureFor(t)}
-                              </span>
-                            </div>
+                            <div className="mt-1 text-[11px] text-zinc-500">{row.sourceDetail}</div>
                           </td>
 
-                          {/* ✅ NEW: card column */}
                           <td className="py-3 pr-4 text-zinc-300">
-                            <div className="text-sm text-zinc-200">
-                              {t._card_label || "—"}
-                            </div>
+                            <div className="text-zinc-100">{row.source}</div>
                             <div className="mt-1 text-[11px] text-zinc-500">
-                              statement_id:{" "}
-                              <span className="font-mono">{t._statement_id}</span>
+                              {row.isSpend ? "Spend" : "Money in"}
                             </div>
                           </td>
 
                           <td className="py-3 pr-4">
                             <select
-                              className="w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                              value={cat}
-                              onChange={(e) =>
-                                setCategoryRule(t, e.target.value as Category)
-                              }
-                              title="Selecting a category saves rule for similar transactions"
+                              value={row.category}
+                              onChange={(e) => updateCategoryRule(row, e.target.value as Category)}
+                              className="rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
                             >
-                              {CATEGORY_OPTIONS.map((c) => (
-                                <option key={c} value={c}>
-                                  {c}
+                              {CATEGORY_OPTIONS.map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
                                 </option>
                               ))}
                             </select>
-                            <div className="mt-1 text-[11px] text-zinc-500">
-                              Auto-applies to similar merchants
-                            </div>
                           </td>
 
                           <td
                             className={[
-                              "py-3 pr-4 text-right font-mono",
-                              credit ? "text-emerald-300" : "text-zinc-200",
+                              "py-3 pr-0 text-right font-mono",
+                              row.isSpend ? "text-zinc-100" : "text-emerald-300",
                             ].join(" ")}
-                            title={credit ? "Credit / Payment" : "Spend"}
                           >
-                            {credit ? "-" : ""}
-                            ${abs.toFixed(2)}
+                            {row.isSpend ? "$" : "+$"}
+                            {amountAbs(row.amount).toFixed(2)}
                           </td>
                         </tr>
                       );
                     })}
 
-                    {filteredSortedTxns.length === 0 && (
+                    {filteredRows.length === 0 ? (
                       <tr>
                         <td className="py-6 text-zinc-400" colSpan={5}>
-                          No transactions match your filters.
+                          No rows match this category and filter combination.
                         </td>
                       </tr>
-                    )}
+                    ) : null}
                   </tbody>
                 </table>
+              </div>
 
-                <div className="mt-3 text-xs text-zinc-500">
-                  Tip: Month selector supports All. Category rules are saved in
-                  your browser (localStorage).
-                </div>
+              <div className="mt-3 text-xs text-zinc-500">
+                Changing a category here updates the local category rule used by the dashboard display.
               </div>
             </>
-          )}
+          ) : null}
         </div>
       </div>
     </AppShell>

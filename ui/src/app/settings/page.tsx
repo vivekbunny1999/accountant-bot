@@ -2087,7 +2087,7 @@ export default function SettingsPage() {
                 <div className="mt-4 rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4">
                   <div className="text-sm font-medium text-zinc-100">Add debt</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    This writes to the existing backend debt registry for planning and utilization.
+                    This writes to the tracked debt registry used for planning and utilization.
                   </div>
                   <div className="mt-4">
                     <DebtFormFields form={newDebtForm} onChange={setNewDebtForm} />
@@ -2499,32 +2499,32 @@ export default function SettingsPage() {
 
             <Card>
               <SectionTitle
-                title="Plaid Sandbox"
-                subtitle="Backend-linked sandbox accounts sync server-side and can contribute cash-like balances to the Financial OS."
+                title="Connections & Data Sources"
+                subtitle="Use Accounts, Bills, Debts, and Activity to keep your Financial OS current."
               />
               <Divider />
 
               <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                <div className="text-sm font-medium text-zinc-100">Connected accounts</div>
+                <div className="text-sm font-medium text-zinc-100">Linked accounts</div>
                 <div className="mt-1 text-xs text-zinc-400">
-                  Plaid stays additive here. PDF uploads keep working as-is, and linked liabilities are stored separately.
+                  Connect or refresh linked accounts here. Review balances and source detail in Accounts and Activity.
                 </div>
 
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
-                    <div className="text-zinc-400">Financial OS cash from Plaid</div>
+                    <div className="text-zinc-400">Linked cash counted</div>
                     <div className="mt-2 text-lg font-semibold text-zinc-100">{formatMoney(plaidCashContribution)}</div>
-                    <div className="mt-1 text-zinc-500">Counted only when it does not duplicate a PDF cash import.</div>
+                    <div className="mt-1 text-zinc-500">Only counts when it does not duplicate imported cash.</div>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
-                    <div className="text-zinc-400">Plaid accounts stored</div>
+                    <div className="text-zinc-400">Linked accounts</div>
                     <div className="mt-2 text-lg font-semibold text-zinc-100">{plaidAccounts.length}</div>
-                    <div className="mt-1 text-zinc-500">Separate from PDF account tables.</div>
+                    <div className="mt-1 text-zinc-500">Visible in Accounts and source views.</div>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
-                    <div className="text-zinc-400">PDF duplicates skipped</div>
+                    <div className="text-zinc-400">Duplicates skipped</div>
                     <div className="mt-2 text-lg font-semibold text-zinc-100">{plaidDuplicateCount}</div>
-                    <div className="mt-1 text-zinc-500">Prevents double-counting cash in Financial OS.</div>
+                    <div className="mt-1 text-zinc-500">Prevents double-counting cash in your plan.</div>
                   </div>
                 </div>
 
@@ -2545,6 +2545,18 @@ export default function SettingsPage() {
                   >
                     {plaidBusy ? "Syncing..." : "Sync Plaid Data"}
                   </button>
+                  <Link
+                    href="/accounts"
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                  >
+                    Open Accounts
+                  </Link>
+                  <Link
+                    href="/activity"
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                  >
+                    Open Activity
+                  </Link>
                 </div>
 
                 {plaidStatus ? (
@@ -2559,6 +2571,11 @@ export default function SettingsPage() {
                   </div>
                 ) : null}
 
+                <details className="mt-4 rounded-xl border border-white/10 bg-black/20">
+                  <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-zinc-100">
+                    Developer / Data source diagnostics
+                  </summary>
+                  <div className="border-t border-white/10 px-4 py-4">
                 {plaidItems.length ? (
                   <div className="mt-4 grid gap-2">
                     {plaidItems.map((item) => (
@@ -2672,6 +2689,8 @@ export default function SettingsPage() {
                     </div>
                   )}
                 </div>
+                  </div>
+                </details>
               </div>
             </Card>
 
@@ -2747,7 +2766,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Export is your “future-proof” guarantee: move devices, restore instantly, or migrate to backend storage later.
+                Export is your “future-proof” guarantee: move devices, restore instantly, or keep a backup of your setup.
               </div>
             </Card>
           </div>
@@ -2757,8 +2776,7 @@ export default function SettingsPage() {
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="text-sm font-semibold text-zinc-100">Next step</div>
           <div className="mt-1 text-sm text-zinc-400">
-            After this Settings page, we’ll add Capital One Checking/Savings imports so the bot can detect paychecks, map
-            fixed bills, compute STS, recommend paycheck splits, and choose the Next Best Dollar for extra debt paydown.
+            Use Accounts, Bills, Debts, and Activity to keep your Financial OS current.
           </div>
         </div>
       </div>

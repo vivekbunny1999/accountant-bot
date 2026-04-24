@@ -16,6 +16,17 @@ import {
   Transaction,
 } from "@/lib/api";
 import { useAuth } from "@/components/auth/AuthProvider";
+import {
+  amountAbs,
+  CATEGORY_OPTIONS,
+  categoryForStatement,
+  isManualSpend,
+  isPlaidSpend,
+  isStatementCreditLike,
+  manualDisplayDirection,
+  parseDateLoose,
+  SpendingCategory,
+} from "@/lib/financial-os-display";
 
 /** =========================
  * Helpers
@@ -36,23 +47,6 @@ function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function parseDateLoose(s?: string | null): Date | null {
-  if (!s) return null;
-
-  // YYYY-MM-DD or YYYY/MM/DD
-  let m = /^(\d{4})[-\/](\d{2})[-\/](\d{2})/.exec(s);
-  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-
-  // MM/DD/YYYY
-  m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(s);
-  if (m) return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
-
-  const d = new Date(s);
-  if (!Number.isNaN(d.getTime())) return d;
-
-  return null;
-}
-
 function monthKeyFromDate(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -66,94 +60,10 @@ function monthLabel(key: string) {
   return d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
-function amountAbs(t: Transaction) {
-  return Math.abs(Number(t.amount) || 0);
-}
-
-function isRecentDate(dateValue: Date | null, days: number) {
-  if (!dateValue) return false;
-  const cutoff = new Date();
-  cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() - Math.max(0, days - 1));
-  return dateValue >= cutoff;
-}
-
-function plaidTxnDate(txn: PlaidTransactionSummary) {
-  return parseDateLoose(txn.posted_date ?? txn.authorized_date ?? null);
-}
-
-function plaidLooksLikeNonSpend(txn: PlaidTransactionSummary) {
-  const text = `${txn.merchant_name ?? ""} ${txn.name ?? ""} ${txn.category_primary ?? ""}`.toLowerCase();
-  return (
-    text.includes("payment") ||
-    text.includes("refund") ||
-    text.includes("reversal") ||
-    text.includes("credit") ||
-    text.includes("deposit") ||
-    text.includes("transfer") ||
-    text.includes("payroll")
-  );
-}
-
-function isPlaidSpend(txn: PlaidTransactionSummary) {
-  return Number(txn.amount || 0) > 0 && !txn.pending && !plaidLooksLikeNonSpend(txn);
-}
-
 /** =========================
  * Categories + rules (same key you used on dashboard)
  * ========================= */
-type Category =
-  | "Uncategorized"
-  | "Housing"
-  | "Utilities"
-  | "Groceries"
-  | "Dining"
-  | "Fuel"
-  | "Transport"
-  | "Insurance"
-  | "Medical"
-  | "Personal Care"
-  | "Subscriptions"
-  | "Shopping"
-  | "Debt Payment"
-  | "Fees & Interest"
-  | "Income"
-  | "Loan"
-  | "Entertainment"
-  | "Travel"
-  | "Education"
-  | "Gifts/Donations"
-  | "Kids/Family"
-  | "Business"
-  | "Taxes"
-  | "Other";
-
-const CATEGORY_OPTIONS: Category[] = [
-  "Uncategorized",
-  "Housing",
-  "Utilities",
-  "Groceries",
-  "Dining",
-  "Fuel",
-  "Transport",
-  "Insurance",
-  "Medical",
-  "Personal Care",
-  "Subscriptions",
-  "Shopping",
-  "Debt Payment",
-  "Fees & Interest",
-  "Income",
-  "Loan",
-  "Entertainment",
-  "Travel",
-  "Education",
-  "Gifts/Donations",
-  "Kids/Family",
-  "Business",
-  "Taxes",
-  "Other",
-];
+type Category = SpendingCategory;
 
 const RULES_KEY = "accountantbot_category_rules_v1";
 
@@ -180,38 +90,12 @@ function signatureFor(t: Transaction): string {
   );
 }
 
-function defaultCategoryFor(t: Transaction): Category {
-  const text = `${t.description ?? ""} ${(t as any).merchant ?? ""}`.toLowerCase();
-
-  if (text.includes("pymt") || text.includes("payment")) return "Debt Payment";
-
-  if (
-    text.includes("interest") ||
-    text.includes("late fee") ||
-    text.includes("annual fee") ||
-    text.includes("fee")
-  )
-    return "Fees & Interest";
-
-  return "Uncategorized";
-}
-
 function categoryFor(t: Transaction, rules: Record<string, Category>): Category {
-  const sig = signatureFor(t);
-  return rules[sig] ?? (t.category as Category) ?? defaultCategoryFor(t);
+  return categoryForStatement(t, rules);
 }
 
 function isCreditLike(t: Transaction) {
-  const a = Number(t.amount);
-  const text = `${t.description ?? ""} ${(t as any).merchant ?? ""}`.toLowerCase();
-  return (
-    a < 0 ||
-    text.includes("pymt") ||
-    text.includes("payment") ||
-    text.includes("refund") ||
-    text.includes("reversal") ||
-    text.includes("credit")
-  );
+  return isStatementCreditLike(t);
 }
 
 type TxRow = Transaction & {
@@ -403,33 +287,12 @@ export default function TransactionsPage() {
     return Array.from(set.values()).sort((a, b) => a.localeCompare(b));
   }, [rows]);
 
-  const sourceSummary = useMemo(() => {
-    const statementSpend = rows.reduce((sum, row) => {
-      return isRecentDate(row._date ?? null, 30) && !isCreditLike(row) ? sum + amountAbs(row) : sum;
-    }, 0);
+  const plaidSectionRows = useMemo(
+    () => plaidTransactions.filter((txn) => isPlaidSpend(txn)).slice(0, 10),
+    [plaidTransactions]
+  );
 
-    const plaidSpend = plaidTransactions.reduce((sum, txn) => {
-      return isRecentDate(plaidTxnDate(txn), 30) && isPlaidSpend(txn) ? sum + Number(txn.amount || 0) : sum;
-    }, 0);
-
-    const manualSpend = manualTransactions.reduce((sum, row) => {
-      const dateValue = parseDateLoose(row.date);
-      const amount = Number(row.amount || 0);
-      return isRecentDate(dateValue, 30) && amount < 0 ? sum + Math.abs(amount) : sum;
-    }, 0);
-
-    const plaidRecentRows = plaidTransactions
-      .filter((txn) => isPlaidSpend(txn))
-      .slice(0, 10);
-
-    return {
-      statementSpend,
-      plaidSpend,
-      manualSpend,
-      totalVisibleSpend: statementSpend + plaidSpend + manualSpend,
-      plaidRecentRows,
-    };
-  }, [rows, plaidTransactions, manualTransactions]);
+  const manualSectionRows = useMemo(() => manualTransactions.slice(0, 8), [manualTransactions]);
 
   // Filter + sort
   const filtered = useMemo(() => {
@@ -488,6 +351,26 @@ export default function TransactionsPage() {
 
     return out;
   }, [rows, q, onlySpends, monthFilter, cardFilter, categoryFilter, sort, minAmt, maxAmt]);
+
+  const sourceSummary = useMemo(() => {
+    const statementSpend = filtered.reduce((sum, row) => {
+      return !isCreditLike(row) ? sum + amountAbs(row) : sum;
+    }, 0);
+
+    const plaidSpend = plaidSectionRows.reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+
+    const manualSpend = manualSectionRows.reduce((sum, row) => {
+      return isManualSpend(row) ? sum + amountAbs(row.amount) : sum;
+    }, 0);
+
+    return {
+      statementSpend,
+      plaidSpend,
+      manualSpend,
+      totalVisibleSpend: statementSpend + plaidSpend + manualSpend,
+      plaidRecentRows: plaidSectionRows,
+    };
+  }, [filtered, plaidSectionRows, manualSectionRows]);
 
   // Reset pagination when filters change
   useEffect(() => {
@@ -708,33 +591,33 @@ export default function TransactionsPage() {
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Plaid recent spend</div>
+            <div className="text-xs text-zinc-400">Plaid spend shown</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.plaidSpend)}</div>
             <div className="mt-1 text-xs text-zinc-500">
-              {plaidLoading ? "Loading Plaid activity..." : `${sourceSummary.plaidRecentRows.length} recent spend rows shown`}
+              {plaidLoading ? "Loading Plaid activity..." : `${sourceSummary.plaidRecentRows.length} rows in the section below`}
             </div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Statement / PDF spend</div>
+            <div className="text-xs text-zinc-400">Statement / PDF spend shown</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.statementSpend)}</div>
             <div className="mt-1 text-xs text-zinc-500">
-              {statements.length} statements • {rows.length} imported rows
+              {filtered.length} filtered imported rows in view
             </div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Manual spend</div>
+            <div className="text-xs text-zinc-400">Manual spend shown</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.manualSpend)}</div>
             <div className="mt-1 text-xs text-zinc-500">
-              {manualTransactions.length} manual rows kept separate from imports
+              {manualSectionRows.length} manual rows in the section below
             </div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Total visible activity spend</div>
+            <div className="text-xs text-zinc-400">Total spend shown</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.totalVisibleSpend)}</div>
-            <div className="mt-1 text-xs text-zinc-500">Last 30 days across visible source sections</div>
+            <div className="mt-1 text-xs text-zinc-500">Adds the source sections currently shown on this page</div>
           </div>
         </div>
 
@@ -743,7 +626,7 @@ export default function TransactionsPage() {
             <div>
               <div className="text-sm font-semibold text-zinc-100">Plaid Activity</div>
               <div className="mt-1 text-xs text-zinc-400">
-                Dashboard coaching uses Plaid transactions too, so this page now shows a recent Plaid section without merging backend tables.
+                Dashboard coaching uses linked transactions too, so this page shows recent linked activity without merging imported source tables.
               </div>
             </div>
             <div className="text-xs text-zinc-500">Source: Plaid</div>
@@ -806,6 +689,9 @@ export default function TransactionsPage() {
               <div className="text-sm font-semibold text-zinc-100">Manual Activity</div>
               <div className="mt-1 text-xs text-zinc-400">
                 Stored separately from Plaid and statement imports so cash/manual activity has its own source.
+              </div>
+              <div className="mt-2 text-xs text-zinc-500">
+                Positive manual amounts count as spend. Negative amounts are treated as money in when the entry is labeled like income, refund, or deposit.
               </div>
             </div>
             <div className="text-xs text-zinc-500">
@@ -920,7 +806,7 @@ export default function TransactionsPage() {
                     </td>
                   </tr>
                 ) : (
-                  manualTransactions.slice(0, 8).map((row) => (
+                  manualSectionRows.map((row) => (
                     <tr key={row.id} className="border-b border-white/5 hover:bg-white/5">
                       <td className="py-3 pr-4 text-zinc-300">
                         {parseDateLoose(row.date)?.toLocaleDateString(undefined, {
@@ -929,7 +815,12 @@ export default function TransactionsPage() {
                           day: "2-digit",
                         }) || row.date}
                       </td>
-                      <td className="py-3 pr-4 text-zinc-100">{row.description || "-"}</td>
+                      <td className="py-3 pr-4 text-zinc-100">
+                        <div>{row.description || "-"}</div>
+                        <div className="mt-1 text-xs text-zinc-500">
+                          {manualDisplayDirection(row) === "spend" ? "Counts as spend" : "Counts as money in"}
+                        </div>
+                      </td>
                       <td className="py-3 pr-4 text-zinc-300">{row.category || "Other"}</td>
                       <td className="py-3 pr-4 text-right font-mono text-zinc-200">
                         {fmtMoney(Number(row.amount || 0))}

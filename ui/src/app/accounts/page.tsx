@@ -203,7 +203,7 @@ export default function AccountsPage() {
             <div>
               <div className="text-lg font-semibold text-zinc-100">Accounts</div>
               <div className="mt-1 text-sm text-zinc-400">
-                A unified view of cash accounts across linked sources, with Financial OS totals aligned to backend source rules.
+                A unified view of the cash accounts feeding your Financial OS plan.
               </div>
               <div className="mt-4 flex flex-wrap gap-2 text-xs text-zinc-400">
                 <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-zinc-300">Plaid</span>
@@ -216,13 +216,13 @@ export default function AccountsPage() {
                 href="/plaid"
                 className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
               >
-                Plaid Details
+                Linked Accounts
               </Link>
               <Link
                 href="/cash-accounts"
                 className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
               >
-                Cash Imports
+                Imported Cash
               </Link>
             </div>
           </div>
@@ -242,13 +242,13 @@ export default function AccountsPage() {
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Total cash overview</div>
+            <div className="text-xs text-zinc-400">Cash available to your plan</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(totalCash)}</div>
-            <div className="mt-1 text-xs text-zinc-500">Financial OS total from `/os/state`</div>
+            <div className="mt-1 text-xs text-zinc-500">Combined linked and imported cash counted in your plan</div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Plaid linked cash-like accounts</div>
+            <div className="text-xs text-zinc-400">Linked cash</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(plaidCashTotal)}</div>
             <div className="mt-1 text-xs text-zinc-500">
               {plaidCashLikeAccounts.length} linked cash-like accounts
@@ -256,7 +256,7 @@ export default function AccountsPage() {
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Imported cash snapshot</div>
+            <div className="text-xs text-zinc-400">Imported cash</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(importedCashTotal)}</div>
             <div className="mt-1 text-xs text-zinc-500">
               {latestImportedSnapshot ? `Latest import ${formatDate(latestImportedSnapshot.statement_end_date || latestImportedSnapshot.created_at)}` : "No imported cash snapshot yet"}
@@ -310,7 +310,7 @@ export default function AccountsPage() {
 
               {plaidDuplicates.length ? (
                 <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-                  {plaidDuplicates.length} Plaid cash account{plaidDuplicates.length === 1 ? "" : "s"} are currently skipped to avoid double-counting imported cash.
+                  {plaidDuplicates.length} linked cash account{plaidDuplicates.length === 1 ? "" : "s"} are currently skipped so imported cash is not counted twice.
                 </div>
               ) : null}
             </div>
@@ -355,9 +355,9 @@ export default function AccountsPage() {
 
           <div className="space-y-5">
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-              <div className="text-sm font-semibold text-zinc-100">Source totals</div>
+              <div className="text-sm font-semibold text-zinc-100">How this total is calculated</div>
               <div className="mt-1 text-xs text-zinc-400">
-                These totals mirror the backend Financial OS source breakdown instead of merging transaction tables.
+                Linked and imported cash stay source-aware here so your plan total is easier to trust.
               </div>
 
               <div className="mt-4 space-y-3">

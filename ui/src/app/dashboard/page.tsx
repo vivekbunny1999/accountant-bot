@@ -5,10 +5,12 @@ import {
   getCashAccounts,
   getCashAccountTransactions,
   getFinancialOsIntelligence,
+  listManualTransactions,
   getNextBestDollar,
   getOsState,
   getPlaidAccounts,
   getPlaidTransactions,
+  ManualTransaction,
   NextBestDollarResponse,
   OsStateResponse,
   PlaidAccountSummary,
@@ -25,6 +27,22 @@ import {
   Statement,
   Transaction,
 } from "@/lib/api";
+import {
+  amountAbs,
+  CATEGORY_OPTIONS,
+  categoryForCash,
+  categoryForManual,
+  categoryForPlaid,
+  categoryForStatement,
+  isCashSpend,
+  isManualSpend,
+  isPlaidSpend,
+  isStatementCreditLike,
+  parseDateLoose,
+  signatureForParts,
+  SpendingCategory,
+  statementsTrackedByDebt,
+} from "@/lib/financial-os-display";
 
 
 /** =========================
@@ -38,25 +56,6 @@ function fmtMoney(n: number) {
 function safeTime(s?: string | null) {
   const t = new Date(s ?? "").getTime();
   return Number.isFinite(t) ? t : 0;
-}
-
-// robust date parsing for YYYY-MM-DD, YYYY/MM/DD, MM/DD/YYYY, "Jan 4"
-function parseDateLoose(s?: string | null): Date | null {
-  if (!s) return null;
-
-  // YYYY-MM-DD or YYYY/MM/DD
-  let m = /^(\d{4})[-\/](\d{2})[-\/](\d{2})/.exec(s);
-  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-
-  // MM/DD/YYYY
-  m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(s);
-  if (m) return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
-
-  // fallback to Date parsing
-  const d = new Date(s);
-  if (!Number.isNaN(d.getTime())) return d;
-
-  return null;
 }
 
 function isSameMonth(d: Date, y: number, m0: number) {
@@ -93,58 +92,7 @@ function labelFromBucketKey(key: string) {
 /** =========================
  * Categories
  * ========================= */
-type Category =
-  | "Uncategorized"
-  | "Housing"
-  | "Utilities"
-  | "Groceries"
-  | "Dining"
-  | "Fuel"
-  | "Transport"
-  | "Insurance"
-  | "Medical"
-  | "Personal Care"
-  | "Subscriptions"
-  | "Shopping"
-  | "Debt Payment"
-  | "Fees & Interest"
-  | "Income"
-  | "Loan"
-  | "Entertainment"
-  | "Travel"
-  | "Education"
-  | "Gifts/Donations"
-  | "Kids/Family"
-  | "Business"
-  | "Taxes"
-  | "Other";
-
-const CATEGORY_OPTIONS: Category[] = [
-  "Uncategorized",
-  "Housing",
-  "Utilities",
-  "Groceries",
-  "Dining",
-  "Fuel",
-  "Transport",
-  "Insurance",
-  "Medical",
-  "Personal Care",
-  "Subscriptions",
-  "Shopping",
-  "Debt Payment",
-  "Fees & Interest",
-  "Income",
-  "Loan",
-  "Entertainment",
-  "Travel",
-  "Education",
-  "Gifts/Donations",
-  "Kids/Family",
-  "Business",
-  "Taxes",
-  "Other",
-];
+type Category = SpendingCategory;
 
 /** =========================
  * localStorage category rules
@@ -162,60 +110,16 @@ function loadRules(): Record<string, Category> {
 }
 
 function signatureFor(t: Transaction): string {
-  const raw = `${(t as any).merchant ?? ""} ${(t as any).description ?? ""}`
-    .trim()
-    .toLowerCase();
-  return (
-    raw.replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim() || "unknown"
-  );
-}
-
-function defaultCategoryFor(t: Transaction): Category {
-  const text = `${(t as any).description ?? ""} ${(t as any).merchant ?? ""}`.toLowerCase();
-
-  if (text.includes("pymt") || text.includes("payment")) return "Debt Payment";
-
-  if (
-    text.includes("interest") ||
-    text.includes("late fee") ||
-    text.includes("annual fee") ||
-    text.includes("fee")
-  )
-    return "Fees & Interest";
-
-  // crude income detection (will be better once checking/savings import exists)
-  if (
-    text.includes("payroll") ||
-    text.includes("direct dep") ||
-    text.includes("salary") ||
-    text.includes("paycheck")
-  )
-    return "Income";
-
-  return "Uncategorized";
+  return signatureForParts((t as any).merchant, (t as any).description);
 }
 
 function categoryFor(t: Transaction, rules: Record<string, Category>): Category {
-  const sig = signatureFor(t);
-  return (rules as any)[sig] ?? defaultCategoryFor(t);
-}
-
-function amountAbs(t: Transaction) {
-  return Math.abs(Number((t as any).amount) || 0);
+  return categoryForStatement(t, rules);
 }
 
 // Spend vs credit (dashboard category grid should focus on spend)
 function isCreditLike(t: Transaction) {
-  const a = Number((t as any).amount);
-  const text = `${(t as any).description ?? ""} ${(t as any).merchant ?? ""}`.toLowerCase();
-  return (
-    a < 0 ||
-    text.includes("pymt") ||
-    text.includes("payment") ||
-    text.includes("refund") ||
-    text.includes("reversal") ||
-    text.includes("credit")
-  );
+  return isStatementCreditLike(t);
 }
 
 /** =========================
@@ -456,6 +360,16 @@ function cashEndBalance(a: any) {
   return (Number.isFinite(checking) ? checking : 0) + (Number.isFinite(savings) ? savings : 0);
 }
 
+type MonthSpendRow = {
+  key: string;
+  source: "Statement" | "Imported Cash" | "Plaid" | "Manual";
+  category: Category;
+  amount: number;
+  date: Date;
+  title: string;
+  subtitle: string;
+};
+
 export default function DashboardPage() {
   const { user } = useAuth();
   const userId = user?.id ?? "";
@@ -506,6 +420,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
   const [monthTxns, setMonthTxns] = useState<Transaction[]>([]);
   const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
   const [cashMonthTxns, setCashMonthTxns] = useState<CashTxn[]>([]);
+  const [manualTransactions, setManualTransactions] = useState<ManualTransaction[]>([]);
   const [cashLoading, setCashLoading] = useState(false);
   const [cashErr, setCashErr] = useState<string | null>(null);
   const [txLoading, setTxLoading] = useState(false);
@@ -626,9 +541,30 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     let cancelled = false;
 
     (async () => {
+      try {
+        const rows = await listManualTransactions({ user_id: userId });
+        if (!cancelled) setManualTransactions(rows || []);
+      } catch {
+        if (!cancelled) setManualTransactions([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+
+    (async () => {
       setBillsLoading(true);
       setBillsErr(null);
       const bufferAmount = settings.buffer_enabled ? settings.buffer_amount : 0;
+
+      const monthStart = new Date(cy, cm0, 1).toISOString().slice(0, 10);
+      const monthEnd = new Date(cy, cm0 + 1, 0).toISOString().slice(0, 10);
 
       const [stateRes, nbdRes, intelligenceRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.allSettled([
           getOsState({ user_id: userId, window_days: upcomingWindowDays }),
@@ -643,7 +579,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
             buffer: bufferAmount,
           }),
           getPlaidAccounts(userId),
-          getPlaidTransactions({ user_id: userId, limit: 8 }),
+          getPlaidTransactions({ user_id: userId, limit: 200, start_date: monthStart, end_date: monthEnd }),
         ]);
       if (cancelled) return;
 
@@ -690,7 +626,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     return () => {
       cancelled = true;
     };
-  }, [userId, upcomingWindowDays, settings.buffer_amount, settings.buffer_enabled]);
+  }, [cy, cm0, userId, upcomingWindowDays, settings.buffer_amount, settings.buffer_enabled]);
 
   /** =========================
    * Cash totals (latest import)
@@ -726,14 +662,24 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
   const stsBreakdown = nextBestDollar?.breakdown || null;
   const upcomingSummary = nextBestDollar?.upcoming_summary ?? osState?.upcoming_summary ?? null;
   const upcomingItemsList = upcomingItems ?? [];
+  const trackedDebtItems = useMemo(
+    () => (Array.isArray(osState?.debt_utilization?.items) ? osState?.debt_utilization?.items : []),
+    [osState]
+  );
+  const trackedDebtTotal = Number(osState?.debt_utilization?.total_balance || 0);
+  const statementCoverage = useMemo(
+    () => statementsTrackedByDebt(latestPerCard as any, trackedDebtItems as any),
+    [latestPerCard, trackedDebtItems]
+  );
+  const untrackedStatementOutstanding = statementCoverage.untracked;
   const financialOsCashLabel = osCashSources
-    ? `PDF ${fmtMoney(Number(osCashSources?.pdf_cash_total || 0))} | Plaid ${fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}`
-    : (cashTotals.hasCash ? `Latest PDF import ${cashTotals.label}` : "Backend Financial OS cash");
+    ? `Imported ${fmtMoney(Number(osCashSources?.pdf_cash_total || 0))} • Linked ${fmtMoney(Number(osCashSources?.plaid_cash_total || 0))}`
+    : (cashTotals.hasCash ? `Latest imported cash snapshot ${cashTotals.label}` : "Cash counted in your plan");
 
   const netWorthV1 = useMemo(() => {
     if (financialOsCashTotal == null) return null;
-    return financialOsCashTotal - totals.totalOutstanding;
-  }, [financialOsCashTotal, totals.totalOutstanding]);
+    return financialOsCashTotal - trackedDebtTotal - untrackedStatementOutstanding;
+  }, [financialOsCashTotal, trackedDebtTotal, untrackedStatementOutstanding]);
 
   const plaidIncludedAccounts = useMemo(
     () => osCashSources?.plaid_accounts_included || [],
@@ -774,6 +720,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     () => osInsights.filter((item) => item.key !== whatToDoNext?.key).slice(0, 4),
     [osInsights, whatToDoNext]
   );
+  const plaidRecentRows = useMemo(() => plaidTransactions.slice(0, 8), [plaidTransactions]);
 
   /** =========================
    * Trend: sum balances by statement end-month
@@ -854,29 +801,90 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     };
   }, [data, cy, cm0]);
 
+  const monthSpendRows = useMemo<MonthSpendRow[]>(() => {
+    const rules = loadRules();
+    const rows: MonthSpendRow[] = [];
+
+    for (const txn of monthTxns) {
+      if (isCreditLike(txn)) continue;
+      const dateValue = parseDateLoose((txn as any).posted_date ?? (txn as any).date);
+      if (!dateValue || !isSameMonth(dateValue, cy, cm0)) continue;
+      rows.push({
+        key: `statement-${(txn as any).id ?? signatureFor(txn)}-${dateValue.toISOString()}`,
+        source: "Statement",
+        category: categoryFor(txn, rules),
+        amount: amountAbs(txn),
+        date: dateValue,
+        title: String((txn as any).merchant ?? (txn as any).description ?? "Statement purchase"),
+        subtitle: String((txn as any).description ?? "Imported statement activity"),
+      });
+    }
+
+    for (const txn of cashMonthTxns || []) {
+      const dateValue = parseDateLoose((txn as any).posted_date ?? (txn as any).transaction_date ?? (txn as any).date);
+      if (!dateValue || !isSameMonth(dateValue, cy, cm0) || !isCashSpend(txn as any)) continue;
+      rows.push({
+        key: `cash-${(txn as any).id ?? signatureForParts((txn as any).description, (txn as any).merchant, (txn as any).name)}-${dateValue.toISOString()}`,
+        source: "Imported Cash",
+        category: categoryForCash(txn as any, rules),
+        amount: amountAbs(Number((txn as any).amount || 0)),
+        date: dateValue,
+        title: String((txn as any).description ?? (txn as any).merchant ?? (txn as any).name ?? "Cash activity"),
+        subtitle: String((txn as any).name ?? "Imported cash activity"),
+      });
+    }
+
+    for (const txn of manualTransactions) {
+      const dateValue = parseDateLoose(txn.date);
+      if (!dateValue || !isSameMonth(dateValue, cy, cm0) || !isManualSpend(txn)) continue;
+      rows.push({
+        key: `manual-${txn.id}`,
+        source: "Manual",
+        category: categoryForManual(txn, rules),
+        amount: amountAbs(txn.amount),
+        date: dateValue,
+        title: String(txn.description || "Manual activity"),
+        subtitle: "Manual activity",
+      });
+    }
+
+    for (const txn of plaidTransactions) {
+      const dateValue = parseDateLoose(txn.posted_date ?? txn.authorized_date ?? null);
+      if (!dateValue || !isSameMonth(dateValue, cy, cm0) || !isPlaidSpend(txn)) continue;
+      rows.push({
+        key: `plaid-${txn.transaction_id}`,
+        source: "Plaid",
+        category: categoryForPlaid(txn, rules),
+        amount: Number(txn.amount || 0),
+        date: dateValue,
+        title: String(txn.merchant_name || txn.name || "Linked activity"),
+        subtitle: [txn.institution_name, txn.account_name].filter(Boolean).join(" • ") || "Linked account",
+      });
+    }
+
+    return rows.sort((a, b) => b.date.getTime() - a.date.getTime());
+  }, [cashMonthTxns, cm0, cy, manualTransactions, monthTxns, plaidTransactions]);
+
   /** =========================
    * Category totals for current month (spend only)
    * ========================= */
   const categoryTiles = useMemo(() => {
-    const spends = monthTxns.filter((t) => !isCreditLike(t));
-
     const totalsMap = new Map<Category, { total: number; count: number }>();
     for (const c of CATEGORY_OPTIONS) totalsMap.set(c, { total: 0, count: 0 });
 
-    for (const t of spends) {
-      const c = ((t as any).category as Category) ?? "Uncategorized";
-      const prev = totalsMap.get(c) ?? { total: 0, count: 0 };
-      prev.total += amountAbs(t);
+    for (const row of monthSpendRows) {
+      const prev = totalsMap.get(row.category) ?? { total: 0, count: 0 };
+      prev.total += row.amount;
       prev.count += 1;
-      totalsMap.set(c, prev);
+      totalsMap.set(row.category, prev);
     }
 
     const tiles = Array.from(totalsMap.entries())
-      .map(([cat, v]) => ({ cat, total: v.total, count: v.count }))
+      .map(([cat, value]) => ({ cat, total: value.total, count: value.count }))
       .sort((a, b) => b.total - a.total);
 
     return tiles.slice(0, 15);
-  }, [monthTxns]);
+  }, [monthSpendRows]);
 
   function rarityLabel(count: number) {
     if (count >= 8)
@@ -901,29 +909,36 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
    * Weekly spend bars (4 bars)
    * ========================= */
   const weekly = useMemo(() => {
-    const spends = monthTxns.filter((t) => !isCreditLike(t));
-
     const buckets = [0, 0, 0, 0];
-    for (const t of spends) {
-      const d = parseDateLoose((t as any).posted_date ?? (t as any).date);
-      if (!d) continue;
-      const idx = weekBucketIndex(d.getDate());
-      buckets[idx] += amountAbs(t);
+    for (const row of monthSpendRows) {
+      const idx = weekBucketIndex(row.date.getDate());
+      buckets[idx] += row.amount;
     }
 
     const max = Math.max(1, ...buckets);
     return { buckets, max };
-  }, [monthTxns]);
+  }, [monthSpendRows]);
 
   /** =========================
    * Financial OS metrics from month txns (V1)
    * ========================= */
   const monthMetrics = useMemo(() => {
-    // ===== Credit Card (existing behavior) =====
-    const ccSpends = monthTxns.filter((t) => !isCreditLike(t));
     const ccCredits = monthTxns.filter((t: any) => isCreditLike(t));
+    const sourceSpend = {
+      statement: 0,
+      importedCash: 0,
+      plaid: 0,
+      manual: 0,
+    };
 
-    const ccMonthSpend = ccSpends.reduce((s, t) => s + amountAbs(t), 0);
+    for (const row of monthSpendRows) {
+      if (row.source === "Statement") sourceSpend.statement += row.amount;
+      if (row.source === "Imported Cash") sourceSpend.importedCash += row.amount;
+      if (row.source === "Plaid") sourceSpend.plaid += row.amount;
+      if (row.source === "Manual") sourceSpend.manual += row.amount;
+    }
+
+    const ccMonthSpend = sourceSpend.statement;
 
     const ccMonthIncome = ccCredits.reduce((acc, t: any) => {
       const cat = (t.category as Category) ?? "Uncategorized";
@@ -939,11 +954,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     }, 0);
 
     // ===== Cash Accounts (new) =====
-    const cashSpend = (cashMonthTxns || []).reduce((acc, t: any) => {
-      const amt = Number(t.amount ?? 0);
-      if (amt < 0) return acc + Math.abs(amt);
-      return acc;
-    }, 0);
+    const cashSpend = sourceSpend.importedCash;
 
     const cashIncome = (cashMonthTxns || []).reduce((acc, t: any) => {
       const amt = Number(t.amount ?? 0);
@@ -962,7 +973,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
     }, 0);
 
     const effectiveIncome = cashIncome > 0 ? cashIncome : ccMonthIncome;
-    const effectiveSpend = ccMonthSpend + cashSpend;
+    const effectiveSpend = sourceSpend.statement + sourceSpend.importedCash + sourceSpend.plaid + sourceSpend.manual;
 
     const discretionaryCats: Category[] = [
       "Dining",
@@ -973,21 +984,9 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
       "Personal Care",
     ];
 
-    const ccDiscretionary = ccSpends.reduce((acc, t: any) => {
-      const cat = (t.category as Category) ?? "Uncategorized";
-      if (discretionaryCats.includes(cat)) return acc + amountAbs(t);
-      return acc;
+    const discretionarySpend = monthSpendRows.reduce((acc, row) => {
+      return discretionaryCats.includes(row.category) ? acc + row.amount : acc;
     }, 0);
-
-    const cashDiscretionary = (cashMonthTxns || []).reduce((acc, t: any) => {
-      const amt = Number(t.amount ?? 0);
-      if (amt >= 0) return acc;
-      const cat = String(t.category ?? "Uncategorized") as Category;
-      if (discretionaryCats.includes(cat)) return acc + Math.abs(amt);
-      return acc;
-    }, 0);
-
-    const discretionarySpend = ccDiscretionary + cashDiscretionary;
 
     const buffer = settings.buffer_enabled ? settings.buffer_amount : 0;
 
@@ -1069,13 +1068,15 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
       ccMonthIncome,
       cashSpend,
       cashIncome,
+      plaidSpend: sourceSpend.plaid,
+      manualSpend: sourceSpend.manual,
 
       cashAccountsCount: (cashAccounts || []).length,
       cashTotalBalance: financialOsCashTotal ?? cashTotals.totalCash,
       cashLoading,
       cashErr,
     };
-  }, [monthTxns, cashMonthTxns, cashAccounts, cashTotals.totalCash, cashLoading, cashErr, financialOsCashTotal, settings]);
+  }, [monthTxns, monthSpendRows, cashMonthTxns, cashAccounts, cashTotals.totalCash, cashLoading, cashErr, financialOsCashTotal, settings]);
 
   const stageUi = useMemo(() => stageBadge(monthMetrics.stage), [monthMetrics.stage]);
 
@@ -1141,7 +1142,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 <div>
                   <div className="text-sm font-semibold text-zinc-100">What To Do Next</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Backend coaching based on your current STS, obligations, and tracked spend.
+                    Coaching based on your current STS, obligations, and tracked spend.
                   </div>
                 </div>
                 <div className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${insightTone(whatToDoNext.severity)}`}>
@@ -1170,7 +1171,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 <div>
                   <div className="text-sm font-semibold text-zinc-100">Top Insights</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Low-noise coaching and alerts from the backend.
+                    Low-noise coaching and alerts from your Financial OS.
                   </div>
                 </div>
                 <div className="text-xs text-zinc-500">{osInsights.length} items</div>
@@ -1192,7 +1193,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                   ))
                 ) : (
                   <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-sm text-zinc-400">
-                    Additional insights are loading from the backend.
+                    Additional insights are loading.
                   </div>
                 )}
               </div>
@@ -1207,7 +1208,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 <div>
                   <div className="text-sm font-semibold text-zinc-100">Financial Health Score</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Backend weighted score from current cash, runway, debt, and coverage data.
+                    Weighted score from current cash, runway, debt, and coverage data.
                   </div>
                 </div>
                 <div className={`inline-flex items-center rounded-full border px-3 py-1 text-xs ${healthTone}`}>
@@ -1220,7 +1221,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                   {healthScore != null ? healthScore : "--"}
                 </div>
                 <div className="text-xs text-zinc-500">
-                  {intelligence?.financial_health?.formula || "Waiting for backend score details."}
+                  {intelligence?.financial_health?.formula || "Waiting for score details."}
                 </div>
               </div>
 
@@ -1241,7 +1242,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                   ))
                 ) : (
                   <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-sm text-zinc-400 sm:col-span-2">
-                    Health score details are loading from the backend.
+                    Health score details are loading.
                   </div>
                 )}
               </div>
@@ -1275,7 +1276,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               </div>
 
               <div className="mt-4 text-sm leading-6 text-zinc-300">
-                {stabilityMeter?.explanation || "Loading backend stability explanation."}
+                {stabilityMeter?.explanation || "Loading stability explanation."}
               </div>
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -1322,7 +1323,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               </div>
 
               <div className="mt-4 text-sm leading-6 text-zinc-400">
-                {debtCountdown?.explanation || "Loading backend payoff projection."}
+                {debtCountdown?.explanation || "Loading payoff projection."}
               </div>
 
               {Number(debtCountdown?.excluded_debts?.length || 0) > 0 ? (
@@ -1364,7 +1365,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               </div>
 
               <div className="mt-4 text-sm leading-6 text-zinc-400">
-                {fiProgress?.explanation || "Loading backend FI proxy."}
+                {fiProgress?.explanation || "Loading FI progress."}
               </div>
 
               <div className="mt-4 space-y-2">
@@ -1424,7 +1425,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               </div>
 
               <div className="mt-4 text-sm leading-6 text-zinc-400">
-                {nextDollarImpact?.explanation || "Loading backend impact estimate."}
+                {nextDollarImpact?.explanation || "Loading impact estimate."}
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
@@ -1514,7 +1515,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               )}
 
               <div className="mt-3 text-xs text-zinc-500">
-                Financial OS reads backend cash totals, including non-duplicate Plaid cash accounts, before applying upcoming obligations and buffer.
+                Financial OS uses your counted cash totals, including non-duplicate linked cash accounts, before applying upcoming obligations and buffer.
               </div>
 
               {/* Small cash debug line (non-breaking) */}
@@ -1725,7 +1726,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                       : "No extra payment recommendation yet"}
                   </div>
                   <div className="mt-1 text-xs text-zinc-500">
-                    {nextBestDollar?.recommendation?.why || "This card updates from backend Financial OS cash after bills and buffer."}
+                    {nextBestDollar?.recommendation?.why || "This card updates from your counted cash after bills and buffer."}
                     {nextBestDollar?.recommendation?.available_sts != null
                       ? ` Available STS today: ${fmtMoney(Number(nextBestDollar.recommendation.available_sts || 0))}.`
                       : ""}
@@ -1734,7 +1735,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               </div>
 
               <div className="mt-4 text-xs text-zinc-500">
-                Plaid cash feeds these backend Financial OS calculations without mixing into PDF transaction tables.
+                Linked cash feeds your plan totals without being merged into imported statement transaction tables.
               </div>
             </div>
           </div>
@@ -1747,7 +1748,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 <div>
                   <div className="text-sm font-semibold text-zinc-100">Plaid Cash in Financial OS</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Backend source of truth. Plaid stays additive and separate from PDF transaction tables.
+                    Linked cash that is already counted in your plan, without double-counting imported cash snapshots.
                   </div>
                 </div>
                 <Link
@@ -1811,9 +1812,9 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-sm font-semibold text-zinc-100">Recent Plaid Transactions</div>
+                  <div className="text-sm font-semibold text-zinc-100">Current Month Linked Activity</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Rendered from backend `/plaid/transactions`, not mixed into PDF transaction tables.
+                    Institution labels stay visible so repeated sandbox-style rows are easier to tell apart.
                   </div>
                 </div>
                 <div className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300">
@@ -1821,7 +1822,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 </div>
               </div>
 
-              {plaidTransactions.length ? (
+              {plaidRecentRows.length ? (
                 <div className="mt-4 overflow-x-auto">
                   <table className="w-full text-left text-xs text-zinc-300">
                     <thead className="text-zinc-500">
@@ -1833,7 +1834,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                       </tr>
                     </thead>
                     <tbody>
-                      {plaidTransactions.map((txn) => (
+                      {plaidRecentRows.map((txn) => (
                         <tr key={txn.transaction_id} className="border-b border-white/5">
                           <td className="py-2 pr-3 text-zinc-400">{txn.posted_date || txn.authorized_date || "—"}</td>
                           <td className="py-2 pr-3">
@@ -1851,12 +1852,12 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
                 </div>
               ) : (
                 <div className="mt-4 rounded-xl border border-dashed border-white/10 bg-[#0B0F14] px-3 py-4 text-xs text-zinc-400">
-                  No Plaid transactions are currently rendered on the dashboard because none were returned by the backend.
+                  No linked activity is visible for this month yet.
                 </div>
               )}
 
               <div className="mt-4 text-xs text-zinc-500">
-                Trace: Plaid sync writes `plaid_items`, `plaid_accounts`, and `plaid_transactions`; Financial OS reads Plaid cash through `/os/state` and `/os/next-best-dollar`; this panel reads `/plaid/accounts` and `/plaid/transactions`.
+                Linked activity stays separate from imported statement transactions while still staying visible in your monthly dashboard view.
               </div>
             </div>
           </div>
@@ -1870,17 +1871,27 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               {financialOsCashTotal == null ? "—" : fmtMoney(financialOsCashTotal)}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
-              Financial OS cash • {financialOsCashLabel}
+              Cash available to your plan • {financialOsCashLabel}
             </div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Total Outstanding</div>
+            <div className="text-xs text-zinc-400">Tracked Debt Registry</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">
+              {fmtMoney(trackedDebtTotal)}
+            </div>
+            <div className="mt-1 text-xs text-zinc-500">
+              Active debts from the debt registry
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="text-xs text-zinc-400">Statement Card Balances</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">
               {fmtMoney(totals.totalOutstanding)}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
-              Latest statement per card
+              Latest imported statement per card • {fmtMoney(statementCoverage.tracked)} already covered in tracked debt
             </div>
           </div>
 
@@ -1890,7 +1901,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               {netWorthV1 == null ? "—" : fmtMoney(netWorthV1)}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
-              Cash − credit balances
+              Cash minus tracked debt and only the statement balances not already tracked
             </div>
           </div>
 
@@ -1925,7 +1936,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
             <div className="text-sm font-semibold text-zinc-100">
               This Month Spend • Weekly
             </div>
-            <div className="text-xs text-zinc-400">4 buckets</div>
+            <div className="text-xs text-zinc-400">4 buckets across all visible sources</div>
           </div>
 
           {txLoading && (
@@ -1975,7 +1986,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
               This Month Categories
             </div>
             <div className="text-xs text-zinc-400">
-              click a category to drill down
+              click a category to review the full source-aware list
             </div>
           </div>
 
@@ -2036,8 +2047,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
           )}
 
           <div className="mt-3 text-xs text-zinc-500">
-            Common/Uncommon/Rare is based on how often you spent in that category
-            this month (frequency). We’ll refine to merchant-based rarity next.
+            Category totals now reflect statement, imported cash, manual, and linked activity for the current month. Common/Uncommon/Rare is still based on frequency.
           </div>
         </div>
 
@@ -2107,8 +2117,7 @@ const [upcomingTotal, setUpcomingTotal] = useState(0);
           )}
 
           <div className="mt-3 text-xs text-zinc-500">
-            Note: This uses statement balances as a proxy. In V2 we’ll compute
-            real spend trends from transactions.
+            Balance trend still reflects latest imported statement balances by period. Monthly spend panels above now use live source-aware transaction activity instead.
           </div>
         </div>
 

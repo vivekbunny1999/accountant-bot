@@ -242,9 +242,9 @@ export default function BillsPage() {
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">STS window obligations</div>
+            <div className="text-xs text-zinc-400">Bill obligations in STS window</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(billContext.upcomingWindowTotal)}</div>
-            <div className="mt-1 text-xs text-zinc-500">Next {billContext.upcomingWindowDays} days from Financial OS</div>
+            <div className="mt-1 text-xs text-zinc-500">Next {billContext.upcomingWindowDays} days from bills tracked on this page</div>
           </div>
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
             <div className="text-xs text-zinc-400">Essential total</div>
@@ -275,7 +275,7 @@ export default function BillsPage() {
             Financial OS pulls upcoming bills and manual obligations from this page into the current STS window, then protects that total before recommending extra debt payments.
           </div>
           <div className="mt-3 text-xs text-zinc-500">
-            Window total now: {fmtMoney(billContext.upcomingWindowTotal)} across the next {billContext.upcomingWindowDays} days.
+            Dashboard upcoming obligations can be higher because it also protects debt minimums and other upcoming obligations outside this page.
           </div>
         </div>
 
