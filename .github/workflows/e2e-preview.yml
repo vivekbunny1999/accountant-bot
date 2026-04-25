@@ -70,7 +70,7 @@ jobs:
         run: npm run qa:bundle
 
       - name: Run AI product review
-        if: always() && steps.check_secrets.outputs.should_run == 'true' && env.OPENAI_API_KEY != ''
+        if: always() && steps.check_secrets.outputs.should_run == 'true'
         run: npm run qa:ai-review
 
       - name: Upload QA artifacts
