@@ -1,5 +1,7 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { runStepWithArtifacts } from "./support/artifacts";
+import { runStepWithArtifacts, type PageArtifactResult } from "./support/artifacts";
 import { seedAuthenticatedSession } from "./support/auth";
 
 function main(page: Page) {
@@ -15,6 +17,98 @@ function extractMoneyForLabel(text: string, label: string) {
   const match = pattern.exec(text);
   if (!match) return null;
   return Number(match[1].replace(/,/g, ""));
+}
+
+type RequiredPageCapture = {
+  name: string;
+  route: string;
+  assertions: (page: Page) => Promise<void>;
+};
+
+const REQUIRED_PAGE_CAPTURES: RequiredPageCapture[] = [
+  {
+    name: "dashboard",
+    route: "/dashboard",
+    assertions: async (page) => {
+      await expect(main(page).getByText("Dashboard", { exact: true })).toBeVisible();
+      await expect(main(page).getByText(/Safe(?:\s|-)?to(?:\s|-)Spend(?:\s+Backend formula)?/i)).toBeVisible();
+    },
+  },
+  {
+    name: "accounts",
+    route: "/accounts",
+    assertions: async (page) => {
+      await expect(main(page).getByText("Accounts", { exact: true })).toBeVisible();
+      await expect(main(page).getByText(/cash accounts feeding your Financial OS plan/i)).toBeVisible();
+    },
+  },
+  {
+    name: "activity",
+    route: "/activity",
+    assertions: async (page) => {
+      await expect(main(page).getByText("Activity", { exact: true })).toBeVisible();
+      await expect(main(page).getByText("Plaid Activity", { exact: true })).toBeVisible();
+      await expect(main(page).getByText("Statement Source", { exact: true })).toBeVisible();
+      await expect(main(page).getByText("Manual Activity", { exact: true })).toBeVisible();
+    },
+  },
+  {
+    name: "bills",
+    route: "/bills",
+    assertions: async (page) => {
+      await expect(main(page).getByText("Bills", { exact: true })).toBeVisible();
+      await expect(main(page).getByText("This feeds Safe-to-Spend", { exact: true })).toBeVisible();
+    },
+  },
+  {
+    name: "debts",
+    route: "/debts",
+    assertions: async (page) => {
+      await expect(main(page).getByText("Debts", { exact: true })).toBeVisible();
+      await expect(main(page).getByText("Debt registry", { exact: true })).toBeVisible();
+    },
+  },
+  {
+    name: "settings",
+    route: "/settings",
+    assertions: async (page) => {
+      await expect(main(page).getByText("Settings", { exact: true })).toBeVisible();
+      await expect(main(page).getByText("Connections & Data Sources", { exact: true })).toBeVisible();
+    },
+  },
+];
+const QA_PAGES_DIR = path.join(process.cwd(), "test-results", "accountant-qa", "pages");
+
+async function expectSavedArtifact(relativePath: string, label: string) {
+  const absolutePath = path.join(process.cwd(), relativePath);
+  const stats = await fs.stat(absolutePath).catch(() => null);
+  expect(stats?.isFile(), `${label} should exist at ${relativePath}`).toBeTruthy();
+  expect(stats?.size ?? 0, `${label} should not be empty at ${relativePath}`).toBeGreaterThan(0);
+}
+
+async function expectArtifactOutput(artifact: PageArtifactResult) {
+  expect(artifact.pageUrl).toBeTruthy();
+  expect(artifact.pageText.trim().length, `${artifact.name} should include visible page text`).toBeGreaterThan(0);
+
+  await Promise.all([
+    expectSavedArtifact(artifact.screenshotPath, `Screenshot for ${artifact.name}`),
+    expectSavedArtifact(artifact.textPath, `Visible text file for ${artifact.name}`),
+    expectSavedArtifact(artifact.artifactPath, `Artifact record for ${artifact.name}`),
+  ]);
+}
+
+async function captureRequiredPage(page: Page, config: RequiredPageCapture) {
+  const artifact = await runStepWithArtifacts(page, {
+    name: config.name,
+    action: async () => {
+      await page.goto(config.route, { waitUntil: "domcontentloaded" });
+      await expect(page).toHaveURL(new RegExp(`${escapeRegExp(config.route)}(?:\\?.*)?$`));
+      await config.assertions(page);
+    },
+  });
+
+  await expectArtifactOutput(artifact);
+  return artifact;
 }
 
 async function openLogin(page: Page) {
@@ -35,69 +129,32 @@ async function authenticateSession(page: Page) {
 }
 
 test.describe.serial("Accountant Bot preview QA", () => {
+  test.beforeAll(async () => {
+    await fs.rm(QA_PAGES_DIR, { recursive: true, force: true });
+  });
+
   test("logs in and captures the main Financial OS pages", async ({ page }) => {
-    const dashboardArtifact = await runStepWithArtifacts(page, {
-      name: "dashboard",
-      action: async () => {
-        await authenticateSession(page);
-        await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
-        await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/);
-        await expect(main(page).getByText("Dashboard", { exact: true })).toBeVisible();
-        await expect(main(page).getByText(/Safe(?:\s|-)?to(?:\s|-)Spend(?:\s+Backend formula)?/i)).toBeVisible();
-      },
-    });
+    await authenticateSession(page);
 
-    await runStepWithArtifacts(page, {
-      name: "accounts",
-      action: async () => {
-        await page.goto("/accounts", { waitUntil: "domcontentloaded" });
-        await expect(main(page).getByText("Accounts", { exact: true })).toBeVisible();
-        await expect(main(page).getByText(/cash accounts feeding your Financial OS plan/i)).toBeVisible();
-      },
-    });
+    const capturedPages = new Map<string, PageArtifactResult>();
+    for (const config of REQUIRED_PAGE_CAPTURES) {
+      const artifact = await captureRequiredPage(page, config);
+      capturedPages.set(config.name, artifact);
+    }
 
-    const activityArtifact = await runStepWithArtifacts(page, {
-      name: "activity",
-      action: async () => {
-        await page.goto("/activity", { waitUntil: "domcontentloaded" });
-        await expect(main(page).getByText("Activity", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("Plaid Activity", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("Statement Source", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("Manual Activity", { exact: true })).toBeVisible();
-      },
-    });
+    expect(capturedPages.size, "At least one required page should be captured").toBeGreaterThan(0);
+    expect([...capturedPages.keys()]).toEqual(REQUIRED_PAGE_CAPTURES.map((config) => config.name));
 
-    await runStepWithArtifacts(page, {
-      name: "bills",
-      action: async () => {
-        await page.goto("/bills", { waitUntil: "domcontentloaded" });
-        await expect(main(page).getByText("Bills", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("This feeds Safe-to-Spend", { exact: true })).toBeVisible();
-      },
-    });
+    const dashboardArtifact = capturedPages.get("dashboard");
+    const activityArtifact = capturedPages.get("activity");
+    expect(dashboardArtifact, "Dashboard artifact should be present").toBeDefined();
+    expect(activityArtifact, "Activity artifact should be present").toBeDefined();
 
-    await runStepWithArtifacts(page, {
-      name: "debts",
-      action: async () => {
-        await page.goto("/debts", { waitUntil: "domcontentloaded" });
-        await expect(main(page).getByText("Debts", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("Debt registry", { exact: true })).toBeVisible();
-      },
-    });
-
-    await runStepWithArtifacts(page, {
-      name: "settings",
-      action: async () => {
-        await page.goto("/settings", { waitUntil: "domcontentloaded" });
-        await expect(main(page).getByText("Settings", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("Connections & Data Sources", { exact: true })).toBeVisible();
-      },
-    });
-
-    await runStepWithArtifacts(page, {
+    const settingsSecurityArtifact = await runStepWithArtifacts(page, {
       name: "settings-account-security",
       action: async () => {
         await page.goto("/settings", { waitUntil: "domcontentloaded" });
+        await expect(page).toHaveURL(/\/settings(?:\?.*)?$/);
         await expect(main(page).getByText("Account Security", { exact: true })).toBeVisible();
         await expect(main(page).getByText(/Change password without breaking the existing session-based auth flow/i)).toBeVisible();
         await main(page).getByText("Account Security", { exact: true }).scrollIntoViewIfNeeded();
@@ -106,10 +163,11 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await expect(main(page).getByPlaceholder("Confirm new password")).toBeVisible();
       },
     });
+    await expectArtifactOutput(settingsSecurityArtifact);
 
-    const visibleSpend = extractMoneyForLabel(activityArtifact.pageText, "Total spend shown");
+    const visibleSpend = extractMoneyForLabel(activityArtifact!.pageText, "Total spend shown");
     if (visibleSpend != null && visibleSpend > 0) {
-      expect(dashboardArtifact.pageText).not.toMatch(
+      expect(dashboardArtifact!.pageText).not.toMatch(
         /This Month Spend(?:.|\n)*?\$0\.00(?:.|\n)*?\$0\.00(?:.|\n)*?\$0\.00(?:.|\n)*?\$0\.00/i
       );
     }
@@ -124,6 +182,7 @@ test.describe.serial("Accountant Bot preview QA", () => {
       name: "settings-password-error",
       action: async () => {
         await page.goto("/settings", { waitUntil: "domcontentloaded" });
+        await expect(page).toHaveURL(/\/settings(?:\?.*)?$/);
         await expect(main(page).getByText("Account Security", { exact: true })).toBeVisible();
 
         await main(page).getByPlaceholder("Current password").nth(1).fill("TotallyWrongPassword123!");
@@ -134,6 +193,7 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await expect(main(page).getByText("Current password is incorrect.", { exact: true })).toBeVisible();
       },
     });
+    await expectArtifactOutput(passwordErrorArtifact);
 
     expect(passwordErrorArtifact.pageText).toContain("Current password is incorrect.");
     expect(passwordErrorArtifact.pageText).not.toMatch(/Failed to fetch/i);
