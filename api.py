@@ -5959,6 +5959,63 @@ def _cash_total_latest(db: Session, user_id: str) -> float:
     return round(float(pdf_cash_total + plaid_cash_total), 2)
 
 
+def _financial_os_source_counts(db: Session, user_id: str) -> dict:
+    linked_cash_count = (
+        db.query(PlaidAccount.id)
+        .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidAccount.user_id == user_id,
+            PlaidAccount.is_cash_like == True,
+            or_(PlaidItem.status == "linked", PlaidItem.status.is_(None), PlaidItem.status == "partial"),
+            or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
+        )
+        .count()
+    )
+    imported_cash_count = db.query(CashAccount.id).filter(CashAccount.user_id == user_id).count()
+    bill_count = db.query(Bill.id).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill)).count()
+    manual_bill_count = (
+        db.query(ManualBill.id)
+        .filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill))
+        .count()
+    )
+    debt_count = db.query(Debt.id).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).count()
+    debt_with_minimum_count = (
+        db.query(Debt.id)
+        .filter(
+            Debt.user_id == user_id,
+            _active_financial_os_clause(Debt),
+            Debt.minimum_due.isnot(None),
+            Debt.minimum_due > 0,
+        )
+        .count()
+    )
+
+    return {
+        "imported_cash_sources": int(imported_cash_count or 0),
+        "linked_cash_sources": int(linked_cash_count or 0),
+        "cash_sources_total": int((imported_cash_count or 0) + (linked_cash_count or 0)),
+        "bill_registry_count": int(bill_count or 0),
+        "manual_obligation_count": int(manual_bill_count or 0),
+        "tracked_debt_count": int(debt_count or 0),
+        "tracked_debt_minimum_count": int(debt_with_minimum_count or 0),
+    }
+
+
+def _financial_os_data_status(source_counts: dict) -> dict:
+    cash_ready = (source_counts.get("cash_sources_total") or 0) > 0
+    obligations_ready = (
+        (source_counts.get("bill_registry_count") or 0)
+        + (source_counts.get("manual_obligation_count") or 0)
+        + (source_counts.get("tracked_debt_minimum_count") or 0)
+    ) > 0
+    debt_ready = (source_counts.get("tracked_debt_count") or 0) > 0
+    return {
+        "cash": "ready" if cash_ready else "empty",
+        "obligations": "ready" if obligations_ready else "empty",
+        "debt_registry": "ready" if debt_ready else "empty",
+    }
+
+
 def _pdf_cash_total_latest(db: Session, user_id: str) -> float:
     """
     Latest PDF-imported checking + savings end balances only.
@@ -6091,6 +6148,8 @@ def os_next_best_dollar(
     """
     user_id = _coerce_user_id(current_user, user_id)
     settings = _user_settings_payload(db, user_id)
+    source_counts = _financial_os_source_counts(db, user_id)
+    data_status = _financial_os_data_status(source_counts)
     minimum_extra_payment = _to_float(
         _settings_value(settings, ["financialOS", "debt", "minExtraPayment"], 0.0),
         0.0,
@@ -6170,6 +6229,8 @@ def os_next_best_dollar(
         "stage": stage,
         "upcoming_items": items,
         "cash_sources": cash_sources,
+        "source_counts": source_counts,
+        "data_status": data_status,
         "upcoming_summary": upcoming_summary,
         "breakdown": breakdown,
         "calculation": {
@@ -6196,6 +6257,8 @@ def os_state(
     One endpoint your UI can call to power Settings + Dashboard panels.
     """
     user_id = _coerce_user_id(current_user, user_id)
+    source_counts = _financial_os_source_counts(db, user_id)
+    data_status = _financial_os_data_status(source_counts)
     cash_total = _cash_total_latest(db, user_id)
     upcoming_items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
 
@@ -6213,6 +6276,8 @@ def os_state(
         "user_id": user_id,
         "cash_total": round(float(cash_total), 2),
         "cash_sources": cash_sources,
+        "source_counts": source_counts,
+        "data_status": data_status,
         "upcoming_window_days": window_days,
         "upcoming_total": round(float(upcoming_total), 2),
         "upcoming_items": upcoming_items,
