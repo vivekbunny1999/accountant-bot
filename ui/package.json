@@ -10,7 +10,8 @@
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:install": "playwright install --with-deps chromium",
-    "qa:bundle": "python ../scripts/build_qa_bundle.py"
+    "qa:bundle": "python ../scripts/build_qa_bundle.py",
+    "qa:ai-review": "python ../scripts/ai_product_review.py"
   },
   "dependencies": {
     "next": "16.1.6",
