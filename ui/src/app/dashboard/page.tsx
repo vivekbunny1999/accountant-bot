@@ -57,8 +57,27 @@ function hasFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function coerceDashboardMoneyValue(value: unknown): number | null {
+  if (hasFiniteNumber(value)) return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const normalized = Number(trimmed.replace(/[$,\s]/g, ""));
+    if (Number.isFinite(normalized)) return normalized;
+  }
+  return null;
+}
+
+function firstDashboardMoneyValue(...values: unknown[]): number | null {
+  for (const value of values) {
+    const coerced = coerceDashboardMoneyValue(value);
+    if (coerced != null) return coerced;
+  }
+  return null;
+}
+
 function formatDashboardMoney(
-  value: number | null | undefined,
+  value: unknown,
   options?: {
     loading?: boolean;
     unavailable?: boolean;
@@ -66,8 +85,9 @@ function formatDashboardMoney(
 ) {
   if (options?.loading) return "Loading";
   if (options?.unavailable) return "Data unavailable";
-  if (!hasFiniteNumber(value)) return "Data unavailable";
-  return fmtMoney(value);
+  const coerced = coerceDashboardMoneyValue(value);
+  if (coerced == null) return "Data unavailable";
+  return fmtMoney(coerced);
 }
 
 function safeTime(s?: string | null) {
@@ -611,7 +631,10 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         setOsState(stateValue || null);
         setUpcomingItems(stateValue?.upcoming_items || []);
         setUpcomingTotal(
-          stateValue?.upcoming_total != null ? Number(stateValue.upcoming_total) : null
+          firstDashboardMoneyValue(
+            stateValue?.upcoming_total,
+            stateValue?.calculation?.upcoming_total
+          )
         );
         setBillsErr(null);
       } else {
@@ -683,21 +706,55 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     };
   }, [cashAccounts]);
 
+  const trackedDebtItems = useMemo(
+    () => (Array.isArray(osState?.debt_utilization?.items) ? osState?.debt_utilization?.items : []),
+    [osState]
+  );
+  const trackedDebtItemsTotal = useMemo(
+    () => {
+      if (!trackedDebtItems.length) return null;
+      return trackedDebtItems.reduce((sum, item) => {
+        return sum + (firstDashboardMoneyValue(item?.balance) ?? 0);
+      }, 0);
+    },
+    [trackedDebtItems]
+  );
   const osCashSources = osState?.cash_sources || null;
-  const financialOsCashTotal = nextBestDollar?.cash_total ?? osState?.cash_total ?? null;
   const stsBreakdown = nextBestDollar?.breakdown || null;
   const upcomingSummary = nextBestDollar?.upcoming_summary ?? osState?.upcoming_summary ?? null;
   const upcomingItemsList = upcomingItems ?? [];
   const financialOsLoading = !userId || billsLoading;
   const osStateUnavailable = !financialOsLoading && Boolean(billsErr);
   const nextBestDollarUnavailable = !financialOsLoading && Boolean(nextBestDollarErr);
-  const trackedDebtItems = useMemo(
-    () => (Array.isArray(osState?.debt_utilization?.items) ? osState?.debt_utilization?.items : []),
-    [osState]
+  const intelligenceContext = intelligence?.context ?? null;
+  const financialOsCashTotal = firstDashboardMoneyValue(
+    osState?.cash_total,
+    nextBestDollar?.cash_total,
+    osState?.calculation?.cash_total,
+    nextBestDollar?.calculation?.cash_total,
+    stsBreakdown?.total_cash,
+    intelligenceContext?.cash_total
   );
-  const trackedDebtTotal = osState?.debt_utilization?.total_balance != null
-    ? Number(osState.debt_utilization.total_balance)
-    : null;
+  const financialOsUpcomingTotal = firstDashboardMoneyValue(
+    osState?.upcoming_total,
+    nextBestDollar?.upcoming_total,
+    osState?.calculation?.upcoming_total,
+    nextBestDollar?.calculation?.upcoming_total,
+    stsBreakdown?.upcoming_total,
+    intelligenceContext?.upcoming_total,
+    upcomingTotal
+  );
+  const trackedDebtTotal = firstDashboardMoneyValue(
+    osState?.debt_utilization?.total_balance,
+    intelligenceContext?.debt_total_balance,
+    trackedDebtItemsTotal
+  );
+  const safeToSpendToday = firstDashboardMoneyValue(
+    nextBestDollar?.safe_to_spend_today,
+    nextBestDollar?.calculation?.safe_to_spend_today,
+    stsBreakdown?.final_safe_to_spend,
+    intelligenceContext?.safe_to_spend_today
+  );
   const statementCoverage = useMemo(
     () => statementsTrackedByDebt(latestPerCard as any, trackedDebtItems as any),
     [latestPerCard, trackedDebtItems]
@@ -735,7 +792,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     [fiProgress]
   );
   const nextDollarImpact = intelligence?.next_best_dollar_impact ?? null;
-  const intelligenceContext = intelligence?.context ?? null;
   const availableStsForDebt = nextDollarImpact?.available_sts
     ?? intelligenceContext?.available_sts
     ?? nextBestDollar?.available_sts
@@ -1315,7 +1371,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="text-xs text-zinc-400">STS today</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(
-                      intelligenceContext?.safe_to_spend_today ?? nextBestDollar?.safe_to_spend_today ?? null,
+                      intelligenceContext?.safe_to_spend_today ?? safeToSpendToday,
                       { loading: financialOsLoading, unavailable: nextBestDollarUnavailable }
                     )}
                   </div>
@@ -1488,7 +1544,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
-                {formatDashboardMoney(nextBestDollar?.safe_to_spend_today ?? null, {
+                {formatDashboardMoney(safeToSpendToday, {
                   loading: financialOsLoading,
                   unavailable: nextBestDollarUnavailable,
                 })}
@@ -1636,7 +1692,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         <div className="mt-1 text-xs text-zinc-400">
         Next {upcomingWindowDays} days • total needed{" "}
         <span className="text-zinc-100 font-mono">
-          {formatDashboardMoney(upcomingTotal, {
+          {formatDashboardMoney(financialOsUpcomingTotal, {
             loading: financialOsLoading,
             unavailable: osStateUnavailable,
           })}
