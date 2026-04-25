@@ -408,8 +408,9 @@ type MonthSpendRow = {
 };
 
 export default function DashboardPage() {
-  const { user } = useAuth();
+  const { user, status } = useAuth();
   const userId = user?.id ?? "";
+  const hasAuthenticatedUser = status === "authenticated" && Boolean(userId);
   const [data, setData] = useState<Statement[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -442,6 +443,7 @@ export default function DashboardPage() {
 
    const [billsLoading, setBillsLoading] = useState(false);
    const [billsErr, setBillsErr] = useState<string | null>(null);
+   const [nextBestDollarLoading, setNextBestDollarLoading] = useState(false);
    const [nextBestDollarErr, setNextBestDollarErr] = useState<string | null>(null);
 
 const upcomingWindowDays = 21; // Phase 1 fixed backend window
@@ -593,89 +595,103 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   }, [userId]);
 
   useEffect(() => {
-    if (!userId) return;
+    if (!hasAuthenticatedUser) return;
     let cancelled = false;
+    const bufferAmount = settings.buffer_enabled ? settings.buffer_amount : 0;
 
     (async () => {
       setBillsLoading(true);
       setBillsErr(null);
-      setNextBestDollarErr(null);
-      setOsState(null);
-      setNextBestDollar(null);
-      setUpcomingItems([]);
-      setUpcomingTotal(null);
-      const bufferAmount = settings.buffer_enabled ? settings.buffer_amount : 0;
 
-      const monthStart = new Date(cy, cm0, 1).toISOString().slice(0, 10);
-      const monthEnd = new Date(cy, cm0 + 1, 0).toISOString().slice(0, 10);
+      try {
+        const stateValue = await getOsState({ user_id: userId, window_days: upcomingWindowDays });
+        if (cancelled) return;
 
-      const [stateRes, nbdRes, intelligenceRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.allSettled([
-          getOsState({ user_id: userId, window_days: upcomingWindowDays }),
-          getNextBestDollar({
-            user_id: userId,
-            window_days: upcomingWindowDays,
-            buffer: bufferAmount,
-          }),
-          getFinancialOsIntelligence({
-            user_id: userId,
-            window_days: upcomingWindowDays,
-            buffer: bufferAmount,
-          }),
-          getPlaidAccounts(userId),
-          getPlaidTransactions({ user_id: userId, limit: 200, start_date: monthStart, end_date: monthEnd }),
-        ]);
-      if (cancelled) return;
-
-      if (stateRes.status === "fulfilled") {
-        const stateValue = stateRes.value;
-        setOsState(stateValue || null);
-        setUpcomingItems(stateValue?.upcoming_items || []);
-        setUpcomingTotal(
-          firstDashboardMoneyValue(
-            stateValue?.upcoming_total,
-            stateValue?.calculation?.upcoming_total
-          )
-        );
+        if (stateValue) {
+          setOsState(stateValue);
+          setUpcomingItems(stateValue.upcoming_items || []);
+          setUpcomingTotal(
+            firstDashboardMoneyValue(
+              stateValue.upcoming_total,
+              stateValue.calculation?.upcoming_total
+            )
+          );
+        }
         setBillsErr(null);
-      } else {
-        setOsState(null);
-        setUpcomingItems([]);
-        setUpcomingTotal(null);
-        setBillsErr(stateRes.reason?.message || "Failed to load Financial OS state.");
+      } catch (error: any) {
+        if (!cancelled) {
+          setBillsErr(error?.message || "Failed to load Financial OS state.");
+        }
+      } finally {
+        if (!cancelled) setBillsLoading(false);
       }
+    })();
 
-      if (nbdRes.status === "fulfilled") {
-        setNextBestDollar(nbdRes.value || null);
-      } else {
-        setNextBestDollar(null);
-        setNextBestDollarErr(nbdRes.reason?.message || "Failed to load safe-to-spend.");
+    (async () => {
+      setNextBestDollarLoading(true);
+      setNextBestDollarErr(null);
+
+      try {
+        const nbdValue = await getNextBestDollar({
+          user_id: userId,
+          window_days: upcomingWindowDays,
+          buffer: bufferAmount,
+        });
+        if (cancelled) return;
+        if (nbdValue) {
+          setNextBestDollar(nbdValue);
+        }
+        setNextBestDollarErr(null);
+      } catch (error: any) {
+        if (!cancelled) {
+          setNextBestDollarErr(error?.message || "Failed to load safe-to-spend.");
+        }
+      } finally {
+        if (!cancelled) setNextBestDollarLoading(false);
       }
-
-      if (intelligenceRes.status === "fulfilled") {
-        setIntelligence(intelligenceRes.value || null);
-      } else {
-        setIntelligence(null);
-      }
-
-      if (plaidAccountsRes.status === "fulfilled") {
-        setPlaidAccounts(plaidAccountsRes.value?.accounts || []);
-      } else {
-        setPlaidAccounts([]);
-      }
-
-      if (plaidTransactionsRes.status === "fulfilled") {
-        setPlaidTransactions(plaidTransactionsRes.value?.transactions || []);
-      } else {
-        setPlaidTransactions([]);
-      }
-
-      setBillsLoading(false);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [cy, cm0, userId, upcomingWindowDays, settings.buffer_amount, settings.buffer_enabled]);
+  }, [hasAuthenticatedUser, userId, upcomingWindowDays, settings.buffer_amount, settings.buffer_enabled]);
+
+  useEffect(() => {
+    if (!hasAuthenticatedUser) return;
+    let cancelled = false;
+    const bufferAmount = settings.buffer_enabled ? settings.buffer_amount : 0;
+    const monthStart = new Date(cy, cm0, 1).toISOString().slice(0, 10);
+    const monthEnd = new Date(cy, cm0 + 1, 0).toISOString().slice(0, 10);
+
+    (async () => {
+      const [intelligenceRes, plaidAccountsRes, plaidTransactionsRes] = await Promise.allSettled([
+        getFinancialOsIntelligence({
+          user_id: userId,
+          window_days: upcomingWindowDays,
+          buffer: bufferAmount,
+        }),
+        getPlaidAccounts(userId),
+        getPlaidTransactions({ user_id: userId, limit: 200, start_date: monthStart, end_date: monthEnd }),
+      ]);
+      if (cancelled) return;
+
+      if (intelligenceRes.status === "fulfilled" && intelligenceRes.value) {
+        setIntelligence(intelligenceRes.value);
+      }
+
+      if (plaidAccountsRes.status === "fulfilled" && plaidAccountsRes.value) {
+        setPlaidAccounts(plaidAccountsRes.value.accounts || []);
+      }
+
+      if (plaidTransactionsRes.status === "fulfilled" && plaidTransactionsRes.value) {
+        setPlaidTransactions(plaidTransactionsRes.value.transactions || []);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cy, cm0, hasAuthenticatedUser, userId, upcomingWindowDays, settings.buffer_amount, settings.buffer_enabled]);
 
   /** =========================
    * Cash totals (latest import)
@@ -706,14 +722,14 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     };
   }, [cashAccounts]);
 
-  const trackedDebtItems = useMemo(
-    () => (Array.isArray(osState?.debt_utilization?.items) ? osState?.debt_utilization?.items : []),
+  const trackedDebtItems = useMemo<Array<{ balance?: unknown }>>(
+    () => (Array.isArray(osState?.debt_utilization?.items) ? osState.debt_utilization.items : []),
     [osState]
   );
   const trackedDebtItemsTotal = useMemo(
     () => {
       if (!trackedDebtItems.length) return null;
-      return trackedDebtItems.reduce((sum, item) => {
+      return trackedDebtItems.reduce((sum: number, item) => {
         return sum + (firstDashboardMoneyValue(item?.balance) ?? 0);
       }, 0);
     },
@@ -721,39 +737,30 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   );
   const osCashSources = osState?.cash_sources || null;
   const stsBreakdown = nextBestDollar?.breakdown || null;
-  const upcomingSummary = nextBestDollar?.upcoming_summary ?? osState?.upcoming_summary ?? null;
+  const upcomingSummary = osState?.upcoming_summary ?? null;
   const upcomingItemsList = upcomingItems ?? [];
-  const financialOsLoading = !userId || billsLoading;
-  const osStateUnavailable = !financialOsLoading && Boolean(billsErr);
-  const nextBestDollarUnavailable = !financialOsLoading && Boolean(nextBestDollarErr);
+  const osStateLoading = !hasAuthenticatedUser || (billsLoading && !osState);
+  const nextBestDollarLoadingState = !hasAuthenticatedUser || (nextBestDollarLoading && !nextBestDollar);
+  const osStateUnavailable = !osStateLoading && Boolean(billsErr);
+  const nextBestDollarUnavailable = !nextBestDollarLoadingState && Boolean(nextBestDollarErr);
   const intelligenceContext = intelligence?.context ?? null;
   const financialOsCashTotal = firstDashboardMoneyValue(
     osState?.cash_total,
-    nextBestDollar?.cash_total,
-    osState?.calculation?.cash_total,
-    nextBestDollar?.calculation?.cash_total,
-    stsBreakdown?.total_cash,
-    intelligenceContext?.cash_total
+    osState?.calculation?.cash_total
   );
   const financialOsUpcomingTotal = firstDashboardMoneyValue(
     osState?.upcoming_total,
-    nextBestDollar?.upcoming_total,
     osState?.calculation?.upcoming_total,
-    nextBestDollar?.calculation?.upcoming_total,
-    stsBreakdown?.upcoming_total,
-    intelligenceContext?.upcoming_total,
     upcomingTotal
   );
   const trackedDebtTotal = firstDashboardMoneyValue(
     osState?.debt_utilization?.total_balance,
-    intelligenceContext?.debt_total_balance,
     trackedDebtItemsTotal
   );
   const safeToSpendToday = firstDashboardMoneyValue(
     nextBestDollar?.safe_to_spend_today,
     nextBestDollar?.calculation?.safe_to_spend_today,
-    stsBreakdown?.final_safe_to_spend,
-    intelligenceContext?.safe_to_spend_today
+    stsBreakdown?.final_safe_to_spend
   );
   const statementCoverage = useMemo(
     () => statementsTrackedByDebt(latestPerCard as any, trackedDebtItems as any),
@@ -1372,7 +1379,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(
                       intelligenceContext?.safe_to_spend_today ?? safeToSpendToday,
-                      { loading: financialOsLoading, unavailable: nextBestDollarUnavailable }
+                      { loading: nextBestDollarLoadingState, unavailable: nextBestDollarUnavailable }
                     )}
                   </div>
                 </div>
@@ -1545,7 +1552,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
                 {formatDashboardMoney(safeToSpendToday, {
-                  loading: financialOsLoading,
+                  loading: nextBestDollarLoadingState,
                   unavailable: nextBestDollarUnavailable,
                 })}
               </div>
@@ -1693,13 +1700,13 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         Next {upcomingWindowDays} days • total needed{" "}
         <span className="text-zinc-100 font-mono">
           {formatDashboardMoney(financialOsUpcomingTotal, {
-            loading: financialOsLoading,
+            loading: osStateLoading,
             unavailable: osStateUnavailable,
           })}
         </span>
       </div>
       <div className="mt-1 text-xs text-zinc-500">
-        Bills {formatDashboardMoney(upcomingSummary?.bill_total ?? null, { loading: financialOsLoading, unavailable: osStateUnavailable })} • Manual {formatDashboardMoney(upcomingSummary?.manual_bill_total ?? null, { loading: financialOsLoading, unavailable: osStateUnavailable })} • Debt minimums {formatDashboardMoney(upcomingSummary?.debt_minimum_total ?? null, { loading: financialOsLoading, unavailable: osStateUnavailable })}
+        Bills {formatDashboardMoney(upcomingSummary?.bill_total ?? null, { loading: osStateLoading, unavailable: osStateUnavailable })} • Manual {formatDashboardMoney(upcomingSummary?.manual_bill_total ?? null, { loading: osStateLoading, unavailable: osStateUnavailable })} • Debt minimums {formatDashboardMoney(upcomingSummary?.debt_minimum_total ?? null, { loading: osStateLoading, unavailable: osStateUnavailable })}
       </div>
     </div>
 
@@ -1967,8 +1974,8 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             <div className="text-xs text-zinc-400">Total Cash</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">
               {formatDashboardMoney(financialOsCashTotal, {
-                loading: financialOsLoading,
-                unavailable: osStateUnavailable && nextBestDollarUnavailable,
+                loading: osStateLoading,
+                unavailable: osStateUnavailable,
               })}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
@@ -1980,7 +1987,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             <div className="text-xs text-zinc-400">Tracked Debt Registry</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">
               {formatDashboardMoney(trackedDebtTotal, {
-                loading: financialOsLoading,
+                loading: osStateLoading,
                 unavailable: osStateUnavailable,
               })}
             </div>
@@ -2003,8 +2010,8 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             <div className="text-xs text-zinc-400">Net Worth (V1)</div>
             <div className="mt-2 text-2xl font-semibold text-zinc-100">
               {formatDashboardMoney(netWorthV1, {
-                loading: financialOsLoading,
-                unavailable: osStateUnavailable && nextBestDollarUnavailable,
+                loading: osStateLoading,
+                unavailable: osStateUnavailable,
               })}
             </div>
             <div className="mt-1 text-xs text-zinc-500">
