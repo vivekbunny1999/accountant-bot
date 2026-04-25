@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { runStepWithArtifacts } from "./support/artifacts";
-import { getE2ECredentials } from "./support/env";
+import { seedAuthenticatedSession } from "./support/auth";
 
 function main(page: Page) {
   return page.locator("main");
@@ -29,24 +29,21 @@ async function openLogin(page: Page) {
   });
 }
 
-async function signIn(page: Page) {
-  const { email, password } = getE2ECredentials();
-  await page.getByPlaceholder("Email").fill(email);
-  await page.getByPlaceholder("Password").fill(password);
-  await page.getByRole("button", { name: /^log in$/i }).click();
+async function authenticateSession(page: Page) {
+  await openLogin(page);
+  return seedAuthenticatedSession(page);
 }
 
 test.describe.serial("Accountant Bot preview QA", () => {
   test("logs in and captures the main Financial OS pages", async ({ page }) => {
-    await openLogin(page);
-
     const dashboardArtifact = await runStepWithArtifacts(page, {
       name: "dashboard",
       action: async () => {
-        await signIn(page);
+        await authenticateSession(page);
+        await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
         await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/);
         await expect(main(page).getByText("Dashboard", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("Safe-to-Spend", { exact: true })).toBeVisible();
+        await expect(main(page).getByText(/Safe(?:\s|-)?to(?:\s|-)Spend(?:\s+Backend formula)?/i)).toBeVisible();
       },
     });
 
@@ -105,7 +102,7 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await expect(main(page).getByText(/Change password without breaking the existing session-based auth flow/i)).toBeVisible();
         await main(page).getByText("Account Security", { exact: true }).scrollIntoViewIfNeeded();
         await expect(main(page).getByPlaceholder("Current password").nth(1)).toBeVisible();
-        await expect(main(page).getByPlaceholder(/New password/i)).toBeVisible();
+        await expect(main(page).getByPlaceholder("New password (8+ characters)")).toBeVisible();
         await expect(main(page).getByPlaceholder("Confirm new password")).toBeVisible();
       },
     });
@@ -119,8 +116,8 @@ test.describe.serial("Accountant Bot preview QA", () => {
   });
 
   test("shows a specific wrong-current-password error in account security", async ({ page }) => {
-    await page.goto("/login", { waitUntil: "domcontentloaded" });
-    await signIn(page);
+    await authenticateSession(page);
+    await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
     await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/);
 
     const passwordErrorArtifact = await runStepWithArtifacts(page, {
@@ -130,7 +127,7 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await expect(main(page).getByText("Account Security", { exact: true })).toBeVisible();
 
         await main(page).getByPlaceholder("Current password").nth(1).fill("TotallyWrongPassword123!");
-        await main(page).getByPlaceholder(/New password/i).fill("ValidPassword123!");
+        await main(page).getByPlaceholder("New password (8+ characters)").fill("ValidPassword123!");
         await main(page).getByPlaceholder("Confirm new password").fill("ValidPassword123!");
         await main(page).getByRole("button", { name: /change password/i }).click();
 

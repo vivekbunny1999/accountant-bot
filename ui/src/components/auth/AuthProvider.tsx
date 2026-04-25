@@ -90,7 +90,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSessionToken(res.token, res.expires_at);
     setUser(res.user);
     setStatus("authenticated");
-    await refresh();
+    refresh().catch(() => {});
     return res;
   }
 
@@ -99,7 +99,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSessionToken(res.token, res.expires_at);
     setUser(res.user);
     setStatus("authenticated");
-    await refresh();
+    refresh().catch(() => {});
     return res;
   }
 
@@ -118,7 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSessionToken(res.token, res.expires_at);
     setUser(res.user);
     setStatus("authenticated");
-    await refresh();
+    refresh().catch(() => {});
     return res;
   }
 
@@ -139,7 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSessionToken(res.token, res.expires_at);
     setUser(res.user);
     setStatus("authenticated");
-    await refresh();
+    refresh().catch(() => {});
     return res;
   }
 

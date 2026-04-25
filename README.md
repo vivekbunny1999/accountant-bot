@@ -60,11 +60,17 @@ The repo includes a Playwright-based QA loop for the deployed UI in `ui/`.
 - `E2E_TEST_EMAIL`
 - `E2E_TEST_PASSWORD`
 
+### Optional GitHub secret
+
+- `E2E_API_BASE_URL`
+  Recommended value: `https://accountant-bot-tjj6.onrender.com`
+  The Playwright suite uses this for backend API login before visiting protected UI pages. If omitted, the tests fall back to `NEXT_PUBLIC_API_BASE_URL`, then to `https://accountant-bot-tjj6.onrender.com`.
+
 ### Local commands
 
 Install UI dependencies and Playwright once:
 
-```bash
+```powershell
 cd ui
 npm install
 npm run test:e2e:install
@@ -72,10 +78,11 @@ npm run test:e2e:install
 
 Run the E2E suite against local UI or any deployed preview:
 
-```bash
-set E2E_BASE_URL=http://127.0.0.1:3000
-set E2E_TEST_EMAIL=your-test-user@example.com
-set E2E_TEST_PASSWORD=your-test-password
+```powershell
+$env:E2E_BASE_URL="http://127.0.0.1:3000"
+$env:E2E_API_BASE_URL="https://accountant-bot-tjj6.onrender.com"
+$env:E2E_TEST_EMAIL="your-test-user@example.com"
+$env:E2E_TEST_PASSWORD="your-test-password"
 npm run test:e2e
 npm run qa:bundle
 ```
@@ -90,7 +97,7 @@ Artifacts are generated in `ui/test-results/accountant-qa/`:
 
 ### Run against Vercel preview
 
-Set `E2E_BASE_URL` to the Vercel preview URL for the UI deployment and run the same commands above. The workflow in `.github/workflows/e2e-preview.yml` does this automatically on `pull_request` when the secrets are available.
+Set `E2E_BASE_URL` to the Vercel preview URL and set `E2E_API_BASE_URL` to the backend login API if you want to pin auth explicitly. The workflow in `.github/workflows/e2e-preview.yml` does this automatically on `pull_request` when the secrets are available.
 
 ### How Codex should use failing artifacts
 

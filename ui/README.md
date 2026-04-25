@@ -25,6 +25,12 @@ Required env vars:
 - `E2E_TEST_EMAIL`
 - `E2E_TEST_PASSWORD`
 
+Optional env var:
+
+- `E2E_API_BASE_URL`
+  Recommended: `https://accountant-bot-tjj6.onrender.com`
+  Used for backend API login during Playwright auth setup. If omitted, the tests fall back to `NEXT_PUBLIC_API_BASE_URL`, then to `https://accountant-bot-tjj6.onrender.com`.
+
 Run the preview or local smoke suite:
 
 ```bash
@@ -50,6 +56,7 @@ Point `E2E_BASE_URL` at the deployed preview URL, then run:
 
 ```powershell
 $env:E2E_BASE_URL="https://your-preview.vercel.app"
+$env:E2E_API_BASE_URL="https://accountant-bot-tjj6.onrender.com"
 npm run test:e2e
 npm run qa:bundle
 ```
