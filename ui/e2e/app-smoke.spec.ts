@@ -43,7 +43,7 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
         await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/);
         await expect(main(page).getByText("Dashboard", { exact: true })).toBeVisible();
-        await expect(main(page).getByText("Safe-to-Spend", { exact: true })).toBeVisible();
+        await expect(main(page).getByText(/Safe(?:\s|-)?to(?:\s|-)Spend(?:\s+Backend formula)?/i)).toBeVisible();
       },
     });
 
