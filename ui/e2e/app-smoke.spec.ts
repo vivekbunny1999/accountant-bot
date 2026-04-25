@@ -102,7 +102,7 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await expect(main(page).getByText(/Change password without breaking the existing session-based auth flow/i)).toBeVisible();
         await main(page).getByText("Account Security", { exact: true }).scrollIntoViewIfNeeded();
         await expect(main(page).getByPlaceholder("Current password").nth(1)).toBeVisible();
-        await expect(main(page).getByPlaceholder(/New password/i)).toBeVisible();
+        await expect(main(page).getByPlaceholder("New password (8+ characters)")).toBeVisible();
         await expect(main(page).getByPlaceholder("Confirm new password")).toBeVisible();
       },
     });
@@ -127,7 +127,7 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await expect(main(page).getByText("Account Security", { exact: true })).toBeVisible();
 
         await main(page).getByPlaceholder("Current password").nth(1).fill("TotallyWrongPassword123!");
-        await main(page).getByPlaceholder(/New password/i).fill("ValidPassword123!");
+        await main(page).getByPlaceholder("New password (8+ characters)").fill("ValidPassword123!");
         await main(page).getByPlaceholder("Confirm new password").fill("ValidPassword123!");
         await main(page).getByRole("button", { name: /change password/i }).click();
 
