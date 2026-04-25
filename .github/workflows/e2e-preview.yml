@@ -19,6 +19,7 @@ jobs:
     env:
       CI: "true"
       E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+      E2E_API_BASE_URL: ${{ secrets.E2E_API_BASE_URL }}
       E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
       E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
 
