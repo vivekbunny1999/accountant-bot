@@ -766,8 +766,34 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const safeToSpendToday = firstDashboardMoneyValue(
     nextBestDollar?.safe_to_spend_today,
     nextBestDollar?.calculation?.safe_to_spend_today,
-    stsBreakdown?.final_safe_to_spend
+    stsBreakdown?.final_safe_to_spend,
+    intelligenceContext?.safe_to_spend_today
   );
+  const safeToSpendBeforeBuffer = (() => {
+    const cash = firstDashboardMoneyValue(
+      stsBreakdown?.total_cash,
+      nextBestDollar?.calculation?.cash_total,
+      nextBestDollar?.cash_total,
+      intelligenceContext?.cash_total
+    );
+    const upcoming = firstDashboardMoneyValue(
+      stsBreakdown?.upcoming_total,
+      nextBestDollar?.calculation?.upcoming_total,
+      nextBestDollar?.upcoming_total,
+      intelligenceContext?.upcoming_total
+    );
+    if (cash == null || upcoming == null) return null;
+    return Math.round((cash - upcoming) * 100) / 100;
+  })();
+  const protectedBuffer = firstDashboardMoneyValue(
+    stsBreakdown?.buffer,
+    nextBestDollar?.calculation?.buffer,
+    nextBestDollar?.buffer
+  );
+  const safeToSpendFormulaLabel =
+    safeToSpendBeforeBuffer != null
+      ? "Safe-to-Spend before buffer = cash total - upcoming obligations. Final Safe-to-Spend = that amount - protected buffer."
+      : (nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer");
   const statementCoverage = useMemo(
     () => statementsTrackedByDebt(latestPerCard as any, trackedDebtItems as any),
     [latestPerCard, trackedDebtItems]
@@ -1392,10 +1418,10 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">STS today</div>
+                  <div className="text-xs text-zinc-400">Final Safe-to-Spend</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(
-                      intelligenceContext?.safe_to_spend_today ?? safeToSpendToday,
+                      safeToSpendToday,
                       { loading: nextBestDollarLoadingState, unavailable: nextBestDollarUnavailable }
                     )}
                   </div>
@@ -1562,9 +1588,13 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-center justify-between">
                 <div className="text-sm font-semibold text-zinc-100">
-                  Safe to Spend
+                  Safe-to-Spend Breakdown
                 </div>
-                <div className="text-xs text-zinc-400">Backend formula</div>
+                <div className="text-xs text-zinc-400">STS formula</div>
+              </div>
+
+              <div className="mt-2 text-xs text-zinc-400">
+                Final Safe-to-Spend after upcoming obligations and protected buffer.
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
@@ -1614,15 +1644,19 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     <span className="font-mono text-zinc-200">{formatDashboardMoney(stsBreakdown.upcoming_total ?? null)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
-                    <span>Buffer</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(stsBreakdown.buffer ?? null)}</span>
+                    <span>Safe-to-Spend before buffer</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(safeToSpendBeforeBuffer)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Protected buffer</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(protectedBuffer)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-300">
-                    <span>Final safe to spend</span>
-                    <span className="font-mono text-zinc-100">{formatDashboardMoney(stsBreakdown.final_safe_to_spend ?? null)}</span>
+                    <span>Final Safe-to-Spend</span>
+                    <span className="font-mono text-zinc-100">{formatDashboardMoney(safeToSpendToday)}</span>
                   </div>
                   <div className="text-[11px] text-zinc-500">
-                    {nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer"}
+                    {safeToSpendFormulaLabel}
                   </div>
                 </div>
               ) : nextBestDollarUnavailable ? (
