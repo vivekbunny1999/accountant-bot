@@ -483,6 +483,31 @@ function Divider() {
   return <div className="my-4 h-px bg-white/10" />;
 }
 
+function DisclosureSection({
+  title,
+  subtitle,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  return (
+    <details
+      open={defaultOpen}
+      className="rounded-xl border border-white/10 bg-black/20"
+    >
+      <summary className="cursor-pointer list-none px-4 py-3">
+        <div className="text-sm font-medium text-zinc-100">{title}</div>
+        {subtitle ? <div className="mt-1 text-xs text-zinc-400">{subtitle}</div> : null}
+      </summary>
+      <div className="border-t border-white/10 px-4 py-4">{children}</div>
+    </details>
+  );
+}
+
 function Toggle({
   label,
   desc,
@@ -828,7 +853,7 @@ function DebtFormFields({
 
       <Toggle
         label="Active debt"
-        desc="Inactive debts stay in history but won’t drive planning."
+        desc="Inactive debts stay in history but won't drive planning."
         value={form.active}
         onChange={(value) => onChange({ ...form, active: value })}
       />
@@ -997,10 +1022,11 @@ export default function SettingsPage() {
       sts.bufferMode === "Percent"
         ? `${fmtPct(sts.bufferPercent)} buffer`
         : `$${Math.round(sts.bufferFixed)} buffer`;
+    const splitMode = settings.financialOS.paycheck.splitMode === "ThreeCaps" ? "Three caps" : "Custom buckets";
     return {
       buffer,
       strategy: settings.financialOS.debt.strategy,
-      splitMode: settings.financialOS.paycheck.splitMode,
+      splitMode,
       alerts: settings.alerts.enabled ? settings.alerts.frequency : "Off",
     };
   }, [settings]);
@@ -1298,7 +1324,7 @@ export default function SettingsPage() {
             <div className="min-w-0">
               <div className="text-lg font-semibold text-zinc-100">Settings</div>
               <div className="mt-1 text-sm text-zinc-400">
-                Tune your Financial OS once — then the app runs on autopilot with low cognitive load.
+                Make Accountant Bot fit how you spend, save, and stay organized.
               </div>
               <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-400">
                 <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
@@ -1334,14 +1360,14 @@ export default function SettingsPage() {
             {/* Safe-to-Spend */}
             <Card>
               <SectionTitle
-                title="Safe-to-Spend (STS) Controls"
-                subtitle="Defines your buffer rule and how conservative the app should be before it says you can spend."
+                title="Safe-to-Spend Controls"
+                subtitle="Choose how much breathing room to keep before the app tells you money is safe to spend."
               />
               <Divider />
 
               <Toggle
-                label="Enable STS engine"
-                desc="When on, the app will compute a daily Safe-to-Spend with a safety buffer."
+                label="Turn on Safe-to-Spend"
+                desc="Shows a daily amount you can use after bills and your cushion are protected."
                 value={settings.financialOS.sts.enabled}
                 onChange={(v) =>
                   setSettings((p) => ({
@@ -1354,7 +1380,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Buffer mode"
-                  desc="Percent scales with spending. Fixed is a constant cushion."
+                  desc="Percent flexes with your money flow. Fixed keeps the same cushion every month."
                   value={settings.financialOS.sts.bufferMode}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1374,7 +1400,7 @@ export default function SettingsPage() {
                 {settings.financialOS.sts.bufferMode === "Percent" ? (
                   <NumberInput
                     label="Buffer percent"
-                    desc="Example: 10% means the app holds back 10% of available money."
+                    desc="Example: 10% means the app keeps 10% of available money untouched."
                     value={settings.financialOS.sts.bufferPercent}
                     min={0}
                     max={50}
@@ -1393,7 +1419,7 @@ export default function SettingsPage() {
                 ) : (
                   <NumberInput
                     label="Buffer amount"
-                    desc="A fixed cushion the app never spends into."
+                    desc="A fixed cushion the app always leaves alone."
                     value={settings.financialOS.sts.bufferFixed}
                     min={0}
                     step={10}
@@ -1414,7 +1440,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <NumberInput
                   label="Upcoming bills window (days)"
-                  desc="How many days ahead STS should consider upcoming bills."
+                  desc="How far ahead to look when holding money for upcoming bills."
                   value={settings.financialOS.sts.includeUpcomingBillsWindowDays}
                   min={7}
                   max={60}
@@ -1435,8 +1461,8 @@ export default function SettingsPage() {
                 />
 
                 <Toggle
-                  label="Never allow negative STS"
-                  desc="When enabled, STS is clamped to 0 so users never see scary negatives."
+                  label="Never show a negative Safe-to-Spend"
+                  desc="Keeps the number at $0 instead of showing a negative amount."
                   value={settings.financialOS.sts.neverNegativeSTS}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1451,7 +1477,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Why this matters: users don’t want budgeting math — they want a single safe number that’s conservative by design.
+                This helps keep money decisions calm and simple with one safe daily number.
               </div>
             </Card>
 
@@ -1459,14 +1485,14 @@ export default function SettingsPage() {
             <Card>
               <SectionTitle
                 title="Stage Targets"
-                subtitle="Defines what “Crisis / Stabilize / Attack Debt / Build Security / Build Wealth” means in your system."
+                subtitle="Set the milestones that guide your Financial OS stage and progress."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <NumberInput
-                  label="Crisis threshold (runway months)"
-                  desc="If runway is below this, stage becomes Crisis."
+                  label="Crisis threshold"
+                  desc="If runway falls below this, the app treats money as urgent."
                   value={settings.financialOS.stageTargets.runwayMonthsCrisis}
                   min={0}
                   max={6}
@@ -1487,8 +1513,8 @@ export default function SettingsPage() {
                 />
 
                 <NumberInput
-                  label="Stabilize threshold (runway months)"
-                  desc="Below this, stage becomes Stabilize."
+                  label="Stabilize threshold"
+                  desc="Below this, the app focuses on getting your footing back."
                   value={settings.financialOS.stageTargets.runwayMonthsStabilize}
                   min={0}
                   max={12}
@@ -1510,7 +1536,7 @@ export default function SettingsPage() {
 
                 <NumberInput
                   label="Security goal runway"
-                  desc="Target runway used for Build Security progress."
+                  desc="Your target runway for feeling comfortably covered."
                   value={settings.financialOS.stageTargets.runwayMonthsSecurityGoal}
                   min={1}
                   max={12}
@@ -1532,7 +1558,7 @@ export default function SettingsPage() {
 
                 <NumberInput
                   label="Utilization risk"
-                  desc="Above this, the app warns about credit utilization."
+                  desc="Get warned when card usage rises above this level."
                   value={settings.financialOS.stageTargets.utilizationRiskPct}
                   min={5}
                   max={95}
@@ -1553,8 +1579,8 @@ export default function SettingsPage() {
                 />
 
                 <NumberInput
-                  label="High debt cost rate"
-                  desc="Weighted debt APR above this is considered high-cost debt."
+                  label="High-cost debt rate"
+                  desc="Debt above this rate is treated as especially important to pay down."
                   value={settings.financialOS.stageTargets.debtCostRateHighPct}
                   min={0}
                   max={60}
@@ -1576,22 +1602,22 @@ export default function SettingsPage() {
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Goal: the app classifies the user into a stage automatically, so they never have to “decide what to do next.”
+                These targets help the app choose the next priority automatically.
               </div>
             </Card>
 
             {/* Paycheck splits */}
             <Card>
               <SectionTitle
-                title="Paycheck Split Preferences"
-                subtitle="Controls how the bot recommends splitting each paycheck into Bills / Spending / Extra."
+                title="Paycheck Split"
+                subtitle="Choose how each paycheck should be divided across bills, day-to-day spending, and extra progress."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Pay cadence"
-                  desc="Used for forecasting and reminders."
+                  desc="Used to time forecasts and paycheck reminders."
                   value={settings.financialOS.paycheck.cadence}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1609,7 +1635,7 @@ export default function SettingsPage() {
 
                 <Input
                   label="Payday hint"
-                  desc="Human hint to reduce mistakes (ex: Friday, or every other Wed)."
+                  desc="A plain-language note like Friday or every other Wednesday."
                   value={settings.financialOS.paycheck.paydayHint}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1624,7 +1650,7 @@ export default function SettingsPage() {
               <div className="mt-3">
                 <ChipGroup
                   label="Split mode"
-                  desc="Three-Caps = simple non-budgety system. Manual Buckets = explicit percentages."
+                  desc="Three Caps keeps things simple. Custom buckets lets you set exact percentages."
                   value={settings.financialOS.paycheck.splitMode}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1636,8 +1662,8 @@ export default function SettingsPage() {
                     }))
                   }
                   options={[
-                    { label: "Three-Caps (E/D/S)", value: "ThreeCaps" },
-                    { label: "Manual Buckets", value: "ManualBuckets" },
+                    { label: "Three Caps", value: "ThreeCaps" },
+                    { label: "Custom Buckets", value: "ManualBuckets" },
                   ]}
                 />
               </div>
@@ -1646,7 +1672,7 @@ export default function SettingsPage() {
                 <div className="mt-3 grid gap-3 sm:grid-cols-3">
                   <NumberInput
                     label="Essentials cap"
-                    desc="Bills, rent, groceries — must stay under this."
+                    desc="Bills, rent, groceries, and essentials should stay under this."
                     value={settings.financialOS.paycheck.threeCaps.essentialsCapPct}
                     min={10}
                     max={95}
@@ -1670,7 +1696,7 @@ export default function SettingsPage() {
                   />
                   <NumberInput
                     label="Discretionary cap"
-                    desc="Fun money cap to prevent leaks."
+                    desc="Keeps everyday fun spending in a healthy range."
                     value={settings.financialOS.paycheck.threeCaps.discretionaryCapPct}
                     min={0}
                     max={80}
@@ -1694,7 +1720,7 @@ export default function SettingsPage() {
                   />
                   <NumberInput
                     label="Surplus cap"
-                    desc="Debt paydown + savings acceleration."
+                    desc="What you want left over for debt payoff and savings."
                     value={settings.financialOS.paycheck.threeCaps.surplusCapPct}
                     min={0}
                     max={80}
@@ -1717,14 +1743,14 @@ export default function SettingsPage() {
                     }
                   />
                   <div className="sm:col-span-3 text-xs text-zinc-500">
-                    Tip: totals don’t have to be exactly 100 — the engine can normalize later. For now it’s preference guidance.
+                    Tip: this does not need to total exactly 100. The app can smooth it out later.
                   </div>
                 </div>
               ) : (
                 <div className="mt-3 grid gap-3 sm:grid-cols-3">
                   <NumberInput
                     label="Bills bucket"
-                    desc="Rent, utilities, minimums"
+                    desc="Rent, utilities, and minimum payments."
                     value={settings.financialOS.paycheck.manualBuckets.billsPct}
                     min={0}
                     max={100}
@@ -1745,7 +1771,7 @@ export default function SettingsPage() {
                   />
                   <NumberInput
                     label="Spending allowance"
-                    desc="Daily spending"
+                    desc="Everyday spending."
                     value={settings.financialOS.paycheck.manualBuckets.spendPct}
                     min={0}
                     max={100}
@@ -1766,7 +1792,7 @@ export default function SettingsPage() {
                   />
                   <NumberInput
                     label="Extra"
-                    desc="Debt + savings acceleration"
+                    desc="Extra money for debt payoff and savings."
                     value={settings.financialOS.paycheck.manualBuckets.extraPct}
                     min={0}
                     max={100}
@@ -1791,7 +1817,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Rounding"
-                  desc="Reduces friction and decision fatigue (most people like rounding)."
+                  desc="Rounds recommendations into cleaner numbers."
                   value={settings.financialOS.paycheck.rounding}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1815,14 +1841,14 @@ export default function SettingsPage() {
             {/* Debt strategy */}
             <Card>
               <SectionTitle
-                title="Debt Strategy Preferences"
-                subtitle="Controls how the bot chooses the Next Best Dollar: avalanche, snowball, or hybrid with safety constraints."
+                title="Debt Strategy"
+                subtitle="Choose the payoff style that should guide extra payments when money is available."
               />
               <Divider />
 
               <ChipGroup<DebtStrategy>
                 label="Strategy"
-                desc="Avalanche = highest APR first. Snowball = smallest balance first. Hybrid = Next Best Dollar with guardrails."
+                desc="Avalanche focuses on interest. Snowball focuses on quick wins. Hybrid balances both with safety rules."
                 value={settings.financialOS.debt.strategy}
                 onChange={(v) =>
                   setSettings((p) => ({
@@ -1840,7 +1866,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <NumberInput
                   label="Minimum extra payment"
-                  desc="Below this, the bot won’t recommend splitting hairs."
+                  desc="Ignore tiny extra payment suggestions below this amount."
                   value={settings.financialOS.debt.minExtraPayment}
                   min={0}
                   step={5}
@@ -1858,7 +1884,7 @@ export default function SettingsPage() {
 
                 <NumberInput
                   label="Target utilization"
-                  desc="Soft target for credit score stability."
+                  desc="A target to help keep card usage in a healthier range."
                   value={settings.financialOS.debt.targetUtilizationPct}
                   min={1}
                   max={95}
@@ -1878,8 +1904,8 @@ export default function SettingsPage() {
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
-                  label="Keep cards open (preference)"
-                  desc="If enabled, bot avoids recommending closures and focuses on payoff/utilization."
+                  label="Prefer keeping cards open"
+                  desc="Avoids closure-style recommendations and focuses on payoff and utilization."
                   value={settings.financialOS.debt.keepCardsOpen}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1894,7 +1920,7 @@ export default function SettingsPage() {
 
                 <Toggle
                   label="Allow hybrid rebalance"
-                  desc="In Hybrid mode, bot can switch targets when a better Next Best Dollar appears."
+                  desc="Lets the app switch targets when a clearly better next move appears."
                   value={settings.financialOS.debt.allowHybridRebalance}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -1911,12 +1937,12 @@ export default function SettingsPage() {
               <div className="mt-3">
                 <SectionTitle
                   title="Next Best Dollar Guardrails"
-                  subtitle="These prevent the engine from optimizing debt while accidentally creating chaos."
+                  subtitle="These rules keep extra debt recommendations practical and low-stress."
                 />
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <Toggle
                     label="Protect minimum payments"
-                    desc="Never allocate extra if minimums can’t be met."
+                    desc="Do not suggest extra debt payments if minimums are not covered."
                     value={settings.financialOS.debt.nextBestDollar.protectMinimums}
                     onChange={(v) =>
                       setSettings((p) => ({
@@ -1933,7 +1959,7 @@ export default function SettingsPage() {
                   />
                   <Toggle
                     label="Protect bills first"
-                    desc="Bills bucket is funded before recommending extra debt pay."
+                    desc="Make sure bills are covered before suggesting extra debt payoff."
                     value={settings.financialOS.debt.nextBestDollar.protectBillsFirst}
                     onChange={(v) =>
                       setSettings((p) => ({
@@ -1950,7 +1976,7 @@ export default function SettingsPage() {
                   />
                   <Toggle
                     label="Protect STS buffer"
-                    desc="Never spend into the STS buffer to pay extra debt."
+                    desc="Do not dip into your Safe-to-Spend cushion for extra payments."
                     value={settings.financialOS.debt.nextBestDollar.protectSTSBuffer}
                     onChange={(v) =>
                       setSettings((p) => ({
@@ -1966,8 +1992,8 @@ export default function SettingsPage() {
                     }
                   />
                   <Toggle
-                    label="Enable Next Best Dollar engine"
-                    desc="Hybrid recommendations use a single best-action allocation."
+                    label="Turn on Next Best Dollar"
+                    desc="Use one best-action recommendation when you are in Hybrid mode."
                     value={settings.financialOS.debt.nextBestDollar.enabled}
                     onChange={(v) =>
                       setSettings((p) => ({
@@ -1990,14 +2016,14 @@ export default function SettingsPage() {
             <Card>
               <SectionTitle
                 title="Savings & Scoreboards"
-                subtitle="Controls emergency fund goals + which progress widgets show on the dashboard."
+                subtitle="Choose your savings targets and the progress trackers you want to see around the app."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <NumberInput
                   label="Emergency fund goal"
-                  desc="Goal runway in months."
+                  desc="How many months of cushion you want in your emergency fund."
                   value={settings.financialOS.savings.emergencyFundGoalMonths}
                   min={1}
                   max={24}
@@ -2016,7 +2042,7 @@ export default function SettingsPage() {
 
                 <Select
                   label="Emergency fund priority"
-                  desc="When money is limited, this decides how aggressive we are."
+                  desc="Choose how strongly the app should protect emergency savings."
                   value={settings.financialOS.savings.emergencyFundPriority}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2038,7 +2064,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Enable sinking funds"
-                  desc="Small monthly allocations for predictable future costs (car, gifts, travel)."
+                  desc="Set aside money for expected costs like travel, car care, or gifts."
                   value={settings.financialOS.savings.sinkingFundsEnabled}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2053,7 +2079,7 @@ export default function SettingsPage() {
 
                 <Toggle
                   label="Show Financial Health Score"
-                  desc="0–100 score + components. Motivates consistent behavior."
+                  desc="Keep a simple overall progress score visible."
                   value={settings.financialOS.scoreboards.showFinancialHealthScore}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2070,7 +2096,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Show Stability meter"
-                  desc="Tracks STS never negative + runway progress."
+                  desc="Track whether your cash flow and runway are getting steadier."
                   value={settings.financialOS.scoreboards.showStabilityMeter}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2084,7 +2110,7 @@ export default function SettingsPage() {
                 />
                 <Toggle
                   label="Show Debt-free countdown"
-                  desc="Countdown improves as extra payments accelerate."
+                  desc="Show how debt payoff timing improves as you make progress."
                   value={settings.financialOS.scoreboards.showDebtFreeCountdown}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2101,7 +2127,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Show FI progress"
-                  desc="Simple progress toward financial independence."
+                  desc="Show long-term wealth progress in a simple way."
                   value={settings.financialOS.scoreboards.showFIProgress}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2114,8 +2140,8 @@ export default function SettingsPage() {
                   }
                 />
                 <Toggle
-                  label="Enable streaks / leveling"
-                  desc="Turns consistency into a game without extra work."
+                  label="Show streaks and milestones"
+                  desc="Add a little momentum by highlighting consistency."
                   value={settings.financialOS.scoreboards.streaksEnabled}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2137,14 +2163,14 @@ export default function SettingsPage() {
             <Card>
               <SectionTitle
                 title="Account & Identity"
-                subtitle="This is the logged-in profile used by the sidebar and account session."
+                subtitle="Update the name, username, and email tied to your account."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Input
                   label="Display name"
-                  desc="Shown anywhere the product names the signed-in user."
+                  desc="Shown anywhere the app refers to you by name."
                   value={accountForm.display_name}
                   onChange={(v) => {
                     setAccountStatus(null);
@@ -2154,7 +2180,7 @@ export default function SettingsPage() {
                 />
                 <Input
                   label="Username"
-                  desc="Optional public-style handle for this account."
+                  desc="An optional handle for your account."
                   value={accountForm.username}
                   onChange={(v) => {
                     setAccountStatus(null);
@@ -2168,7 +2194,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Input
                   label="Email"
-                  desc="Used for sign-in."
+                  desc="Your sign-in email."
                   value={accountForm.email}
                   type="email"
                   onChange={(v) => {
@@ -2180,7 +2206,7 @@ export default function SettingsPage() {
                 />
                 <Input
                   label="Current password"
-                  desc="Required only when you change the email address."
+                  desc="Needed only if you change your email address."
                   value={accountForm.current_password}
                   type="password"
                   onChange={(v) => {
@@ -2202,12 +2228,12 @@ export default function SettingsPage() {
                   <div className={`rounded-full border px-3 py-1 text-xs ${verificationMeta.tone}`}>{verificationMeta.label}</div>
                 </div>
                 {!bootstrap?.beta?.email_verification_configured ? (
-                  <div className="mt-3 text-xs text-zinc-500">Resend verification is unavailable until real verification delivery is configured.</div>
+                  <div className="mt-3 text-xs text-zinc-500">Email verification is not available yet for this account.</div>
                 ) : null}
               </div>
 
               <div className="mt-3 rounded-2xl border border-white/10 bg-black/10 p-4 text-xs text-zinc-400">
-                Phone is not shown here because this build does not currently support storing or verifying a phone number.
+                Phone number settings are not available yet.
               </div>
 
               {accountError ? <div className="mt-3 text-xs text-red-300">{accountError}</div> : null}
@@ -2228,7 +2254,7 @@ export default function SettingsPage() {
             <Card>
               <SectionTitle
                 title="Account Security"
-                subtitle="Change password without breaking the existing session-based auth flow."
+                subtitle="Update your password and keep your account protected."
               />
               <Divider />
 
@@ -2270,7 +2296,7 @@ export default function SettingsPage() {
                   placeholder="Confirm new password"
                 />
                 <div className="rounded-2xl border border-white/10 bg-black/10 p-4 text-xs text-zinc-400">
-                  Changing your password rotates the current session and signs out older sessions.
+                  Changing your password signs out older sessions for security.
                 </div>
               </div>
 
@@ -2293,15 +2319,15 @@ export default function SettingsPage() {
 
             <Card>
               <SectionTitle
-                title="Display & Calendar"
-                subtitle="Preferences for formatting, calendar rhythm, and how numbers are shown."
+                title="Display Preferences"
+                subtitle="Control how dates, numbers, and money are shown across the app."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Home currency"
-                  desc="Used for labels. (We can support multi-currency later.)"
+                  desc="Used for labels and displays across the app."
                   value={settings.profile.homeCurrency}
                   onChange={(v) => setSettings((p) => ({ ...p, profile: { ...p.profile, homeCurrency: v as any } }))}
                   options={[
@@ -2314,7 +2340,7 @@ export default function SettingsPage() {
 
                 <Select
                   label="Week starts on"
-                  desc="Used for weekly summaries."
+                  desc="Choose the day that starts your weekly view."
                   value={settings.profile.weekStartLabel}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2331,27 +2357,27 @@ export default function SettingsPage() {
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Input
-                  label="Timezone (display)"
-                  desc="Read from browser."
+                  label="Timezone"
+                  desc="Pulled from your browser for display purposes."
                   value={settings.profile.timezone}
                   onChange={(v) => setSettings((p) => ({ ...p, profile: { ...p.profile, timezone: v } }))}
                 />
 
                 <div className="rounded-2xl border border-white/10 bg-black/10 p-4 text-xs text-zinc-400">
-                  Account identity is now managed above, while these controls stay focused on UI preferences.
+                  These controls only change how the app looks and feels for you.
                 </div>
               </div>
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Show cents"
-                  desc="If off, UI shows rounded dollars (low cognitive load)."
+                  desc="Turn this off if you prefer cleaner whole-dollar displays."
                   value={settings.profile.showCents}
                   onChange={(v) => setSettings((p) => ({ ...p, profile: { ...p.profile, showCents: v } }))}
                 />
                 <Toggle
                   label="Compact numbers"
-                  desc="Shows 12.3k instead of 12,300."
+                  desc="Show 12.3k instead of 12,300."
                   value={settings.profile.compactNumbers}
                   onChange={(v) => setSettings((p) => ({ ...p, profile: { ...p.profile, compactNumbers: v } }))}
                 />
@@ -2360,26 +2386,26 @@ export default function SettingsPage() {
 
             <Card>
               <SectionTitle
-                title="Debt Registry"
-                subtitle="Debt management now has a dedicated workflow page. Settings keeps the system controls and quick visibility."
+                title="Debt Accounts"
+                subtitle="Review the debt accounts in your plan or jump to the full debt workspace."
                 right={
                   <Link
                     href="/debts"
                     className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
                   >
-                    Open Debts
+                    Open debt workspace
                   </Link>
                 }
               />
               <Divider />
 
               <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 text-sm text-zinc-300">
-                Debt add/edit/delete now belongs on the dedicated <Link href="/debts" className="text-zinc-100 underline underline-offset-4">Debts</Link> page so the product flow matches the rest of Financial OS.
+                The full debt workflow now lives on the <Link href="/debts" className="text-zinc-100 underline underline-offset-4">Debts</Link> page for a cleaner day-to-day experience.
               </div>
 
               <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
                 <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                  Debts: <span className="text-zinc-200">{debts.length}</span>
+                  Accounts in plan: <span className="text-zinc-200">{debts.length}</span>
                 </span>
                 <button
                   type="button"
@@ -2393,11 +2419,24 @@ export default function SettingsPage() {
               {debtError ? <div className="mt-3 text-xs text-red-300">{debtError}</div> : null}
               {debtStatus ? <div className="mt-3 text-xs text-emerald-300">{debtStatus}</div> : null}
 
+              <DisclosureSection
+                title="Manage debt details in Settings"
+                subtitle="Use this only if you want to review or edit the debt list without leaving Settings."
+              >
+              <div className="mb-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={startCreateDebt}
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                >
+                  Add debt in Settings
+                </button>
+              </div>
               {showCreateDebt ? (
                 <div className="mt-4 rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4">
                   <div className="text-sm font-medium text-zinc-100">Add debt</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    This writes to the tracked debt registry used for planning and utilization.
+                    This updates the debt list used throughout your plan.
                   </div>
                   <div className="mt-4">
                     <DebtFormFields form={newDebtForm} onChange={setNewDebtForm} />
@@ -2425,7 +2464,7 @@ export default function SettingsPage() {
               <div className="mt-4 space-y-3">
                 {debtsLoading ? (
                   <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
-                    Loading debt registry...
+                    Loading debt accounts...
                   </div>
                 ) : debts.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
@@ -2440,9 +2479,9 @@ export default function SettingsPage() {
                           <div className="min-w-0">
                             <div className="text-sm font-medium text-zinc-100">{debt.name}</div>
                             <div className="mt-1 text-xs text-zinc-400">
-                              {[debt.lender || "No lender", debt.last4 ? `•••• ${debt.last4}` : "No last4"]
+                              {[debt.lender || "No lender", debt.last4 ? `**** ${debt.last4}` : "No last4"]
                                 .filter(Boolean)
-                                .join(" • ")}
+                                .join(" - ")}
                             </div>
                           </div>
                           <div className="flex flex-wrap gap-2">
@@ -2471,16 +2510,16 @@ export default function SettingsPage() {
                             Balance: ${Number(debt.balance || 0).toFixed(2)}
                           </div>
                           <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                            APR: {debt.apr != null ? `${Number(debt.apr).toFixed(2)}%` : "—"}
+                            APR: {debt.apr != null ? `${Number(debt.apr).toFixed(2)}%` : "-"}
                           </div>
                           <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                            Minimum: {debt.minimum_due != null ? `$${Number(debt.minimum_due).toFixed(2)}` : "—"}
+                            Minimum: {debt.minimum_due != null ? `$${Number(debt.minimum_due).toFixed(2)}` : "-"}
                           </div>
                           <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                            Due day: {debt.due_day ?? "—"}
+                            Due day: {debt.due_day ?? "-"}
                           </div>
                           <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                            Due date: {debt.due_date || "—"}
+                            Due date: {debt.due_date || "-"}
                           </div>
                         </div>
 
@@ -2514,33 +2553,21 @@ export default function SettingsPage() {
                   })
                 )}
               </div>
+              </DisclosureSection>
             </Card>
 
             {/* Categories & Rules */}
             <Card>
               <SectionTitle
-                title="Categories & Rules"
-                subtitle="Where your merchant rules live (same system used on statements page)."
+                title="Spending Categories"
+                subtitle="Keep transaction labeling simple and automatic."
               />
               <Divider />
-
-              <Input
-                label="Rules storage key"
-                desc="Advanced: keep consistent with statements page. Default is fine."
-                value={settings.categories.rulesKey}
-                onChange={(v) =>
-                  setSettings((p) => ({
-                    ...p,
-                    categories: { ...p.categories, rulesKey: v || RULES_KEY_DEFAULT },
-                  }))
-                }
-                placeholder={RULES_KEY_DEFAULT}
-              />
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Auto-categorize new transactions"
-                  desc="Applies rules instantly so users don’t do busywork."
+                   desc="Apply category rules automatically to save time."
                   value={settings.categories.autoCategorizeNew}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2552,7 +2579,7 @@ export default function SettingsPage() {
 
                 <Toggle
                   label="Treat payments as credits"
-                  desc="Keeps spend views clean."
+                  desc="Keep payment activity from cluttering spending views."
                   value={settings.categories.treatPaymentsAsCredit}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2564,7 +2591,7 @@ export default function SettingsPage() {
 
                 <Toggle
                   label="Treat refunds as credits"
-                  desc="Refunds don’t count as “spend”."
+                  desc="Treat refunds as money coming back, not new spending."
                   value={settings.categories.treatRefundsAsCredit}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2575,57 +2602,77 @@ export default function SettingsPage() {
                 />
               </div>
 
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const key = settings.categories.rulesKey || RULES_KEY_DEFAULT;
-                    const rules = safeJsonParse<Record<string, any>>(localStorage.getItem(key)) ?? {};
-                    downloadJson(`category_rules_${key}.json`, rules);
-                  }}
-                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+              <div className="mt-4">
+                <DisclosureSection
+                  title="Advanced category tools"
+                  subtitle="Import, export, or customize category rule storage if you need it."
                 >
-                  Export category rules
-                </button>
-
-                <label className="cursor-pointer rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
-                  Import category rules
-                  <input
-                    type="file"
-                    accept="application/json"
-                    className="hidden"
-                    onChange={async (e) => {
-                      const f = e.target.files?.[0];
-                      if (!f) return;
-                      const txt = await fileToText(f);
-                      const obj = safeJsonParse<any>(txt);
-                      if (!obj || typeof obj !== "object") return;
-                      const key = settings.categories.rulesKey || RULES_KEY_DEFAULT;
-                      localStorage.setItem(key, JSON.stringify(obj));
-                      // small nudge: re-render state
-                      setSettings((p) => ({ ...p }));
-                      e.target.value = "";
-                    }}
+                  <Input
+                    label="Rules storage key"
+                    desc="Leave this alone unless you are syncing category rule files manually."
+                    value={settings.categories.rulesKey}
+                    onChange={(v) =>
+                      setSettings((p) => ({
+                        ...p,
+                        categories: { ...p.categories, rulesKey: v || RULES_KEY_DEFAULT },
+                      }))
+                    }
+                    placeholder={RULES_KEY_DEFAULT}
                   />
-                </label>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const key = settings.categories.rulesKey || RULES_KEY_DEFAULT;
+                        const rules = safeJsonParse<Record<string, any>>(localStorage.getItem(key)) ?? {};
+                        downloadJson(`category_rules_${key}.json`, rules);
+                      }}
+                      className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                    >
+                      Export category rules
+                    </button>
+
+                    <label className="cursor-pointer rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                      Import category rules
+                      <input
+                        type="file"
+                        accept="application/json"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          if (!f) return;
+                          const txt = await fileToText(f);
+                          const obj = safeJsonParse<any>(txt);
+                          if (!obj || typeof obj !== "object") return;
+                          const key = settings.categories.rulesKey || RULES_KEY_DEFAULT;
+                          localStorage.setItem(key, JSON.stringify(obj));
+                          // small nudge: re-render state
+                          setSettings((p) => ({ ...p }));
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+                  </div>
+                </DisclosureSection>
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                This is “set and forget.” Once rules are learned, the app categorizes automatically.
+                Once this is set up, new transactions should stay organized with very little effort.
               </div>
             </Card>
 
             {/* Alerts */}
             <Card>
               <SectionTitle
-                title="Alerts & Nudges"
-                subtitle="Low-noise alerts that trigger only when something important changes."
+                title="Alerts & Reminders"
+                subtitle="Stay informed without getting spammed."
               />
               <Divider />
 
               <Toggle
-                label="Enable alerts"
-                desc="If off, the app stays fully passive."
+                  label="Turn on alerts"
+                  desc="If this is off, the app stays quiet."
                 value={settings.alerts.enabled}
                 onChange={(v) => setSettings((p) => ({ ...p, alerts: { ...p.alerts, enabled: v } }))}
               />
@@ -2633,7 +2680,7 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Frequency"
-                  desc="Weekly is best for low cognitive load."
+                  desc="Weekly works well for most people."
                   value={settings.alerts.frequency}
                   onChange={(v) => setSettings((p) => ({ ...p, alerts: { ...p.alerts, frequency: v as any } }))}
                   options={[
@@ -2645,7 +2692,7 @@ export default function SettingsPage() {
 
                 <NumberInput
                   label="Large spend threshold"
-                  desc="Triggers an alert when a single spend exceeds this."
+                  desc="Get notified when a single purchase is larger than this."
                   value={settings.alerts.largeSpendThreshold}
                   min={0}
                   step={10}
@@ -2662,14 +2709,14 @@ export default function SettingsPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Input
                   label="Quiet hours start"
-                  desc="No pings inside this window."
+                  desc="No alerts during this window."
                   value={settings.alerts.quietHours.start}
                   onChange={(v) => setSettings((p) => ({ ...p, alerts: { ...p.alerts, quietHours: { ...p.alerts.quietHours, start: v } } }))}
                   placeholder="22:00"
                 />
                 <Input
                   label="Quiet hours end"
-                  desc="No pings inside this window."
+                  desc="No alerts during this window."
                   value={settings.alerts.quietHours.end}
                   onChange={(v) => setSettings((p) => ({ ...p, alerts: { ...p.alerts, quietHours: { ...p.alerts.quietHours, end: v } } }))}
                   placeholder="07:00"
@@ -2679,7 +2726,7 @@ export default function SettingsPage() {
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="STS goes negative"
-                  desc="Only triggers if STS engine is on."
+                  desc="Only matters when Safe-to-Spend is turned on."
                   value={settings.alerts.triggers.stsNegative}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2690,7 +2737,7 @@ export default function SettingsPage() {
                 />
                 <Toggle
                   label="Runway below target"
-                  desc="Warn when runway drops below your stage targets."
+                  desc="Warn you when your cash cushion slips below your stage targets."
                   value={settings.alerts.triggers.runwayBelowTarget}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2701,7 +2748,7 @@ export default function SettingsPage() {
                 />
                 <Toggle
                   label="Utilization above target"
-                  desc="Warn when utilization exceeds target."
+                  desc="Warn you when card usage goes above your target."
                   value={settings.alerts.triggers.utilizationAboveTarget}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2712,7 +2759,7 @@ export default function SettingsPage() {
                 />
                 <Toggle
                   label="Large unusual spend"
-                  desc="Single transaction over your threshold."
+                  desc="Trigger when one transaction crosses your threshold."
                   value={settings.alerts.triggers.largeUnusualSpend}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2723,7 +2770,7 @@ export default function SettingsPage() {
                 />
                 <Toggle
                   label="Missed minimums risk"
-                  desc="Warn when minimums are in danger."
+                  desc="Warn you when minimum payments may be at risk."
                   value={settings.alerts.triggers.missedMinimumsRisk}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2734,7 +2781,7 @@ export default function SettingsPage() {
                 />
                 <Toggle
                   label="Paycheck detected"
-                  desc="Notify when checking imports detect payroll."
+                  desc="Notify you when incoming pay looks like a paycheck."
                   value={settings.alerts.triggers.paycheckDetected}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -2753,21 +2800,21 @@ export default function SettingsPage() {
             {/* Data / Import behavior */}
             <Card>
               <SectionTitle
-                title="Data & Import Behavior"
-                subtitle="Controls performance, dedupe, and developer toggles."
+                title="Imported Data Preferences"
+                subtitle="Choose how imported data refreshes and how duplicates are handled."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Toggle
-                  label="Auto refresh on open"
-                  desc="Fetch newest data when opening dashboard/transactions."
+                  label="Refresh when I open the app"
+                  desc="Pull in the latest data when you open key money views."
                   value={settings.data.autoRefreshOnOpen}
                   onChange={(v) => setSettings((p) => ({ ...p, data: { ...p.data, autoRefreshOnOpen: v } }))}
                 />
                 <Toggle
-                  label="Dedupe transactions"
-                  desc="Prevents double-counting if imports overlap."
+                  label="Prevent duplicate transactions"
+                  desc="Helps avoid double-counting when imports overlap."
                   value={settings.data.dedupeTransactions}
                   onChange={(v) => setSettings((p) => ({ ...p, data: { ...p.data, dedupeTransactions: v } }))}
                 />
@@ -2775,8 +2822,8 @@ export default function SettingsPage() {
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <NumberInput
-                  label="Dedupe window"
-                  desc="How many days around a transaction to treat as duplicate."
+                  label="Duplicate-check window"
+                  desc="How many nearby days to compare when looking for duplicates."
                   value={settings.data.dedupeWindowDays}
                   min={1}
                   max={45}
@@ -2789,52 +2836,59 @@ export default function SettingsPage() {
                     }))
                   }
                 />
-                <Toggle
-                  label="Keep raw PDF text"
-                  desc="Only for debugging parsing issues."
-                  value={settings.data.keepRawPdfText}
-                  onChange={(v) => setSettings((p) => ({ ...p, data: { ...p.data, keepRawPdfText: v } }))}
-                />
               </div>
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <Toggle
-                  label="Show debug panel"
-                  desc="Developer-only: shows extra diagnostics."
-                  value={settings.data.showDebugPanel}
-                  onChange={(v) => setSettings((p) => ({ ...p, data: { ...p.data, showDebugPanel: v } }))}
-                />
+              <div className="mt-3">
+                <DisclosureSection
+                  title="Advanced / Developer diagnostics"
+                  subtitle="Extra troubleshooting tools for import or parsing issues."
+                >
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Toggle
+                      label="Keep raw PDF text"
+                      desc="Save raw statement text for troubleshooting import issues."
+                      value={settings.data.keepRawPdfText}
+                      onChange={(v) => setSettings((p) => ({ ...p, data: { ...p.data, keepRawPdfText: v } }))}
+                    />
+                    <Toggle
+                      label="Show debug tools"
+                      desc="Show extra troubleshooting panels around imported data."
+                      value={settings.data.showDebugPanel}
+                      onChange={(v) => setSettings((p) => ({ ...p, data: { ...p.data, showDebugPanel: v } }))}
+                    />
+                  </div>
+                </DisclosureSection>
               </div>
             </Card>
 
             <Card>
               <SectionTitle
                 title="Connections & Data Sources"
-                subtitle="Use Accounts, Bills, Debts, and Activity to keep your Financial OS current."
+                subtitle="Connect your accounts and keep your money picture up to date."
               />
               <Divider />
 
               <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                <div className="text-sm font-medium text-zinc-100">Linked accounts</div>
+                <div className="text-sm font-medium text-zinc-100">Connected accounts</div>
                 <div className="mt-1 text-xs text-zinc-400">
-                  Connect or refresh linked accounts here. Review balances and source detail in Accounts and Activity.
+                  Connect or refresh your linked accounts here. You can review balances and activity anytime from the main app.
                 </div>
 
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
-                    <div className="text-zinc-400">Linked cash counted</div>
+                    <div className="text-zinc-400">Cash counted from connections</div>
                     <div className="mt-2 text-lg font-semibold text-zinc-100">{formatMoney(plaidCashContribution)}</div>
-                    <div className="mt-1 text-zinc-500">Only counts when it does not duplicate imported cash.</div>
+                    <div className="mt-1 text-zinc-500">Only counted when it does not overlap with other imported cash.</div>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
-                    <div className="text-zinc-400">Linked accounts</div>
+                    <div className="text-zinc-400">Connected accounts</div>
                     <div className="mt-2 text-lg font-semibold text-zinc-100">{plaidAccounts.length}</div>
-                    <div className="mt-1 text-zinc-500">Visible in Accounts and source views.</div>
+                    <div className="mt-1 text-zinc-500">Available in your Accounts view.</div>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs text-zinc-300">
                     <div className="text-zinc-400">Duplicates skipped</div>
                     <div className="mt-2 text-lg font-semibold text-zinc-100">{plaidDuplicateCount}</div>
-                    <div className="mt-1 text-zinc-500">Prevents double-counting cash in your plan.</div>
+                    <div className="mt-1 text-zinc-500">Helps keep your plan from counting the same money twice.</div>
                   </div>
                 </div>
 
@@ -2845,7 +2899,7 @@ export default function SettingsPage() {
                     disabled={plaidBusy}
                     className="rounded-xl border border-sky-500/30 bg-sky-500/15 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/20 disabled:opacity-50"
                   >
-                    {plaidBusy ? "Connecting..." : "Connect Plaid"}
+                    {plaidBusy ? "Connecting..." : "Connect accounts"}
                   </button>
                   <button
                     type="button"
@@ -2853,7 +2907,7 @@ export default function SettingsPage() {
                     disabled={plaidBusy || !plaidItems.length}
                     className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10 disabled:opacity-50"
                   >
-                    {plaidBusy ? "Syncing..." : "Sync Plaid Data"}
+                    {plaidBusy ? "Syncing..." : "Refresh balances and activity"}
                   </button>
                   <Link
                     href="/accounts"
@@ -2881,11 +2935,11 @@ export default function SettingsPage() {
                   </div>
                 ) : null}
 
-                <details className="mt-4 rounded-xl border border-white/10 bg-black/20">
-                  <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-zinc-100">
-                    Developer / Data source diagnostics
-                  </summary>
-                  <div className="border-t border-white/10 px-4 py-4">
+                <div className="mt-4">
+                  <DisclosureSection
+                    title="Advanced / Developer diagnostics"
+                    subtitle="Detailed connection status, raw sync timing, and the read-only Plaid feed."
+                  >
                 {plaidItems.length ? (
                   <div className="mt-4 grid gap-2">
                     {plaidItems.map((item) => (
@@ -2926,16 +2980,16 @@ export default function SettingsPage() {
                         <div className="text-sm font-medium text-zinc-100">{account.name}</div>
                         <div className="mt-1 text-zinc-400">
                           {(account.type || "account").toString()}
-                          {account.subtype ? ` • ${account.subtype}` : ""}
-                          {account.mask ? ` • ****${account.mask}` : ""}
+                          {account.subtype ? ` - ${account.subtype}` : ""}
+                          {account.mask ? ` - ****${account.mask}` : ""}
                         </div>
                         <div className="mt-1 text-zinc-400">
                           Sync: {account.sync_status || "linked"}
-                          {typeof account.current_balance === "number" ? ` • Current ${formatMoney(account.current_balance)}` : ""}
+                          {typeof account.current_balance === "number" ? ` - Current ${formatMoney(account.current_balance)}` : ""}
                         </div>
                         <div className="mt-1 text-zinc-400">
-                          Available: {typeof account.available_balance === "number" ? formatMoney(account.available_balance) : "—"}
-                          {" • "}
+                          Available: {typeof account.available_balance === "number" ? formatMoney(account.available_balance) : "-"}
+                          {" - "}
                           Last balance sync: {formatDateTime(account.last_balance_sync_at)}
                         </div>
                         <div className="mt-1 text-zinc-500">
@@ -2978,15 +3032,15 @@ export default function SettingsPage() {
                         <tbody>
                           {plaidTransactions.map((txn) => (
                             <tr key={txn.transaction_id} className="border-b border-white/5">
-                              <td className="py-2 pr-3 text-zinc-400">{txn.posted_date || txn.authorized_date || "—"}</td>
+                              <td className="py-2 pr-3 text-zinc-400">{txn.posted_date || txn.authorized_date || "-"}</td>
                               <td className="py-2 pr-3">
                                 <div className="text-zinc-200">{txn.account_name || "Plaid account"}</div>
                                 <div className="text-[11px] text-zinc-500">{txn.institution_name || "Linked institution"}</div>
                               </td>
-                              <td className="py-2 pr-3 text-zinc-300">{txn.merchant_name || "—"}</td>
-                              <td className="py-2 pr-3 text-zinc-300">{txn.name || "—"}</td>
+                              <td className="py-2 pr-3 text-zinc-300">{txn.merchant_name || "-"}</td>
+                              <td className="py-2 pr-3 text-zinc-300">{txn.name || "-"}</td>
                               <td className="py-2 pr-0 text-right font-mono text-zinc-100">
-                                {typeof txn.amount === "number" ? formatMoney(txn.amount) : "—"}
+                                {typeof txn.amount === "number" ? formatMoney(txn.amount) : "-"}
                               </td>
                             </tr>
                           ))}
@@ -2999,23 +3053,23 @@ export default function SettingsPage() {
                     </div>
                   )}
                 </div>
-                  </div>
-                </details>
+                  </DisclosureSection>
+                </div>
               </div>
             </Card>
 
             {/* Privacy / Export / Reset */}
             <Card>
               <SectionTitle
-                title="Privacy, Export, Reset"
-                subtitle="Control what’s visible + backup your configuration."
+                title="Privacy, Backup & Reset"
+                subtitle="Protect sensitive details, download a backup, or reset your preferences."
               />
               <Divider />
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Mask merchant in screenshots"
-                  desc="Good for sharing screenshots safely."
+                  desc="Helpful when you want to share screenshots more safely."
                   value={settings.privacy.maskMerchantInScreenshots}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -3026,7 +3080,7 @@ export default function SettingsPage() {
                 />
                 <Toggle
                   label="Hide last4 by default"
-                  desc="Reduces sensitive exposure in UI."
+                  desc="Hide more account detail by default across the app."
                   value={settings.privacy.hideLast4ByDefault}
                   onChange={(v) =>
                     setSettings((p) => ({
@@ -3076,7 +3130,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Export is your “future-proof” guarantee: move devices, restore instantly, or keep a backup of your setup.
+                Keep a backup of your setup so you can restore it later if needed.
               </div>
             </Card>
           </div>
@@ -3086,10 +3140,11 @@ export default function SettingsPage() {
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="text-sm font-semibold text-zinc-100">Next step</div>
           <div className="mt-1 text-sm text-zinc-400">
-            Use Accounts, Bills, Debts, and Activity to keep your Financial OS current.
+            Use Accounts, Bills, Debts, and Activity to keep everything up to date.
           </div>
         </div>
       </div>
     </AppShell>
   );
 }
+

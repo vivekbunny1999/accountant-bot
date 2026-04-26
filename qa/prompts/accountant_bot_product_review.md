@@ -25,6 +25,9 @@ Required reconciliation behavior:
 - Reconcile tracked debt across Dashboard and Debts.
 - Reconcile net worth claims against visible assets and liabilities if those numbers exist.
 - Reconcile Safe-to-Spend and buffer claims against the visible obligations and cash context if those numbers exist.
+- Do not assume Safe-to-Spend should equal total cash. It is expected to be lower than cash when upcoming obligations or a protected buffer are present.
+- If the UI shows both a pre-buffer and post-buffer STS, only treat that as correct when the labels clearly distinguish `Safe-to-Spend before buffer`, `Protected buffer`, and `Final Safe-to-Spend`.
+- Only flag Safe-to-Spend when the displayed STS does not reconcile to the displayed formula and numbers, or when two STS values are shown without clear labels explaining which one is before buffer vs final.
 - Call out false zeros, false dashes, placeholder states, stale loading states, and missing unavailable states when source pages prove there is real data.
 
 Hard severity rule:
@@ -94,3 +97,4 @@ Important constraints:
 - Do not rely on one page alone when a cross-page comparison is possible.
 - Do not write generic debugging advice.
 - Do not review the codebase or propose code changes outside the evidence shown in the QA bundle.
+- Do not file a Safe-to-Spend issue just because STS is lower than total cash.
