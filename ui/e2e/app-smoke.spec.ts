@@ -19,6 +19,24 @@ function extractMoneyForLabel(text: string, label: string) {
   return Number(match[1].replace(/,/g, ""));
 }
 
+function extractWeeklySpendAmounts(text: string) {
+  const normalizedText = text.replace(/\r/g, "");
+  const weeklySectionMatch = /This Month Spend[\s\S]{0,20}?Weekly([\s\S]*?)(?:This Month Categories|Balance Trend)/i.exec(
+    normalizedText
+  );
+  if (!weeklySectionMatch) return [];
+
+  const weekAmounts = [...weeklySectionMatch[1].matchAll(/\bW[1-4]\b[\s\S]*?\$([0-9,]+(?:\.\d{2})?)/g)].map(
+    ([, amount]) => Number(amount.replace(/,/g, ""))
+  );
+
+  if (weekAmounts.length > 0) return weekAmounts;
+
+  return [...weeklySectionMatch[1].matchAll(/\$([0-9,]+(?:\.\d{2})?)/g)].map(([, amount]) =>
+    Number(amount.replace(/,/g, ""))
+  );
+}
+
 type RequiredPageCapture = {
   name: string;
   route: string;
@@ -176,9 +194,15 @@ test.describe.serial("Accountant Bot preview QA", () => {
 
     const visibleSpend = extractMoneyForLabel(activityArtifact!.pageText, "Total spend shown");
     if (visibleSpend != null && visibleSpend > 0) {
-      expect(dashboardArtifact!.pageText).not.toMatch(
-        /This Month Spend(?:.|\n)*?\$0\.00(?:.|\n)*?\$0\.00(?:.|\n)*?\$0\.00(?:.|\n)*?\$0\.00/i
-      );
+      const weeklySpendAmounts = extractWeeklySpendAmounts(dashboardArtifact!.pageText);
+      expect(
+        weeklySpendAmounts.length,
+        "Dashboard weekly spend section should expose at least one bucket amount when Activity total spend is positive"
+      ).toBeGreaterThan(0);
+      expect(
+        weeklySpendAmounts.some((amount) => amount > 0),
+        `Dashboard weekly spend buckets were all zero despite Activity total spend being ${visibleSpend}. Parsed weekly amounts: ${weeklySpendAmounts.join(", ")}`
+      ).toBeTruthy();
     }
   });
 
