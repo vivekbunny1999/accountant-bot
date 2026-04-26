@@ -60,11 +60,15 @@ The repo includes a Playwright-based QA loop for the deployed UI in `ui/`.
 - `E2E_TEST_EMAIL`
 - `E2E_TEST_PASSWORD`
 
-### Optional GitHub secret
+### Optional GitHub secrets / env vars
 
 - `E2E_API_BASE_URL`
   Recommended value: `https://accountant-bot-tjj6.onrender.com`
   The Playwright suite uses this for backend API login before visiting protected UI pages. If omitted, the tests fall back to `NEXT_PUBLIC_API_BASE_URL`, then to `https://accountant-bot-tjj6.onrender.com`.
+- `OPENAI_API_KEY`
+  Enables the automatic AI product reviewer after `qa_bundle.md` is generated.
+- `AI_REVIEW_MODEL`
+  Optional override for the AI reviewer model. Defaults to `gpt-5-mini`.
 
 ### Local commands
 
@@ -87,6 +91,14 @@ npm run test:e2e
 npm run qa:bundle
 ```
 
+Run the AI product reviewer against the generated bundle:
+
+```powershell
+$env:OPENAI_API_KEY="your-openai-api-key"
+$env:AI_REVIEW_MODEL="gpt-5-mini"
+npm run qa:ai-review
+```
+
 Artifacts are generated in `ui/test-results/accountant-qa/`:
 
 - per-page screenshots
@@ -94,10 +106,13 @@ Artifacts are generated in `ui/test-results/accountant-qa/`:
 - per-page console error and failed-request metadata
 - Playwright JSON summary
 - `qa_bundle.md`
+- `ai_review.md` when `OPENAI_API_KEY` is available and the AI review step runs
 
 ### Run against Vercel preview
 
 Set `E2E_BASE_URL` to the Vercel preview URL and set `E2E_API_BASE_URL` to the backend login API if you want to pin auth explicitly. The workflow in `.github/workflows/e2e-preview.yml` does this automatically on `pull_request` when the secrets are available.
+
+If `OPENAI_API_KEY` is also configured in GitHub Actions, the workflow runs `npm run qa:ai-review` after `npm run qa:bundle` and uploads `ui/test-results/accountant-qa/ai_review.md` with the rest of the QA artifact bundle.
 
 ### How Codex should use failing artifacts
 
@@ -112,7 +127,8 @@ Set `E2E_BASE_URL` to the Vercel preview URL and set `E2E_API_BASE_URL` to the b
 2. Vercel builds a preview URL.
 3. Playwright hits that deployed URL with a stable test account.
 4. The run produces screenshots, page text, traces, and a markdown QA bundle.
-5. Codex can review those artifacts, fix regressions, and repeat the loop quickly.
+5. The optional AI reviewer reads that bundle and writes `ai_review.md`.
+6. Codex can review those artifacts, fix regressions, and repeat the loop quickly.
 
 ## Environment Variables
 
@@ -200,3 +216,5 @@ Before pushing to GitHub:
 - Postgres is enabled by environment variable only, so local behavior stays the same.
 - SQLite-only startup schema helpers are skipped automatically in non-SQLite environments to avoid breaking staging.
 - The preview QA suite does not create Plaid links and expects an existing seeded test account.
+- The AI review step skips cleanly if `OPENAI_API_KEY` is missing or if `ui/test-results/accountant-qa/qa_bundle.md` has not been generated yet.
+- The AI review only sees the generated QA bundle and any screenshot files referenced from that bundle; it does not execute the app or replace Playwright assertions.

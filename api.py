@@ -1334,6 +1334,7 @@ def _plaid_cash_breakdown(db: Session, user_id: str) -> dict:
         .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
         .filter(
             PlaidAccount.user_id == user_id,
+            PlaidItem.user_id == user_id,
             PlaidAccount.is_cash_like == True,
             or_(PlaidItem.status == "linked", PlaidItem.status.is_(None), PlaidItem.status == "partial"),
             or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
@@ -1422,6 +1423,61 @@ def _active_financial_os_clause(model):
     still participate in Financial OS calculations.
     """
     return or_(model.active == True, model.active.is_(None))
+
+
+def _cash_account_row_total(row: CashAccount) -> float:
+    return round(
+        _to_float(getattr(row, "checking_end_balance", None), 0.0)
+        + _to_float(getattr(row, "savings_end_balance", None), 0.0),
+        2,
+    )
+
+
+def _cash_account_sort_value(row: CashAccount) -> tuple:
+    statement_end = _iso_to_date(getattr(row, "statement_end_date", None))
+    created_at = getattr(row, "created_at", None)
+    return (
+        statement_end or date.min,
+        created_at or datetime.min,
+        getattr(row, "id", 0) or 0,
+    )
+
+
+def _cash_account_group_key(row: CashAccount) -> str:
+    institution = _norm_text(getattr(row, "institution", None))
+    label = _norm_text(getattr(row, "account_label", None))
+    account_name = _norm_text(getattr(row, "account_name", None))
+    last4 = (getattr(row, "account_last4", None) or "").strip()
+
+    # Imported bank snapshots can represent a combined checking+savings statement.
+    # Group by the most stable source-level identifiers we have, then keep the latest row.
+    if account_name or last4:
+        return "|".join([institution, label, account_name, last4])
+    return "|".join([institution, label or "imported-cash"])
+
+
+def _latest_imported_cash_rows(db: Session, user_id: str) -> list[CashAccount]:
+    rows = (
+        db.query(CashAccount)
+        .filter(CashAccount.user_id == user_id)
+        .order_by(CashAccount.created_at.desc(), CashAccount.id.desc())
+        .all()
+    )
+    latest_by_key: dict[str, CashAccount] = {}
+    for row in rows:
+        key = _cash_account_group_key(row)
+        current = latest_by_key.get(key)
+        if current is None or _cash_account_sort_value(row) > _cash_account_sort_value(current):
+            latest_by_key[key] = row
+    return list(latest_by_key.values())
+
+
+def _imported_cash_total_latest(db: Session, user_id: str) -> Optional[float]:
+    rows = _latest_imported_cash_rows(db, user_id)
+    if not rows:
+        return None
+    total = sum(_cash_account_row_total(row) for row in rows)
+    return round(float(total), 2)
 
 
 def _sum_account_balances(rows: list[dict], field: str) -> float:
@@ -5600,7 +5656,7 @@ def os_debt_utilization(
     Utilization per debt (if credit_limit provided) + totals.
     """
     user_id = _coerce_user_id(current_user, user_id)
-    debts = db.query(Debt).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).all()
+    debts = _active_debt_rows(db, user_id)
 
     items = []
     total_bal = 0.0
@@ -5639,7 +5695,7 @@ def os_debt_utilization(
     return {
         "ok": True,
         "user_id": user_id,
-        "total_balance": round(total_bal, 2),
+        "total_balance": round(total_bal, 2) if debts else None,
         "total_limit": round(total_limit, 2) if total_limit > 0 else None,
         "total_utilization_pct": total_util,
         "items": items,
@@ -5949,37 +6005,110 @@ def os_essentials_cap(
     }
 
 
-def _cash_total_latest(db: Session, user_id: str) -> float:
+def _cash_total_latest(db: Session, user_id: str) -> Optional[float]:
     """
-    Use latest PDF cash import end balances plus non-duplicate Plaid cash-like balances.
+    Use latest imported/manual cash balances plus non-duplicate Plaid cash-like balances.
     """
-    pdf_cash_total = _pdf_cash_total_latest(db, user_id)
-    plaid_cash_total = _plaid_cash_breakdown(db, user_id)["included_total"]
+    imported_cash_total = _imported_cash_total_latest(db, user_id)
+    plaid_breakdown = _plaid_cash_breakdown(db, user_id)
+    plaid_cash_total = round(float(plaid_breakdown["included_total"]), 2)
 
-    return round(float(pdf_cash_total + plaid_cash_total), 2)
+    if imported_cash_total is None and not plaid_breakdown["included"]:
+        return None
+
+    total = _to_float(imported_cash_total, 0.0) + plaid_cash_total
+    return round(float(total), 2)
 
 
-def _pdf_cash_total_latest(db: Session, user_id: str) -> float:
+def _financial_os_source_counts(db: Session, user_id: str) -> dict:
+    linked_cash_count = (
+        db.query(PlaidAccount.id)
+        .join(PlaidItem, PlaidAccount.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidAccount.user_id == user_id,
+            PlaidItem.user_id == user_id,
+            PlaidAccount.is_cash_like == True,
+            or_(PlaidItem.status == "linked", PlaidItem.status.is_(None), PlaidItem.status == "partial"),
+            or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
+        )
+        .count()
+    )
+    imported_cash_count = len(_latest_imported_cash_rows(db, user_id))
+    bill_count = db.query(Bill.id).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill)).count()
+    manual_bill_count = (
+        db.query(ManualBill.id)
+        .filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill))
+        .count()
+    )
+    debt_count = db.query(Debt.id).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).count()
+    debt_with_minimum_count = (
+        db.query(Debt.id)
+        .filter(
+            Debt.user_id == user_id,
+            _active_financial_os_clause(Debt),
+            Debt.minimum_due.isnot(None),
+            Debt.minimum_due > 0,
+        )
+        .count()
+    )
+
+    return {
+        "imported_cash_sources": int(imported_cash_count or 0),
+        "linked_cash_sources": int(linked_cash_count or 0),
+        "cash_sources_total": int((imported_cash_count or 0) + (linked_cash_count or 0)),
+        "bill_registry_count": int(bill_count or 0),
+        "manual_obligation_count": int(manual_bill_count or 0),
+        "tracked_debt_count": int(debt_count or 0),
+        "tracked_debt_minimum_count": int(debt_with_minimum_count or 0),
+    }
+
+
+def _financial_os_data_status(source_counts: dict) -> dict:
+    cash_ready = (source_counts.get("cash_sources_total") or 0) > 0
+    obligations_ready = (
+        (source_counts.get("bill_registry_count") or 0)
+        + (source_counts.get("manual_obligation_count") or 0)
+        + (source_counts.get("tracked_debt_minimum_count") or 0)
+    ) > 0
+    debt_ready = (source_counts.get("tracked_debt_count") or 0) > 0
+    return {
+        "cash": "ready" if cash_ready else "empty",
+        "obligations": "ready" if obligations_ready else "empty",
+        "debt_registry": "ready" if debt_ready else "empty",
+    }
+
+
+def _pdf_cash_total_latest(db: Session, user_id: str) -> Optional[float]:
     """
-    Latest PDF-imported checking + savings end balances only.
+    Latest imported/manual checking + savings balances across unique imported cash sources.
     Kept separate so Financial OS can explain the combined cash total cleanly.
     """
-    rows = (
-        db.query(CashAccount)
-        .filter(CashAccount.user_id == user_id)
-        .order_by(CashAccount.created_at.desc(), CashAccount.id.desc())
-        .limit(5)
+    return _imported_cash_total_latest(db, user_id)
+
+
+def _has_schedule_fallback_obligation(
+    *,
+    frequency: Optional[str],
+    due_date_value: Optional[str],
+    today: Optional[date] = None,
+) -> bool:
+    today = today or date.today()
+    freq = (frequency or "monthly").strip().lower()
+    parsed_due = _iso_to_date(due_date_value) if due_date_value else None
+
+    if freq in ("once", "one_time"):
+        return False
+    if parsed_due and parsed_due < today:
+        return False
+    return True
+
+
+def _active_debt_rows(db: Session, user_id: str) -> list[Debt]:
+    return (
+        db.query(Debt)
+        .filter(Debt.user_id == user_id, _active_financial_os_clause(Debt))
         .all()
     )
-    if not rows:
-        pdf_cash_total = 0.0
-    else:
-        # pick latest statement row (first)
-        r = rows[0]
-        chk = _to_float(r.checking_end_balance, 0.0)
-        sav = _to_float(r.savings_end_balance, 0.0)
-        pdf_cash_total = float(chk + sav)
-    return round(float(pdf_cash_total), 2)
 
 
 def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
@@ -5993,10 +6122,12 @@ def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
     horizon = today + timedelta(days=days)
 
     items = []
+    has_data = False
 
     # Bills
     bills = db.query(Bill).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill)).all()
     for b in bills:
+        has_data = True
         due = _resolve_schedule_due_date(
             frequency=b.frequency,
             due_day=b.due_day,
@@ -6017,10 +6148,28 @@ def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
                 "autopay": bool(b.autopay),
                 "id": b.id,
             })
+        elif due is None and _has_schedule_fallback_obligation(
+            frequency=b.frequency,
+            due_date_value=b.next_due_date,
+            today=today,
+        ):
+            items.append({
+                "type": "bill",
+                "source": "bill_registry",
+                "name": b.name,
+                "amount": round(_to_float(b.amount, 0.0), 2),
+                "due_date": None,
+                "frequency": b.frequency,
+                "category": b.category,
+                "autopay": bool(b.autopay),
+                "id": b.id,
+                "planning_fallback": True,
+            })
 
     # Manual bills (user-entered)
     manual_bills = db.query(ManualBill).filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill)).all()
     for mb in manual_bills:
+        has_data = True
         due = _resolve_schedule_due_date(
             frequency=mb.frequency,
             due_day=mb.due_day,
@@ -6042,19 +6191,38 @@ def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
                 "autopay": bool(mb.autopay),
                 "id": mb.id,
             })
+        elif due is None and _has_schedule_fallback_obligation(
+            frequency=mb.frequency,
+            due_date_value=mb.due_date,
+            today=today,
+        ):
+            items.append({
+                "type": "manual_bill",
+                "source": "manual_bills",
+                "name": mb.name,
+                "amount": round(_to_float(mb.amount, 0.0), 2),
+                "due_date": None,
+                "frequency": mb.frequency,
+                "category": mb.category,
+                "autopay": bool(mb.autopay),
+                "id": mb.id,
+                "planning_fallback": True,
+            })
 
     # Debts minimums
-    debts = db.query(Debt).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).all()
+    debts = _active_debt_rows(db, user_id)
     for d in debts:
-        if d.minimum_due is None:
+        minimum_due = _to_float(d.minimum_due, default=None)
+        if minimum_due is None:
             continue
+        has_data = True
         due = _resolve_debt_due_date_for_planning(d, today=today)
         if due and today <= due <= horizon:
             items.append({
                 "type": "debt_minimum",
                 "source": "debt_registry",
                 "name": f"{d.name} minimum",
-                "amount": round(_to_float(d.minimum_due, 0.0), 2),
+                "amount": round(minimum_due, 2),
                 "due_date": due.isoformat(),
                 "frequency": "monthly",
                 "category": "Debt",
@@ -6063,16 +6231,27 @@ def _upcoming_window_items(db: Session, user_id: str, days: int = 21):
                 "last4": d.last4,
                 "id": d.id,
             })
+        elif due is None or due < today:
+            items.append({
+                "type": "debt_minimum",
+                "source": "debt_registry",
+                "name": f"{d.name} minimum",
+                "amount": round(minimum_due, 2),
+                "due_date": None,
+                "frequency": "monthly",
+                "category": "Debt",
+                "autopay": None,
+                "apr": d.apr,
+                "last4": d.last4,
+                "id": d.id,
+                "planning_fallback": True,
+            })
 
-    items.sort(key=lambda x: x["due_date"])
+    items.sort(key=lambda x: (x["due_date"] is None, x["due_date"] or "", x["name"] or ""))
     total = round(sum(_to_float(i["amount"], 0.0) for i in items), 2)
 
-    return items, total
+    return items, (total if has_data else None)
 
-
-from typing import Optional
-
-from sqlalchemy import or_
 
 @app.get("/os/next-best-dollar")
 def os_next_best_dollar(
@@ -6086,11 +6265,13 @@ def os_next_best_dollar(
     Next Best Dollar (Phase 2 minimal engine):
     1) Cash total (latest cash statement end balances)
     2) Upcoming obligations in next N days (bills + manual obligations + debt minimums)
-    3) Safe-to-Spend = cash - upcoming - buffer
+    3) Safe-to-Spend = cash - upcoming
     4) If surplus > 0 => recommend extra payment to highest APR debt (avalanche)
     """
     user_id = _coerce_user_id(current_user, user_id)
     settings = _user_settings_payload(db, user_id)
+    source_counts = _financial_os_source_counts(db, user_id)
+    data_status = _financial_os_data_status(source_counts)
     minimum_extra_payment = _to_float(
         _settings_value(settings, ["financialOS", "debt", "minExtraPayment"], 0.0),
         0.0,
@@ -6100,30 +6281,23 @@ def os_next_best_dollar(
     cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
     upcoming_summary = _summarize_upcoming_items(items)
 
-    sts_today = float(cash_total) - float(upcoming_total) - float(buffer)
-    available_sts = round(max(sts_today, 0.0), 2)
+    sts_today = None if cash_total is None or upcoming_total is None else round(float(cash_total) - float(upcoming_total), 2)
+    available_sts = round(max(_to_float(sts_today, 0.0), 0.0), 2) if sts_today is not None else None
     breakdown = _build_financial_os_breakdown(
-        cash_total=cash_total,
+        cash_total=_to_float(cash_total, 0.0),
         cash_sources=cash_sources,
         upcoming_summary=upcoming_summary,
-        upcoming_total=upcoming_total,
+        upcoming_total=_to_float(upcoming_total, 0.0),
         buffer=buffer,
-        final_safe_to_spend=sts_today,
+        final_safe_to_spend=_to_float(sts_today, 0.0),
     )
 
     # determine stage quickly
-    stage = "Stabilize" if sts_today < 0 else "Attack Debt"
+    stage = "Unknown" if sts_today is None else ("Stabilize" if sts_today < 0 else "Attack Debt")
 
     # IMPORTANT FIX:
     # Treat active=NULL as active (common when rows were inserted before defaults were set)
-    debts = (
-        db.query(Debt)
-        .filter(
-            Debt.user_id == user_id,
-            or_(Debt.active == True, Debt.active.is_(None)),
-        )
-        .all()
-    )
+    debts = _active_debt_rows(db, user_id)
 
     # pick target debt = highest APR among debts with balance>0
     target = None
@@ -6143,7 +6317,7 @@ def os_next_best_dollar(
 
     rec = None
     extra_details = _recommended_extra_payment_details(
-        available_sts=available_sts,
+        available_sts=_to_float(available_sts, 0.0),
         debt_balance=_to_float(getattr(target, "balance", None), 0.0) if target else 0.0,
         minimum_extra_payment=minimum_extra_payment,
     )
@@ -6155,7 +6329,7 @@ def os_next_best_dollar(
             "apr": target.apr,
             "available_sts": extra_details["available_sts"],
             "recommended_extra_payment": extra_details["recommended_extra_payment"],
-            "why": "Highest APR debt first (avalanche) after protecting upcoming bills and buffer. Recommendation is capped so it stays realistic month to month.",
+            "why": "Highest APR debt first (avalanche) after covering upcoming obligations. Recommendation is capped so it stays realistic month to month.",
         }
 
     return {
@@ -6163,21 +6337,23 @@ def os_next_best_dollar(
         "user_id": user_id,
         "window_days": window_days,
         "buffer": round(float(buffer), 2),
-        "cash_total": round(float(cash_total), 2),
-        "upcoming_total": round(float(upcoming_total), 2),
-        "safe_to_spend_today": round(float(sts_today), 2),
+        "cash_total": round(float(cash_total), 2) if cash_total is not None else None,
+        "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
+        "safe_to_spend_today": round(float(sts_today), 2) if sts_today is not None else None,
         "available_sts": available_sts,
         "stage": stage,
         "upcoming_items": items,
         "cash_sources": cash_sources,
+        "source_counts": source_counts,
+        "data_status": data_status,
         "upcoming_summary": upcoming_summary,
         "breakdown": breakdown,
         "calculation": {
-            "formula": "safe_to_spend_today = cash_total - upcoming_total - buffer; recommended_extra_payment uses a capped slice of positive STS instead of the full STS balance.",
-            "cash_total": round(float(cash_total), 2),
-            "upcoming_total": round(float(upcoming_total), 2),
+            "formula": "safe_to_spend_today = cash_total - upcoming_total; buffer is returned separately for UI/context and does not reduce the OS value.",
+            "cash_total": round(float(cash_total), 2) if cash_total is not None else None,
+            "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
             "buffer": round(float(buffer), 2),
-            "safe_to_spend_today": round(float(sts_today), 2),
+            "safe_to_spend_today": round(float(sts_today), 2) if sts_today is not None else None,
             "available_sts": available_sts,
             "recommended_extra_payment": extra_details["recommended_extra_payment"],
         },
@@ -6196,6 +6372,8 @@ def os_state(
     One endpoint your UI can call to power Settings + Dashboard panels.
     """
     user_id = _coerce_user_id(current_user, user_id)
+    source_counts = _financial_os_source_counts(db, user_id)
+    data_status = _financial_os_data_status(source_counts)
     cash_total = _cash_total_latest(db, user_id)
     upcoming_items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
 
@@ -6207,14 +6385,15 @@ def os_state(
     util = os_debt_utilization(user_id=user_id, db=db, current_user=current_user)
     cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
     upcoming_summary = _summarize_upcoming_items(upcoming_items)
-
     return {
         "ok": True,
         "user_id": user_id,
-        "cash_total": round(float(cash_total), 2),
+        "cash_total": round(float(cash_total), 2) if cash_total is not None else None,
         "cash_sources": cash_sources,
+        "source_counts": source_counts,
+        "data_status": data_status,
         "upcoming_window_days": window_days,
-        "upcoming_total": round(float(upcoming_total), 2),
+        "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
         "upcoming_items": upcoming_items,
         "upcoming_summary": upcoming_summary,
         "manual_bills": manual_bills_list,
@@ -6224,9 +6403,9 @@ def os_state(
             "essentials_cap_total": essentials_total,
         },
         "calculation": {
-            "cash_total": round(float(cash_total), 2),
-            "upcoming_total": round(float(upcoming_total), 2),
-            "safe_to_spend_formula": "Use /os/next-best-dollar to apply buffer on top of cash_total and upcoming_total.",
+            "cash_total": round(float(cash_total), 2) if cash_total is not None else None,
+            "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
+            "safe_to_spend_formula": "Use /os/next-best-dollar to derive safe_to_spend_today directly from cash_total and upcoming_total.",
         },
         "debt_utilization": util,
     }

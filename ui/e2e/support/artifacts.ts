@@ -27,6 +27,7 @@ type PageArtifactRecord = {
   capturedAt: string;
   pageUrl: string;
   pageTitle: string;
+  artifactPath: string;
   screenshotPath: string;
   textPath: string;
   consoleErrors: ConsoleErrorRecord[];
@@ -50,6 +51,16 @@ function slugify(value: string) {
 
 function relativeToUi(filePath: string) {
   return path.relative(process.cwd(), filePath).split(path.sep).join("/");
+}
+
+async function assertWrittenArtifact(filePath: string, label: string) {
+  const stats = await fs.stat(filePath).catch(() => null);
+  if (!stats?.isFile()) {
+    throw new Error(`${label} was not written: ${filePath}`);
+  }
+  if (stats.size <= 0) {
+    throw new Error(`${label} is empty: ${filePath}`);
+  }
 }
 
 export async function runStepWithArtifacts(
@@ -132,6 +143,10 @@ export async function runStepWithArtifacts(
     const pageText = await page.evaluate(() => document.body?.innerText || "");
     const pageTitle = await page.title().catch(() => "");
 
+    if (!pageText.trim()) {
+      throw new Error(`Visible text extraction returned empty content for ${options.name}.`);
+    }
+
     await Promise.all([
       page.screenshot({ path: screenshotFile, fullPage: true }),
       fs.writeFile(textFile, pageText, "utf8"),
@@ -143,6 +158,7 @@ export async function runStepWithArtifacts(
       capturedAt: new Date().toISOString(),
       pageUrl: page.url(),
       pageTitle,
+      artifactPath: relativeToUi(recordFile),
       screenshotPath: relativeToUi(screenshotFile),
       textPath: relativeToUi(textFile),
       consoleErrors,
@@ -150,6 +166,11 @@ export async function runStepWithArtifacts(
     };
 
     await fs.writeFile(recordFile, JSON.stringify(record, null, 2), "utf8");
+    await Promise.all([
+      assertWrittenArtifact(screenshotFile, `Screenshot for ${options.name}`),
+      assertWrittenArtifact(textFile, `Visible text file for ${options.name}`),
+      assertWrittenArtifact(recordFile, `Artifact record for ${options.name}`),
+    ]);
 
     result = {
       ...record,

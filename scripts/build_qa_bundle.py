@@ -55,23 +55,65 @@ def read_json_if_exists(file_path: Path) -> dict[str, Any] | None:
         return None
 
 
-def load_page_artifacts() -> list[dict[str, Any]]:
+def parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def load_page_artifacts(run_started_at: datetime | None = None) -> list[dict[str, Any]]:
     if not PAGES_ROOT.exists():
         return []
 
     artifacts: list[dict[str, Any]] = []
     for artifact_path in sorted(PAGES_ROOT.glob("*.json")):
-        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-        text_absolute = (UI_ROOT / artifact["textPath"]).resolve()
-        screenshot_absolute = (UI_ROOT / artifact["screenshotPath"]).resolve()
         try:
-            page_text = text_absolute.read_text(encoding="utf-8")
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            artifact = {
+                "name": artifact_path.stem,
+                "pageUrl": "n/a",
+                "pageTitle": "n/a",
+                "capturedAt": "n/a",
+                "screenshotPath": "",
+                "textPath": "",
+                "artifactIssues": [f"Artifact JSON could not be parsed: {error}"],
+            }
+
+        issues: list[str] = list(artifact.get("artifactIssues") or [])
+        text_path = artifact.get("textPath")
+        screenshot_path = artifact.get("screenshotPath")
+        text_absolute = (UI_ROOT / text_path).resolve() if isinstance(text_path, str) and text_path else None
+        screenshot_absolute = (
+            (UI_ROOT / screenshot_path).resolve() if isinstance(screenshot_path, str) and screenshot_path else None
+        )
+        try:
+            page_text = text_absolute.read_text(encoding="utf-8") if text_absolute else ""
         except FileNotFoundError:
             page_text = ""
 
+        if not screenshot_absolute or not screenshot_absolute.is_file():
+            issues.append("Screenshot file is missing.")
+        if not text_absolute or not text_absolute.is_file():
+            issues.append("Visible text file is missing.")
+        if not (artifact.get("pageUrl") or "").strip():
+            issues.append("Captured page URL is missing.")
+        if not page_text.strip():
+            issues.append("Visible text extraction is empty.")
+
+        captured_at = parse_datetime(artifact.get("capturedAt"))
+        if run_started_at and (not captured_at or captured_at < run_started_at):
+            issues.append("Artifact does not belong to the current Playwright run.")
+
         artifact["pageText"] = page_text
-        artifact["screenshotBundlePath"] = rel_from_bundle(screenshot_absolute)
-        artifact["textBundlePath"] = rel_from_bundle(text_absolute)
+        artifact["artifactBundlePath"] = rel_from_bundle(artifact_path.resolve())
+        artifact["screenshotBundlePath"] = rel_from_bundle(screenshot_absolute) if screenshot_absolute else "n/a"
+        artifact["textBundlePath"] = rel_from_bundle(text_absolute) if text_absolute else "n/a"
+        artifact["artifactIssues"] = issues
+        artifact["isComplete"] = not issues
         artifacts.append(artifact)
 
     return sorted(artifacts, key=lambda item: item.get("name", ""))
@@ -111,7 +153,10 @@ def flatten_specs(
                         "title": full_title,
                         "projectName": test.get("projectName") or "default",
                         "status": last_result.get("status")
-                        or ("passed" if spec.get("ok") else test.get("expectedStatus") or "unknown"),
+                        or test.get("status")
+                        or ("passed" if spec.get("ok") and results else None)
+                        or test.get("expectedStatus")
+                        or "unknown",
                         "duration": last_result.get("duration"),
                         "error": error_message,
                     }
@@ -125,13 +170,23 @@ def flatten_specs(
 def build_bundle() -> None:
     QA_ROOT.mkdir(parents=True, exist_ok=True)
 
-    artifacts = load_page_artifacts()
     report = read_json_if_exists(RESULTS_PATH) or {}
     stats = report.get("stats") or {}
+    artifacts = load_page_artifacts(parse_datetime(stats.get("startTime")))
+    complete_artifacts = [artifact for artifact in artifacts if artifact.get("isComplete")]
     test_rows = flatten_specs(report.get("suites"))
 
-    total_console_errors = sum(len(item.get("consoleErrors") or []) for item in artifacts)
-    total_failed_requests = sum(len(item.get("failedNetworkRequests") or []) for item in artifacts)
+    total_console_errors = sum(len(item.get("consoleErrors") or []) for item in complete_artifacts)
+    total_failed_requests = sum(len(item.get("failedNetworkRequests") or []) for item in complete_artifacts)
+    invalid_artifact_count = len(artifacts) - len(complete_artifacts)
+
+    validation_errors: list[str] = []
+    if not complete_artifacts:
+        validation_errors.append("Captured pages = 0. QA capture is invalid because no complete page artifacts exist.")
+    if any(row.get("status") == "passed" for row in test_rows) and not complete_artifacts:
+        validation_errors.append("Playwright reported passed tests, but this run produced no page artifacts.")
+    if invalid_artifact_count:
+        validation_errors.append(f"{invalid_artifact_count} page artifact(s) are incomplete, missing files, or stale.")
 
     lines = [
         "# Accountant Bot QA Bundle",
@@ -146,7 +201,8 @@ def build_bundle() -> None:
         f"- Skipped tests: {stats.get('skipped', 0)}",
         f"- Flaky tests: {stats.get('flaky', 0)}",
         f"- Duration: {format_duration(stats.get('duration'))}",
-        f"- Captured pages: {len(artifacts)}",
+        f"- Captured pages: {len(complete_artifacts)}",
+        f"- Invalid or stale artifacts: {invalid_artifact_count}",
         f"- Console errors across captured pages: {total_console_errors}",
         f"- Failed network requests across captured pages: {total_failed_requests}",
         "",
@@ -158,8 +214,11 @@ def build_bundle() -> None:
         lines.append("- No Playwright JSON results were found.")
     else:
         for row in test_rows:
+            display_status = row["status"]
+            if display_status == "passed" and not complete_artifacts:
+                display_status = "invalid-no-artifacts"
             lines.append(
-                f"- [{row['status']}] {row['title']} ({row['projectName']}, {format_duration(row.get('duration'))})"
+                f"- [{display_status}] {row['title']} ({row['projectName']}, {format_duration(row.get('duration'))})"
             )
             if row.get("error"):
                 lines.append(f"  Error: {row['error']}")
@@ -171,12 +230,17 @@ def build_bundle() -> None:
             if isinstance(error, dict) and error.get("message"):
                 lines.append(f"- {error['message']}")
 
+    if validation_errors:
+        lines.extend(["", "## Validation Errors", ""])
+        for error in validation_errors:
+            lines.append(f"- {error}")
+
     lines.extend(["", "## Page Artifacts", ""])
 
-    if not artifacts:
+    if not complete_artifacts:
         lines.append("- No page artifacts were found.")
     else:
-        for artifact in artifacts:
+        for artifact in complete_artifacts:
             lines.extend(
                 [
                     f"### {artifact.get('name', 'unnamed')}",
@@ -184,6 +248,7 @@ def build_bundle() -> None:
                     f"- Captured at: {artifact.get('capturedAt', 'n/a')}",
                     f"- URL: {artifact.get('pageUrl', 'n/a')}",
                     f"- Title: {artifact.get('pageTitle') or 'n/a'}",
+                    f"- Artifact record: [{artifact['artifactBundlePath']}]({artifact['artifactBundlePath']})",
                     f"- Screenshot: [{artifact['screenshotBundlePath']}]({artifact['screenshotBundlePath']})",
                     f"- Visible text file: [{artifact['textBundlePath']}]({artifact['textBundlePath']})",
                     f"- Console errors: {len(artifact.get('consoleErrors') or [])}",
@@ -229,8 +294,23 @@ def build_bundle() -> None:
                 ]
             )
 
+    if invalid_artifact_count:
+        lines.extend(["", "## Incomplete Or Stale Artifacts", ""])
+        for artifact in artifacts:
+            issues = artifact.get("artifactIssues") or []
+            if not issues:
+                continue
+            lines.append(f"### {artifact.get('name', 'unnamed')}")
+            lines.append("")
+            lines.append(f"- Artifact record: [{artifact['artifactBundlePath']}]({artifact['artifactBundlePath']})")
+            for issue in issues:
+                lines.append(f"- {issue}")
+            lines.append("")
+
     BUNDLE_PATH.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote {BUNDLE_PATH}")
+    if validation_errors:
+        raise SystemExit("QA bundle validation failed:\n- " + "\n- ".join(validation_errors))
 
 
 if __name__ == "__main__":

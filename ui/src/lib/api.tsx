@@ -870,6 +870,22 @@ export type FinancialOsBreakdown = {
   final_safe_to_spend?: number;
 };
 
+export type FinancialOsSourceCounts = {
+  imported_cash_sources?: number;
+  linked_cash_sources?: number;
+  cash_sources_total?: number;
+  bill_registry_count?: number;
+  manual_obligation_count?: number;
+  tracked_debt_count?: number;
+  tracked_debt_minimum_count?: number;
+};
+
+export type FinancialOsDataStatus = {
+  cash?: "ready" | "empty";
+  obligations?: "ready" | "empty";
+  debt_registry?: "ready" | "empty";
+};
+
 export type OsStateResponse = {
   ok: boolean;
   user_id: string;
@@ -905,6 +921,8 @@ export type OsStateResponse = {
   };
   upcoming_window_days?: number;
   upcoming_total?: number;
+  source_counts?: FinancialOsSourceCounts;
+  data_status?: FinancialOsDataStatus;
   upcoming_items?: FinancialOsUpcomingItem[];
   upcoming_summary?: {
     bill_total?: number;
@@ -945,6 +963,8 @@ export type NextBestDollarResponse = {
   safe_to_spend_today: number;
   available_sts?: number;
   stage?: string | null;
+  source_counts?: FinancialOsSourceCounts;
+  data_status?: FinancialOsDataStatus;
   upcoming_items?: FinancialOsUpcomingItem[];
   upcoming_summary?: {
     bill_total?: number;
