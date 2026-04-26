@@ -32,6 +32,15 @@ const REQUIRED_PAGE_CAPTURES: RequiredPageCapture[] = [
     assertions: async (page) => {
       await expect(main(page).getByText("Dashboard", { exact: true })).toBeVisible();
       await expect(main(page).getByText(/Safe(?:\s|-)?to(?:\s|-)Spend(?:\s+Backend formula)?/i)).toBeVisible();
+      await page.getByTestId("dashboard-ready").waitFor({ state: "attached", timeout: 20_000 });
+      await expect(page.getByTestId("dashboard-ready")).toHaveAttribute(
+        "data-os-state-status",
+        /^(ready|unavailable)$/
+      );
+      await expect(page.getByTestId("dashboard-ready")).toHaveAttribute(
+        "data-next-best-dollar-status",
+        /^(ready|unavailable)$/
+      );
     },
   },
   {

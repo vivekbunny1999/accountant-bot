@@ -743,6 +743,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const nextBestDollarLoadingState = !hasAuthenticatedUser || (nextBestDollarLoading && !nextBestDollar);
   const osStateUnavailable = !osStateLoading && Boolean(billsErr);
   const nextBestDollarUnavailable = !nextBestDollarLoadingState && Boolean(nextBestDollarErr);
+  const osStateSettled = hasAuthenticatedUser && !billsLoading && (Boolean(osState) || Boolean(billsErr));
+  const nextBestDollarSettled =
+    hasAuthenticatedUser &&
+    !nextBestDollarLoading &&
+    (Boolean(nextBestDollar) || Boolean(nextBestDollarErr));
+  const dashboardReady = osStateSettled && nextBestDollarSettled;
   const intelligenceContext = intelligence?.context ?? null;
   const financialOsCashTotal = firstDashboardMoneyValue(
     osState?.cash_total,
@@ -1176,7 +1182,18 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
 
   return (
     <AppShell>
-      <div className="space-y-5">
+      <div
+        className="space-y-5"
+        data-dashboard-ready={dashboardReady ? "true" : "false"}
+      >
+        {dashboardReady ? (
+          <div
+            hidden
+            data-testid="dashboard-ready"
+            data-os-state-status={osStateUnavailable ? "unavailable" : "ready"}
+            data-next-best-dollar-status={nextBestDollarUnavailable ? "unavailable" : "ready"}
+          />
+        ) : null}
         {/* Header */}
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="flex items-start justify-between gap-3">
@@ -1608,6 +1625,10 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     {nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer"}
                   </div>
                 </div>
+              ) : nextBestDollarUnavailable ? (
+                <div className="mt-2 text-xs text-zinc-500">
+                  STS data unavailable.
+                </div>
               ) : (
                 <div className="mt-2 text-xs text-zinc-500">
                   Backend STS breakdown is loading.
@@ -1720,7 +1741,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   </div>
 
   {billsLoading && <div className="mt-4 text-sm text-zinc-400">Loading obligations…</div>}
-  {billsErr && <div className="mt-4 text-sm text-red-400">Error: {billsErr}</div>}
+  {billsErr && <div className="mt-4 text-sm text-red-400">Data unavailable. {billsErr}</div>}
 
   {!billsLoading && !billsErr && (
     <div className="mt-4 overflow-x-auto">
