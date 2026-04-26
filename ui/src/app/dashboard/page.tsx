@@ -30,6 +30,7 @@ import {
 import {
   amountAbs,
   CATEGORY_OPTIONS,
+  classifyPlaidDisplayRows,
   categoryForCash,
   categoryForManual,
   categoryForPlaid,
@@ -451,6 +452,8 @@ type MonthSpendRow = {
   date: Date;
   title: string;
   subtitle: string;
+  counted?: boolean;
+  suspectedDuplicate?: boolean;
 };
 
 export default function DashboardPage() {
@@ -1040,7 +1043,11 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     () => osInsights.filter((item) => item.key !== whatToDoNext?.key).slice(0, 4),
     [osInsights, whatToDoNext]
   );
-  const plaidRecentRows = useMemo(() => plaidTransactions.slice(0, 8), [plaidTransactions]);
+  const plaidDisplaySummary = useMemo(
+    () => classifyPlaidDisplayRows(plaidTransactions.filter((txn) => isPlaidSpend(txn))),
+    [plaidTransactions]
+  );
+  const plaidRecentRows = useMemo(() => plaidDisplaySummary.rows.slice(0, 8), [plaidDisplaySummary]);
 
   /** =========================
    * Trend: sum balances by statement end-month
@@ -1168,7 +1175,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
       });
     }
 
-    for (const txn of plaidTransactions) {
+    for (const txn of plaidDisplaySummary.countedRows) {
       const dateValue = parseDateLoose(txn.posted_date ?? txn.authorized_date ?? null);
       if (!dateValue || !isSameMonth(dateValue, cy, cm0) || !isPlaidSpend(txn)) continue;
       rows.push({
@@ -1183,7 +1190,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     }
 
     return rows.sort((a, b) => b.date.getTime() - a.date.getTime());
-  }, [cashMonthTxns, cm0, cy, manualTransactions, monthTxns, plaidTransactions]);
+  }, [cashMonthTxns, cm0, cy, manualTransactions, monthTxns, plaidDisplaySummary]);
 
   /** =========================
    * Category totals for current month (spend only)
@@ -2352,9 +2359,36 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="mt-1 text-xs text-zinc-400">
                     Institution labels stay visible so repeated sandbox-style rows are easier to tell apart.
                   </div>
+                  <div className="mt-2 text-xs text-zinc-500">
+                    Suspected duplicate linked rows are hidden from spend totals but kept visible for review.
+                  </div>
                 </div>
                 <div className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300">
                   {plaidAccounts.length} account{plaidAccounts.length === 1 ? "" : "s"}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Counted linked spend</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {fmtMoney(plaidDisplaySummary.countedSpend)}
+                  </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    Used in current month dashboard spend totals
+                  </div>
+                </div>
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-3">
+                  <div className="text-xs text-amber-200">Suspected duplicates skipped</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {plaidDisplaySummary.suspectedDuplicateCount}
+                    {plaidDisplaySummary.suspectedDuplicateCount === 0
+                      ? ""
+                      : ` • ${fmtMoney(plaidDisplaySummary.suspectedDuplicateSpend)}`}
+                  </div>
+                  <div className="mt-1 text-[11px] text-amber-100/80">
+                    Exact duplicate-looking linked rows kept for review
+                  </div>
                 </div>
               </div>
 
@@ -2366,18 +2400,40 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                         <th className="py-2 pr-3">date</th>
                         <th className="py-2 pr-3">account</th>
                         <th className="py-2 pr-3">merchant</th>
+                        <th className="py-2 pr-3">status</th>
                         <th className="py-2 pr-0 text-right">amount</th>
                       </tr>
                     </thead>
                     <tbody>
                       {plaidRecentRows.map((txn) => (
-                        <tr key={txn.transaction_id} className="border-b border-white/5">
+                        <tr
+                          key={txn.transaction_id}
+                          className={[
+                            "border-b border-white/5",
+                            txn.suspectedDuplicate ? "bg-amber-500/5" : "",
+                          ].join(" ")}
+                        >
                           <td className="py-2 pr-3 text-zinc-400">{txn.posted_date || txn.authorized_date || "—"}</td>
                           <td className="py-2 pr-3">
                             <div className="text-zinc-200">{txn.account_name || "Plaid account"}</div>
-                            <div className="text-[11px] text-zinc-500">{txn.institution_name || "Linked institution"}</div>
+                            <div className="text-[11px] text-zinc-500">
+                              {txn.institution_name || "Linked institution"}
+                              {txn.account_mask ? ` • ****${txn.account_mask}` : ""}
+                            </div>
                           </td>
                           <td className="py-2 pr-3 text-zinc-300">{txn.merchant_name || txn.name || "—"}</td>
+                          <td className="py-2 pr-3">
+                            <span
+                              className={[
+                                "inline-flex rounded-full border px-2 py-0.5 text-[10px]",
+                                txn.suspectedDuplicate
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                                  : "border-emerald-500/20 bg-emerald-500/10 text-emerald-200",
+                              ].join(" ")}
+                            >
+                              {txn.suspectedDuplicate ? "Suspected duplicate" : "Counted"}
+                            </span>
+                          </td>
                           <td className="py-2 pr-0 text-right font-mono text-zinc-100">
                             {typeof txn.amount === "number" ? fmtMoney(txn.amount) : "—"}
                           </td>
@@ -2592,7 +2648,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           )}
 
           <div className="mt-3 text-xs text-zinc-500">
-            Category totals now reflect statement, imported cash, manual, and linked activity for the current month. Common/Uncommon/Rare is still based on frequency.
+            Category totals now reflect statement, imported cash, manual, and counted linked activity for the current month. Suspected duplicate linked rows stay visible for review but are skipped from spend totals.
           </div>
         </div>
 

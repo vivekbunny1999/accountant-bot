@@ -1656,6 +1656,7 @@ def _serialize_plaid_transaction(row: PlaidTransaction) -> dict:
         "account_id": row.account.plaid_account_id if row.account else None,
         "item_id": row.item.plaid_item_id if row.item else None,
         "account_name": row.account.name if row.account else None,
+        "account_mask": row.account.mask if row.account else None,
         "institution_name": (
             row.account.institution_name
             if row.account and row.account.institution_name
@@ -7738,6 +7739,88 @@ def _looks_like_non_spend(description: Optional[str], category: Optional[str] = 
     return any(keyword in text for keyword in keywords)
 
 
+def _normalize_plaid_duplicate_token(value: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower())).strip()
+
+
+def _normalize_plaid_last4(value: Optional[str]) -> str:
+    digits = re.sub(r"\D+", "", str(value or ""))
+    return digits[-4:] if digits else ""
+
+
+def _plaid_display_account_fingerprint(
+    *,
+    account_id: Optional[str] = None,
+    account_name: Optional[str] = None,
+    account_mask: Optional[str] = None,
+) -> str:
+    normalized_name = _normalize_plaid_duplicate_token(account_name)
+    normalized_last4 = _normalize_plaid_last4(account_mask)
+    if normalized_name or normalized_last4:
+        parts = []
+        if normalized_name:
+            parts.append(f"name:{normalized_name}")
+        if normalized_last4:
+            parts.append(f"last4:{normalized_last4}")
+        return "|".join(parts)
+
+    normalized_account_id = _normalize_plaid_duplicate_token(account_id)
+    return f"id:{normalized_account_id}" if normalized_account_id else "unknown_account"
+
+
+def _plaid_display_duplicate_key(
+    *,
+    institution_name: Optional[str] = None,
+    account_id: Optional[str] = None,
+    account_name: Optional[str] = None,
+    account_mask: Optional[str] = None,
+    posted_date: Optional[str] = None,
+    authorized_date: Optional[str] = None,
+    merchant_name: Optional[str] = None,
+    name: Optional[str] = None,
+    amount: Optional[float] = None,
+) -> str:
+    institution = _normalize_plaid_duplicate_token(institution_name) or "plaid"
+    account = _plaid_display_account_fingerprint(
+        account_id=account_id,
+        account_name=account_name,
+        account_mask=account_mask,
+    )
+    posted = _normalize_plaid_duplicate_token(posted_date or authorized_date) or "unknown_date"
+    merchant = _normalize_plaid_duplicate_token(merchant_name or name) or "unknown_merchant"
+    normalized_amount = f"{_to_float(amount, 0.0):.2f}"
+    return "|".join([
+        "source:plaid",
+        f"institution:{institution}",
+        f"account:{account}",
+        f"date:{posted}",
+        f"merchant:{merchant}",
+        f"amount:{normalized_amount}",
+    ])
+
+
+def _classify_suspected_duplicate_plaid_rows(rows: list[dict]) -> list[dict]:
+    duplicate_counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        duplicate_counts[row["duplicate_key"]] += 1
+
+    seen: dict[str, int] = defaultdict(int)
+    classified: list[dict] = []
+    for row in rows:
+        duplicate_key = row["duplicate_key"]
+        duplicate_group_index = seen[duplicate_key]
+        seen[duplicate_key] += 1
+
+        enriched = dict(row)
+        enriched["counted"] = duplicate_group_index == 0
+        enriched["suspected_duplicate"] = duplicate_group_index > 0
+        enriched["duplicate_group_index"] = duplicate_group_index
+        enriched["duplicate_group_size"] = duplicate_counts[duplicate_key]
+        classified.append(enriched)
+
+    return classified
+
+
 def _source_window(rows: list[dict], days: int) -> tuple[list[dict], Optional[date]]:
     if not rows:
         return [], None
@@ -7850,6 +7933,7 @@ def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dic
         )
         .all()
     )
+    plaid_candidates = []
     for txn, account, item in plaid_rows:
         posted = _iso_to_date(getattr(txn, "posted_date", None))
         amount = _to_float(getattr(txn, "amount", None), 0.0)
@@ -7858,7 +7942,7 @@ def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dic
             continue
         if _looks_like_non_spend(merchant, getattr(txn, "category_primary", None), None):
             continue
-        out["plaid"].append({
+        plaid_candidates.append({
             "source": "plaid",
             "date": posted,
             "amount": round(abs(amount), 2),
@@ -7871,7 +7955,29 @@ def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dic
                 plaid_detailed=getattr(txn, "category_detailed", None),
             ),
             "reference": getattr(account, "name", None) or getattr(item, "institution_name", None) or "Plaid",
+            "duplicate_key": _plaid_display_duplicate_key(
+                institution_name=getattr(account, "institution_name", None) or getattr(item, "institution_name", None),
+                account_id=getattr(account, "plaid_account_id", None),
+                account_name=getattr(account, "name", None),
+                account_mask=getattr(account, "mask", None),
+                posted_date=getattr(txn, "posted_date", None),
+                authorized_date=getattr(txn, "authorized_date", None),
+                merchant_name=getattr(txn, "merchant_name", None),
+                name=getattr(txn, "name", None),
+                amount=getattr(txn, "amount", None),
+            ),
         })
+
+    for row in _classify_suspected_duplicate_plaid_rows(plaid_candidates):
+        if row.get("suspected_duplicate"):
+            continue
+        cleaned = dict(row)
+        cleaned.pop("duplicate_key", None)
+        cleaned.pop("duplicate_group_index", None)
+        cleaned.pop("duplicate_group_size", None)
+        cleaned.pop("counted", None)
+        cleaned.pop("suspected_duplicate", None)
+        out["plaid"].append(cleaned)
 
     coverage = {}
     for source, rows in out.items():

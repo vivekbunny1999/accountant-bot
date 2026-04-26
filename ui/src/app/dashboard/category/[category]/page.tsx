@@ -21,6 +21,7 @@ import {
   categoryForPlaid,
   categoryForStatement,
   CATEGORY_OPTIONS,
+  classifyPlaidDisplayRows,
   isCashSpend,
   isManualSpend,
   isPlaidSpend,
@@ -93,6 +94,8 @@ type CategoryActivityRow = {
   isSpend: boolean;
   category: Category;
   signature: string;
+  counted?: boolean;
+  suspectedDuplicate?: boolean;
 };
 
 export default function CategoryDrilldownPage() {
@@ -233,8 +236,9 @@ export default function CategoryDrilldownPage() {
           })
         );
 
+        const plaidRows = classifyPlaidDisplayRows(plaidRes.transactions || []);
         nextRows.push(
-          ...((plaidRes.transactions || []).map((txn) => {
+          ...(plaidRows.rows.map((txn) => {
             const dateRaw = String(txn.posted_date ?? txn.authorized_date ?? "");
             const dateValue = parseDateLoose(dateRaw);
             return {
@@ -250,6 +254,8 @@ export default function CategoryDrilldownPage() {
               isSpend: isPlaidSpend(txn),
               category: categoryForPlaid(txn, currentRules),
               signature: signatureForParts(txn.merchant_name, txn.name),
+              counted: txn.counted,
+              suspectedDuplicate: txn.suspectedDuplicate,
             };
           }) as CategoryActivityRow[])
         );
@@ -295,7 +301,10 @@ export default function CategoryDrilldownPage() {
   }, [category, monthParam, rows]);
 
   const insights = useMemo(() => {
-    const spend = rowsInCategory.reduce((sum, row) => (row.isSpend ? sum + amountAbs(row.amount) : sum), 0);
+    const spend = rowsInCategory.reduce(
+      (sum, row) => (row.isSpend && !row.suspectedDuplicate ? sum + amountAbs(row.amount) : sum),
+      0
+    );
     const credits = rowsInCategory.reduce((sum, row) => (!row.isSpend ? sum + amountAbs(row.amount) : sum), 0);
     return { spend, credits, count: rowsInCategory.length };
   }, [rowsInCategory]);
@@ -386,7 +395,7 @@ export default function CategoryDrilldownPage() {
                 Money in <span className="font-mono text-zinc-100">${insights.credits.toFixed(2)}</span>
               </div>
               <div className="mt-1 text-xs text-zinc-500">
-                Source-aware view across statements, imported cash, manual activity, and linked activity.
+                Source-aware view across statements, imported cash, manual activity, and linked activity. Suspected duplicate linked rows stay visible for review but are excluded from spend totals.
               </div>
             </div>
           </div>
@@ -503,6 +512,11 @@ export default function CategoryDrilldownPage() {
                               {highlight ? (
                                 <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-zinc-300">
                                   Large
+                                </span>
+                              ) : null}
+                              {row.suspectedDuplicate ? (
+                                <span className="shrink-0 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-200">
+                                  Suspected duplicate
                                 </span>
                               ) : null}
                             </div>

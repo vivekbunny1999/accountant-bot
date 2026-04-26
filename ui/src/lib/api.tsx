@@ -754,6 +754,7 @@ export type PlaidTransactionSummary = {
   account_id?: string | null;
   item_id?: string | null;
   account_name?: string | null;
+  account_mask?: string | null;
   institution_name?: string | null;
   posted_date?: string | null;
   authorized_date?: string | null;
