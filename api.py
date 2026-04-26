@@ -6269,68 +6269,40 @@ def os_next_best_dollar(
     4) If surplus > 0 => recommend extra payment to highest APR debt (avalanche)
     """
     user_id = _coerce_user_id(current_user, user_id)
-    settings = _user_settings_payload(db, user_id)
     source_counts = _financial_os_source_counts(db, user_id)
     data_status = _financial_os_data_status(source_counts)
-    minimum_extra_payment = _to_float(
-        _settings_value(settings, ["financialOS", "debt", "minExtraPayment"], 0.0),
-        0.0,
-    )
     cash_total = _cash_total_latest(db, user_id)
     items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
     cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
     upcoming_summary = _summarize_upcoming_items(items)
+    financial_os_v2 = _compute_financial_os_v2(db, user_id, window_days=window_days)
 
-    sts_today = None if cash_total is None or upcoming_total is None else round(float(cash_total) - float(upcoming_total), 2)
-    available_sts = round(max(_to_float(sts_today, 0.0), 0.0), 2) if sts_today is not None else None
+    sts_today = round(_to_float(financial_os_v2.get("current_period_safe_to_spend"), 0.0), 2)
+    available_sts = round(_to_float(financial_os_v2.get("current_period_safe_to_spend"), 0.0), 2)
     breakdown = _build_financial_os_breakdown(
         cash_total=_to_float(cash_total, 0.0),
         cash_sources=cash_sources,
         upcoming_summary=upcoming_summary,
         upcoming_total=_to_float(upcoming_total, 0.0),
         buffer=buffer,
-        final_safe_to_spend=_to_float(sts_today, 0.0),
+        final_safe_to_spend=sts_today,
     )
 
-    # determine stage quickly
-    stage = "Unknown" if sts_today is None else ("Stabilize" if sts_today < 0 else "Attack Debt")
-
-    # IMPORTANT FIX:
-    # Treat active=NULL as active (common when rows were inserted before defaults were set)
-    debts = _active_debt_rows(db, user_id)
-
-    # pick target debt = highest APR among debts with balance>0
-    target = None
-    for d in debts:
-        bal = _to_float(d.balance, 0.0)
-        if bal <= 0:
-            continue
-
-        apr = d.apr if d.apr is not None else -1.0
-
-        if target is None:
-            target = d
-        else:
-            tapr = target.apr if target.apr is not None else -1.0
-            if apr > tapr:
-                target = d
-
+    stage = _financial_os_v2_stage(financial_os_v2)
     rec = None
-    extra_details = _recommended_extra_payment_details(
-        available_sts=_to_float(available_sts, 0.0),
-        debt_balance=_to_float(getattr(target, "balance", None), 0.0) if target else 0.0,
-        minimum_extra_payment=minimum_extra_payment,
-    )
-    if target and extra_details["recommended_extra_payment"] > 0:
-        rec = {
-            "debt_id": target.id,
-            "name": target.name,
-            "last4": target.last4,
-            "apr": target.apr,
-            "available_sts": extra_details["available_sts"],
-            "recommended_extra_payment": extra_details["recommended_extra_payment"],
-            "why": "Highest APR debt first (avalanche) after covering upcoming obligations. Recommendation is capped so it stays realistic month to month.",
-        }
+    target_debt_id = ((financial_os_v2.get("debt_payoff_projection") or {}).get("target_debt_id"))
+    for item in (financial_os_v2.get("debt_payoff_projection") or {}).get("debts") or []:
+        if target_debt_id and item.get("debt_id") == target_debt_id and _to_float(item.get("recommended_extra_payment"), 0.0) > 0:
+            rec = {
+                "debt_id": item.get("debt_id"),
+                "name": item.get("name"),
+                "last4": None,
+                "apr": item.get("apr"),
+                "available_sts": available_sts,
+                "recommended_extra_payment": round(_to_float(item.get("recommended_extra_payment"), 0.0), 2),
+                "why": "Highest APR debt first after due-soon obligations, runway, and the discretionary cap are protected.",
+            }
+            break
 
     return {
         "ok": True,
@@ -6339,7 +6311,7 @@ def os_next_best_dollar(
         "buffer": round(float(buffer), 2),
         "cash_total": round(float(cash_total), 2) if cash_total is not None else None,
         "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
-        "safe_to_spend_today": round(float(sts_today), 2) if sts_today is not None else None,
+        "safe_to_spend_today": sts_today,
         "available_sts": available_sts,
         "stage": stage,
         "upcoming_items": items,
@@ -6348,14 +6320,15 @@ def os_next_best_dollar(
         "data_status": data_status,
         "upcoming_summary": upcoming_summary,
         "breakdown": breakdown,
+        "financial_os_v2": financial_os_v2,
         "calculation": {
-            "formula": "safe_to_spend_today = cash_total - upcoming_total; buffer is returned separately for UI/context and does not reduce the OS value.",
+            "formula": "safe_to_spend_today now comes from Financial OS V2 and is capped by protected reserves plus the remaining discretionary plan.",
             "cash_total": round(float(cash_total), 2) if cash_total is not None else None,
             "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
             "buffer": round(float(buffer), 2),
-            "safe_to_spend_today": round(float(sts_today), 2) if sts_today is not None else None,
+            "safe_to_spend_today": sts_today,
             "available_sts": available_sts,
-            "recommended_extra_payment": extra_details["recommended_extra_payment"],
+            "recommended_extra_payment": round(_to_float((rec or {}).get("recommended_extra_payment"), 0.0), 2),
         },
         "recommendation": rec,
     }
@@ -6376,6 +6349,7 @@ def os_state(
     data_status = _financial_os_data_status(source_counts)
     cash_total = _cash_total_latest(db, user_id)
     upcoming_items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
+    financial_os_v2 = _compute_financial_os_v2(db, user_id, window_days=window_days)
 
     bills_total, debt_mins_total, essentials_total = _sum_essentials_monthly(db, user_id)
 
@@ -6397,6 +6371,7 @@ def os_state(
         "upcoming_items": upcoming_items,
         "upcoming_summary": upcoming_summary,
         "manual_bills": manual_bills_list,
+        "financial_os_v2": financial_os_v2,
         "essentials_cap_monthly": {
             "essentials_bills_total": bills_total,
             "debt_minimums_total": debt_mins_total,
@@ -6405,9 +6380,32 @@ def os_state(
         "calculation": {
             "cash_total": round(float(cash_total), 2) if cash_total is not None else None,
             "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
-            "safe_to_spend_formula": "Use /os/next-best-dollar to derive safe_to_spend_today directly from cash_total and upcoming_total.",
+            "safe_to_spend_formula": "Use financial_os_v2.current_period_safe_to_spend for the reserve-aware discretionary allowance.",
         },
         "debt_utilization": util,
+    }
+
+
+@app.get("/os/v2/state")
+def os_v2_state(
+    user_id: Optional[str] = None,
+    window_days: int = 21,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
+    source_counts = _financial_os_source_counts(db, user_id)
+    data_status = _financial_os_data_status(source_counts)
+    upcoming_items, upcoming_total = _upcoming_window_items(db, user_id, days=window_days)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "window_days": window_days,
+        "upcoming_total": round(float(upcoming_total), 2) if upcoming_total is not None else None,
+        "upcoming_items": upcoming_items,
+        "source_counts": source_counts,
+        "data_status": data_status,
+        "financial_os_v2": _compute_financial_os_v2(db, user_id, window_days=window_days),
     }
 
 
@@ -6425,6 +6423,721 @@ def _goal_value(goals: dict, key: str, default: Optional[float] = None) -> Optio
     if value <= 0:
         return default
     return value
+
+
+ESSENTIAL_SPEND_CATEGORIES = {
+    "Housing",
+    "Utilities",
+    "Groceries",
+    "Fuel",
+    "Transport",
+    "Insurance",
+    "Medical",
+    "Kids/Family",
+    "Education",
+    "Taxes",
+    "Loan",
+}
+
+DISCRETIONARY_SPEND_CATEGORIES = {
+    "Dining",
+    "Subscriptions",
+    "Shopping",
+    "Entertainment",
+    "Travel",
+    "Personal Care",
+    "Gifts/Donations",
+    "Other",
+}
+
+
+def _monthly_equivalent_amount(amount: float, frequency: Optional[str], include_one_time: bool = False) -> float:
+    amt = _to_float(amount, 0.0)
+    freq = (frequency or "monthly").strip().lower()
+    if freq == "weekly":
+        return amt * (52.0 / 12.0)
+    if freq == "biweekly":
+        return amt * (26.0 / 12.0)
+    if freq == "monthly":
+        return amt
+    if freq == "quarterly":
+        return amt * (4.0 / 12.0)
+    if freq in {"yearly", "annual"}:
+        return amt / 12.0
+    if freq in {"one_time", "once"}:
+        return (amt / 12.0) if include_one_time else 0.0
+    return amt
+
+
+def _profile_monthly_essentials_baseline(db: Session, user_id: str) -> float:
+    profile = db.query(Profile).filter(Profile.user_id == user_id).order_by(Profile.updated_at.desc(), Profile.id.desc()).first()
+    if not profile:
+        return 0.0
+    return round(
+        _to_float(profile.rent_monthly, 0.0)
+        + _to_float(profile.car_loan_monthly, 0.0)
+        + _to_float(profile.utilities_monthly, 0.0)
+        + (_to_float(profile.fuel_weekly, 0.0) * (52.0 / 12.0)),
+        2,
+    )
+
+
+def _registry_monthly_cash_flow_baseline(db: Session, user_id: str) -> dict:
+    essential_total = 0.0
+    discretionary_total = 0.0
+
+    bills = db.query(Bill).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill)).all()
+    for bill in bills:
+        amount = _monthly_equivalent_amount(_to_float(bill.amount, 0.0), getattr(bill, "frequency", None))
+        category = (getattr(bill, "category", None) or "").strip().lower()
+        is_discretionary = category == "discretionary" or getattr(bill, "essentials", True) is False
+        if is_discretionary:
+            discretionary_total += amount
+        else:
+            essential_total += amount
+
+    manual_bills = db.query(ManualBill).filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill)).all()
+    for manual_bill in manual_bills:
+        amount = _monthly_equivalent_amount(
+            _to_float(manual_bill.amount, 0.0),
+            getattr(manual_bill, "frequency", None),
+        )
+        category = (getattr(manual_bill, "category", None) or "Essentials").strip().lower()
+        if category == "discretionary":
+            discretionary_total += amount
+        else:
+            essential_total += amount
+
+    debt_minimums_monthly = round(
+        sum(
+            _to_float(getattr(debt, "minimum_due", None), 0.0)
+            for debt in _active_debt_rows(db, user_id)
+            if _to_float(getattr(debt, "balance", None), 0.0) > 0
+        ),
+        2,
+    )
+
+    return {
+        "essential_monthly": round(essential_total, 2),
+        "discretionary_monthly": round(discretionary_total, 2),
+        "debt_minimums_monthly": debt_minimums_monthly,
+    }
+
+
+def _flatten_spend_rows(source_activity: dict[str, list[dict]]) -> list[dict]:
+    out: list[dict] = []
+    for rows in source_activity.values():
+        out.extend(rows or [])
+    return out
+
+
+def _is_essential_spend_category(category: Optional[str]) -> bool:
+    normalized = _normalize_insight_category(category)
+    return normalized in ESSENTIAL_SPEND_CATEGORIES
+
+
+def _is_discretionary_spend_category(category: Optional[str]) -> bool:
+    normalized = _normalize_insight_category(category)
+    if not normalized:
+        return True
+    if normalized in ESSENTIAL_SPEND_CATEGORIES:
+        return False
+    return normalized in DISCRETIONARY_SPEND_CATEGORIES or normalized not in {"Income", "Debt Payment", "Fees & Interest"}
+
+
+def _month_start_and_end(today: date) -> tuple[date, date]:
+    last_day = monthrange(today.year, today.month)[1]
+    return date(today.year, today.month, 1), date(today.year, today.month, last_day)
+
+
+def _average_monthly_spend(rows: list[dict], *, category_filter) -> float:
+    eligible = []
+    for row in rows:
+        posted = row.get("date")
+        if not isinstance(posted, date):
+            continue
+        if _to_float(row.get("amount"), 0.0) <= 0:
+            continue
+        if not category_filter(row.get("category")):
+            continue
+        eligible.append(row)
+
+    if not eligible:
+        return 0.0
+
+    latest_date = max(row["date"] for row in eligible)
+    window_start = latest_date - timedelta(days=89)
+    monthly_totals: dict[str, float] = defaultdict(float)
+    for row in eligible:
+        posted = row["date"]
+        if posted < window_start or posted > latest_date:
+            continue
+        monthly_totals[_month_key(posted)] += _to_float(row.get("amount"), 0.0)
+
+    if not monthly_totals:
+        return 0.0
+
+    return round(sum(monthly_totals.values()) / len(monthly_totals), 2)
+
+
+def _month_to_date_spend(rows: list[dict], *, today: date, category_filter) -> float:
+    month_start, _ = _month_start_and_end(today)
+    total = 0.0
+    for row in rows:
+        posted = row.get("date")
+        if not isinstance(posted, date):
+            continue
+        if posted < month_start or posted > today:
+            continue
+        if not category_filter(row.get("category")):
+            continue
+        total += _to_float(row.get("amount"), 0.0)
+    return round(total, 2)
+
+
+def _looks_like_income_flow(description: Optional[str], category: Optional[str], txn_type: Optional[str]) -> bool:
+    text = f"{description or ''} {category or ''} {txn_type or ''}".strip().lower()
+    if not text:
+        return False
+    if any(token in text for token in ["transfer", "zelle", "withdrawal from", "withdrawal to", "deposit from 360", "interest paid"]):
+        return False
+    return any(token in text for token in ["payroll", "paycheck", "salary", "direct dep", "direct deposit", "income"])
+
+
+def _income_rows(db: Session, user_id: str) -> list[dict]:
+    out: list[dict] = []
+
+    cash_rows = (
+        db.query(CashTransaction, CashAccount)
+        .join(CashAccount, CashAccount.id == CashTransaction.cash_account_id)
+        .filter(CashAccount.user_id == user_id)
+        .all()
+    )
+    for txn, account in cash_rows:
+        posted = _parse_posted_date(getattr(txn, "posted_date", None))
+        amount = _to_float(getattr(txn, "amount", None), 0.0)
+        description = getattr(txn, "description", None)
+        category = getattr(txn, "category", None)
+        txn_type = getattr(txn, "txn_type", None)
+        if not posted or amount <= 0:
+            continue
+        if not _looks_like_income_flow(description, category, txn_type):
+            continue
+        out.append({
+            "date": posted,
+            "amount": round(amount, 2),
+            "source": getattr(account, "account_name", None) or getattr(account, "account_label", None) or "Cash",
+        })
+
+    manual_rows = db.query(ManualTransaction).filter(ManualTransaction.user_id == user_id).all()
+    for txn in manual_rows:
+        posted = _iso_to_date(getattr(txn, "date", None))
+        amount = _to_float(getattr(txn, "amount", None), 0.0)
+        if not posted or amount >= 0:
+            continue
+        out.append({
+            "date": posted,
+            "amount": round(abs(amount), 2),
+            "source": "Manual",
+        })
+
+    plaid_rows = (
+        db.query(PlaidTransaction, PlaidAccount, PlaidItem)
+        .join(PlaidAccount, PlaidTransaction.plaid_account_id == PlaidAccount.id)
+        .join(PlaidItem, PlaidTransaction.plaid_item_id == PlaidItem.id)
+        .filter(
+            PlaidTransaction.user_id == user_id,
+            PlaidAccount.user_id == user_id,
+            PlaidItem.user_id == user_id,
+            or_(PlaidItem.status != "superseded", PlaidItem.status.is_(None)),
+            or_(PlaidAccount.sync_status != "superseded", PlaidAccount.sync_status.is_(None)),
+        )
+        .all()
+    )
+    for txn, account, item in plaid_rows:
+        posted = _iso_to_date(getattr(txn, "posted_date", None))
+        amount = _to_float(getattr(txn, "amount", None), 0.0)
+        merchant = getattr(txn, "merchant_name", None) or getattr(txn, "name", None)
+        if not posted or amount <= 0 or getattr(txn, "pending", False):
+            continue
+        if not _looks_like_income_flow(merchant, getattr(txn, "category_primary", None), None):
+            continue
+        out.append({
+            "date": posted,
+            "amount": round(amount, 2),
+            "source": getattr(account, "name", None) or getattr(item, "institution_name", None) or "Plaid",
+        })
+
+    return out
+
+
+def _estimate_monthly_income_baseline(db: Session, user_id: str) -> Optional[float]:
+    rows = _income_rows(db, user_id)
+    if not rows:
+        return None
+
+    latest_date = max(row["date"] for row in rows)
+    window_start = latest_date - timedelta(days=89)
+    monthly_totals: dict[str, float] = defaultdict(float)
+    for row in rows:
+        posted = row["date"]
+        if posted < window_start or posted > latest_date:
+            continue
+        monthly_totals[_month_key(posted)] += _to_float(row.get("amount"), 0.0)
+
+    usable = [value for value in monthly_totals.values() if value > 0]
+    if not usable:
+        return None
+    return round(sum(usable) / len(usable), 2)
+
+
+def _resolve_runway_target_months(settings: dict, goals: dict) -> float:
+    goal_value = _goal_value(goals, "runway_target_months", None)
+    if goal_value is not None and goal_value > 0:
+        return round(goal_value, 2)
+
+    settings_candidates = [
+        _settings_value(settings, ["financialOS", "stageTargets", "runwayMonthsSecurityGoal"], None),
+        _settings_value(settings, ["financialOS", "savings", "emergencyFundGoalMonths"], None),
+    ]
+    for candidate in settings_candidates:
+        value = _to_float(candidate, 0.0)
+        if value > 0:
+            return round(value, 2)
+
+    return 3.0
+
+
+def _resolve_monthly_discretionary_cap(
+    *,
+    settings: dict,
+    monthly_income_baseline: Optional[float],
+    discretionary_baseline: float,
+    discretionary_registry_monthly: float,
+) -> dict:
+    explicit_paths = [
+        ["financialOS", "sts", "monthlyDiscretionaryCap"],
+        ["financialOS", "paycheck", "monthlyDiscretionaryCap"],
+        ["financialOS", "spending", "monthlyDiscretionaryCap"],
+    ]
+    for path in explicit_paths:
+        configured = _to_float(_settings_value(settings, path, None), 0.0)
+        if configured > 0:
+            return {
+                "cap": round(configured, 2),
+                "source": ".".join(path),
+            }
+
+    split_mode = str(_settings_value(settings, ["financialOS", "paycheck", "splitMode"], "") or "").strip().lower()
+    spend_pct = None
+    if split_mode == "manualbuckets":
+        spend_pct = _to_float(_settings_value(settings, ["financialOS", "paycheck", "manualBuckets", "spendPct"], None), 0.0)
+    else:
+        spend_pct = _to_float(_settings_value(settings, ["financialOS", "paycheck", "threeCaps", "discretionaryCapPct"], None), 0.0)
+
+    if monthly_income_baseline and spend_pct and spend_pct > 0:
+        return {
+            "cap": round(monthly_income_baseline * (spend_pct / 100.0), 2),
+            "source": f"paycheck_spend_pct_{round(spend_pct, 2)}",
+        }
+
+    derived_baseline = max(_to_float(discretionary_baseline, 0.0), _to_float(discretionary_registry_monthly, 0.0))
+    return {
+        "cap": round(derived_baseline, 2),
+        "source": "recent_discretionary_baseline",
+    }
+
+
+def _project_debt_with_extra(balance: float, apr_pct: Optional[float], minimum_due: float, extra_payment: float) -> dict:
+    baseline = _project_single_debt_payoff(balance, apr_pct, minimum_due)
+    accelerated = _project_single_debt_payoff(balance, apr_pct, minimum_due + max(_to_float(extra_payment, 0.0), 0.0))
+    if not baseline.get("ok"):
+        return {
+            "minimum_only_months": None,
+            "with_extra_months": None,
+            "months_saved": None,
+            "interest_saved": None,
+            "payoff_warning": baseline.get("reason") or "minimum_only_projection_unavailable",
+        }
+    if not accelerated.get("ok"):
+        return {
+            "minimum_only_months": int(baseline["months"]),
+            "with_extra_months": None,
+            "months_saved": None,
+            "interest_saved": None,
+            "payoff_warning": accelerated.get("reason") or "accelerated_projection_unavailable",
+        }
+    return {
+        "minimum_only_months": int(baseline["months"]),
+        "with_extra_months": int(accelerated["months"]),
+        "months_saved": max(0, int(baseline["months"]) - int(accelerated["months"])),
+        "interest_saved": round(max(0.0, _to_float(baseline.get("interest_paid"), 0.0) - _to_float(accelerated.get("interest_paid"), 0.0)), 2),
+        "payoff_warning": None,
+    }
+
+
+def _build_debt_payoff_projection(
+    *,
+    debts: list,
+    target_debt_id: Optional[int],
+    recurring_extra_payment: float,
+) -> dict:
+    projection_items = []
+    for debt in debts:
+        balance = round(max(_to_float(getattr(debt, "balance", None), 0.0), 0.0), 2)
+        minimum_due = round(max(_to_float(getattr(debt, "minimum_due", None), 0.0), 0.0), 2)
+        apr = getattr(debt, "apr", None)
+        recommended_extra = round(recurring_extra_payment, 2) if target_debt_id and debt.id == target_debt_id else 0.0
+        if balance <= 0:
+            payoff = {
+                "minimum_only_months": 0,
+                "with_extra_months": 0,
+                "months_saved": 0,
+                "interest_saved": 0.0,
+                "payoff_warning": None,
+            }
+        elif minimum_due <= 0:
+            payoff = {
+                "minimum_only_months": None,
+                "with_extra_months": None,
+                "months_saved": None,
+                "interest_saved": None,
+                "payoff_warning": "missing_minimum_due",
+            }
+        else:
+            payoff = _project_debt_with_extra(balance, apr, minimum_due, recommended_extra)
+
+        projection_items.append({
+            "debt_id": debt.id,
+            "name": debt.name,
+            "balance": balance,
+            "apr": round(_to_float(apr, 0.0), 2) if apr is not None else None,
+            "minimum_due": minimum_due,
+            "recommended_extra_payment": recommended_extra,
+            **payoff,
+        })
+
+    portfolio = _project_portfolio_debt_free(debts, recurring_extra_payment=recurring_extra_payment)
+    return {
+        "strategy": "avalanche",
+        "recurring_extra_payment": round(max(_to_float(recurring_extra_payment, 0.0), 0.0), 2),
+        "target_debt_id": target_debt_id,
+        "debts": projection_items,
+        "portfolio_months_with_extra": int(portfolio["months"]) if portfolio.get("ok") else None,
+        "portfolio_interest_with_extra": round(_to_float(portfolio.get("interest_paid"), 0.0), 2) if portfolio.get("ok") else None,
+        "portfolio_warning": None if portfolio.get("ok") else portfolio.get("reason"),
+    }
+
+
+def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
+    as_of_date = snapshot.get("as_of_date") or date.today()
+    if not isinstance(as_of_date, date):
+        as_of_date = date.today()
+
+    total_cash = round(max(_to_float(snapshot.get("total_cash"), 0.0), 0.0), 2)
+    upcoming_obligations = round(max(_to_float(snapshot.get("upcoming_obligations"), 0.0), 0.0), 2)
+    debt_minimums = round(max(_to_float(snapshot.get("debt_minimums"), 0.0), 0.0), 2)
+    monthly_essentials = round(max(_to_float(snapshot.get("monthly_essentials"), 0.0), 0.0), 2)
+    runway_target_months = round(max(_to_float(snapshot.get("runway_target_months"), 3.0), 0.0), 2) or 3.0
+    runway_reserve_target = round(monthly_essentials * runway_target_months, 2)
+    monthly_discretionary_cap = round(max(_to_float(snapshot.get("monthly_discretionary_cap"), 0.0), 0.0), 2)
+    discretionary_spend_month_to_date = round(max(_to_float(snapshot.get("discretionary_spend_month_to_date"), 0.0), 0.0), 2)
+    planned_monthly_discretionary_baseline = round(
+        max(
+            _to_float(snapshot.get("planned_monthly_discretionary_baseline"), 0.0),
+            monthly_discretionary_cap,
+        ),
+        2,
+    )
+    monthly_income_baseline = snapshot.get("monthly_income_baseline")
+    if monthly_income_baseline is not None:
+        monthly_income_baseline = round(max(_to_float(monthly_income_baseline, 0.0), 0.0), 2)
+
+    month_start, month_end = _month_start_and_end(as_of_date)
+    days_remaining_in_month = max((month_end - as_of_date).days + 1, 1)
+    period_days = max(1, min(int(snapshot.get("window_days") or 7), days_remaining_in_month))
+
+    cash_after_due_soon = round(max(total_cash - upcoming_obligations - debt_minimums, 0.0), 2)
+    runway_reserve_current = round(min(cash_after_due_soon, runway_reserve_target), 2)
+    runway_gap = round(max(runway_reserve_target - runway_reserve_current, 0.0), 2)
+
+    high_apr_threshold = round(max(_to_float(snapshot.get("high_apr_threshold"), 18.0), 0.0), 2) or 18.0
+    debts = snapshot.get("debts") or []
+    active_debts = [debt for debt in debts if _to_float(getattr(debt, "balance", None), 0.0) > 0]
+    priority_debt = _priority_debt_for_intelligence(active_debts)
+    high_apr_debt = None
+    if priority_debt and _to_float(getattr(priority_debt, "apr", None), 0.0) >= high_apr_threshold:
+        high_apr_debt = priority_debt
+
+    fi_target = _to_float(snapshot.get("fi_target"), 0.0)
+    if fi_target <= 0:
+        fi_target = round((monthly_essentials + planned_monthly_discretionary_baseline) * 12.0 * 25.0, 2)
+    fi_progress_amount = round(max(_to_float(snapshot.get("fi_progress_amount"), total_cash), 0.0), 2)
+    fi_progress_percent = round((_clamp01(fi_progress_amount / max(fi_target, 1.0)) * 100.0), 2) if fi_target > 0 else 0.0
+
+    monthly_repeatable_surplus = None
+    if monthly_income_baseline is not None:
+        monthly_repeatable_surplus = round(
+            max(
+                monthly_income_baseline - monthly_essentials - debt_minimums - planned_monthly_discretionary_baseline,
+                0.0,
+            ),
+            2,
+        )
+
+    runway_funded = runway_gap <= 0.01
+    obligations_funded = total_cash >= round(upcoming_obligations + debt_minimums, 2)
+
+    monthly_fi_contribution_recommendation = 0.0
+    if obligations_funded and runway_funded and not high_apr_debt and monthly_repeatable_surplus is not None and monthly_repeatable_surplus > 0:
+        savings_target = round(max(_to_float(snapshot.get("savings_monthly_target"), 0.0), 0.0), 2)
+        if savings_target > 0:
+            monthly_fi_contribution_recommendation = round(min(savings_target, monthly_repeatable_surplus), 2)
+        else:
+            monthly_fi_contribution_recommendation = monthly_repeatable_surplus
+
+    minimum_extra_payment_setting = round(max(_to_float(snapshot.get("minimum_extra_payment_setting"), 0.0), 0.0), 2)
+    recurring_extra_payment = 0.0
+    if obligations_funded and runway_funded and high_apr_debt and monthly_repeatable_surplus is not None and monthly_repeatable_surplus > 0:
+        recurring_extra_payment = round(min(monthly_repeatable_surplus, _to_float(getattr(high_apr_debt, "balance", None), 0.0), 500.0), 2)
+        if minimum_extra_payment_setting > 0 and monthly_repeatable_surplus >= minimum_extra_payment_setting:
+            recurring_extra_payment = round(max(recurring_extra_payment, min(minimum_extra_payment_setting, 500.0, _to_float(getattr(high_apr_debt, "balance", None), 0.0))), 2)
+
+    savings_goal_cash = 0.0
+    if monthly_fi_contribution_recommendation > 0:
+        cash_after_runway = round(max(cash_after_due_soon - runway_reserve_current, 0.0), 2)
+        savings_goal_cash = round(min(cash_after_runway, monthly_fi_contribution_recommendation), 2)
+
+    protected_cash = round(upcoming_obligations + debt_minimums + runway_reserve_current + savings_goal_cash, 2)
+    available_discretionary_cash = round(max(total_cash - protected_cash, 0.0), 2)
+
+    remaining_discretionary_this_month = round(max(monthly_discretionary_cap - discretionary_spend_month_to_date, 0.0), 2)
+    remaining_discretionary_this_period = round(
+        remaining_discretionary_this_month if days_remaining_in_month <= 0 else (remaining_discretionary_this_month * (period_days / days_remaining_in_month)),
+        2,
+    )
+    weekly_discretionary_allowance = round(
+        remaining_discretionary_this_month if days_remaining_in_month <= 0 else (remaining_discretionary_this_month * (min(7, days_remaining_in_month) / days_remaining_in_month)),
+        2,
+    )
+
+    weekly_safe_to_spend = round(
+        min(weekly_discretionary_allowance, available_discretionary_cash, remaining_discretionary_this_month),
+        2,
+    )
+    current_period_safe_to_spend = round(
+        min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month),
+        2,
+    )
+
+    if monthly_fi_contribution_recommendation > 0 and fi_target > fi_progress_amount:
+        years_to_fi = round((fi_target - fi_progress_amount) / (monthly_fi_contribution_recommendation * 12.0), 1)
+    else:
+        years_to_fi = None
+
+    if not obligations_funded:
+        next_best_action = {
+            "priority": "protect_due_soon",
+            "action": "Protect cash for upcoming bills and debt minimums.",
+            "amount": round(max((upcoming_obligations + debt_minimums) - total_cash, 0.0), 2),
+            "reason": "Upcoming obligations and debt minimums are not fully covered yet.",
+        }
+    elif not runway_funded:
+        next_best_action = {
+            "priority": "build_runway",
+            "action": "Keep cash reserved to build runway.",
+            "amount": runway_gap,
+            "reason": f"Runway is below the {runway_target_months:.1f}-month target.",
+        }
+    elif high_apr_debt and recurring_extra_payment > 0:
+        next_best_action = {
+            "priority": "pay_high_apr_debt",
+            "action": f"Send the next extra dollar to {high_apr_debt.name}.",
+            "amount": recurring_extra_payment,
+            "reason": f"{high_apr_debt.name} carries the highest APR at {_to_float(getattr(high_apr_debt, 'apr', None), 0.0):.2f}%.",
+            "debt_id": high_apr_debt.id,
+        }
+    elif monthly_fi_contribution_recommendation > 0:
+        next_best_action = {
+            "priority": "fund_fi",
+            "action": "Move the next planned surplus into FI/savings.",
+            "amount": monthly_fi_contribution_recommendation,
+            "reason": "Runway is funded and there is no high-APR debt blocking savings progress.",
+        }
+    elif current_period_safe_to_spend > 0:
+        next_best_action = {
+            "priority": "discretionary",
+            "action": "Discretionary spending is allowed inside the current period cap.",
+            "amount": current_period_safe_to_spend,
+            "reason": "Protected reserves are funded and the spending plan still has room left this period.",
+        }
+    else:
+        next_best_action = {
+            "priority": "hold_cash",
+            "action": "Hold cash until a clearer surplus or spending plan appears.",
+            "amount": 0.0,
+            "reason": "There is no reserve-supported discretionary room right now.",
+        }
+
+    debt_payoff_projection = _build_debt_payoff_projection(
+        debts=active_debts,
+        target_debt_id=high_apr_debt.id if high_apr_debt and recurring_extra_payment > 0 else None,
+        recurring_extra_payment=recurring_extra_payment,
+    )
+
+    return {
+        "as_of_date": as_of_date.isoformat(),
+        "window_days": int(snapshot.get("window_days") or 7),
+        "monthly_essentials": monthly_essentials,
+        "planned_monthly_discretionary_baseline": planned_monthly_discretionary_baseline,
+        "monthly_income_baseline": monthly_income_baseline,
+        "total_cash": total_cash,
+        "protected_cash": protected_cash,
+        "protected_runway_cash": runway_reserve_current,
+        "upcoming_obligations_cash": upcoming_obligations,
+        "debt_minimums_cash": debt_minimums,
+        "savings_goal_cash": savings_goal_cash,
+        "available_discretionary_cash": available_discretionary_cash,
+        "runway_reserve_target": runway_reserve_target,
+        "runway_reserve_current": runway_reserve_current,
+        "runway_reserve_gap": runway_gap,
+        "runway_target_months": runway_target_months,
+        "upcoming_obligations": upcoming_obligations,
+        "debt_minimums": debt_minimums,
+        "monthly_discretionary_cap": monthly_discretionary_cap,
+        "discretionary_spend_month_to_date": discretionary_spend_month_to_date,
+        "remaining_discretionary_this_month": remaining_discretionary_this_month,
+        "weekly_safe_to_spend": weekly_safe_to_spend,
+        "current_period_safe_to_spend": current_period_safe_to_spend,
+        "fi_target": round(fi_target, 2),
+        "fi_progress_amount": fi_progress_amount,
+        "fi_progress_percent": fi_progress_percent,
+        "monthly_fi_contribution_recommendation": monthly_fi_contribution_recommendation,
+        "years_to_fi": years_to_fi,
+        "next_best_action": next_best_action,
+        "debt_payoff_projection": debt_payoff_projection,
+        "formula_notes": {
+            "runway": "runway_reserve_target = monthly_essentials * runway_target_months; runway is protected after due-soon obligations and debt minimums.",
+            "sts": "current_period_safe_to_spend = min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month).",
+            "weekly_sts": "weekly_safe_to_spend = min(weekly_discretionary_allowance, available_discretionary_cash, remaining_discretionary_this_month).",
+            "fi_target": "fi_target = configured goal or ((monthly_essentials + planned_monthly_discretionary_baseline) * 12 * 25).",
+            "fi_years": "years_to_fi uses a conservative no-growth estimate and is null when there is no known monthly FI contribution.",
+        },
+    }
+
+
+def _compute_financial_os_v2(
+    db: Session,
+    user_id: str,
+    *,
+    window_days: int = 21,
+    today: Optional[date] = None,
+) -> dict:
+    today = today or date.today()
+    settings = _user_settings_payload(db, user_id)
+    goals = _goal_value_map(db, user_id)
+    source_activity, _ = _collect_spending_activity_by_source(db, user_id)
+    spend_rows = _flatten_spend_rows(source_activity)
+    monthly_income_baseline = _estimate_monthly_income_baseline(db, user_id)
+    registry_baseline = _registry_monthly_cash_flow_baseline(db, user_id)
+    profile_essentials = _profile_monthly_essentials_baseline(db, user_id)
+    avg_essential_spend = _average_monthly_spend(spend_rows, category_filter=_is_essential_spend_category)
+    avg_discretionary_spend = _average_monthly_spend(spend_rows, category_filter=_is_discretionary_spend_category)
+    discretionary_spend_month_to_date = _month_to_date_spend(
+        spend_rows,
+        today=today,
+        category_filter=_is_discretionary_spend_category,
+    )
+    monthly_essentials = round(
+        max(
+            registry_baseline["essential_monthly"],
+            profile_essentials,
+            avg_essential_spend,
+        ),
+        2,
+    )
+    cap_details = _resolve_monthly_discretionary_cap(
+        settings=settings,
+        monthly_income_baseline=monthly_income_baseline,
+        discretionary_baseline=avg_discretionary_spend,
+        discretionary_registry_monthly=registry_baseline["discretionary_monthly"],
+    )
+    planned_monthly_discretionary_baseline = round(
+        max(
+            cap_details["cap"],
+            avg_discretionary_spend,
+            registry_baseline["discretionary_monthly"],
+        ),
+        2,
+    )
+    upcoming_items, _ = _upcoming_window_items(db, user_id, days=window_days)
+    upcoming_summary = _summarize_upcoming_items(upcoming_items)
+    upcoming_obligations = round(
+        _to_float(upcoming_summary.get("bill_total"), 0.0) + _to_float(upcoming_summary.get("manual_bill_total"), 0.0),
+        2,
+    )
+    upcoming_debt_minimums = round(_to_float(upcoming_summary.get("debt_minimum_total"), 0.0), 2)
+    debts = _active_debts_for_intelligence(db, user_id)
+    debt_snapshot = _debt_totals_snapshot(debts)
+    fi_target = _goal_value(goals, "fi_target", None)
+    high_apr_threshold = _to_float(
+        _settings_value(settings, ["financialOS", "stageTargets", "debtCostRateHighPct"], 18.0),
+        18.0,
+    )
+    profile = db.query(Profile).filter(Profile.user_id == user_id).order_by(Profile.updated_at.desc(), Profile.id.desc()).first()
+    snapshot = {
+        "as_of_date": today,
+        "window_days": window_days,
+        "total_cash": _cash_total_latest(db, user_id),
+        "upcoming_obligations": upcoming_obligations,
+        "debt_minimums": upcoming_debt_minimums,
+        "monthly_essentials": monthly_essentials,
+        "runway_target_months": _resolve_runway_target_months(settings, goals),
+        "monthly_discretionary_cap": cap_details["cap"],
+        "discretionary_spend_month_to_date": discretionary_spend_month_to_date,
+        "planned_monthly_discretionary_baseline": planned_monthly_discretionary_baseline,
+        "monthly_income_baseline": monthly_income_baseline,
+        "savings_monthly_target": _to_float(getattr(profile, "savings_monthly_target", None), 0.0) if profile else 0.0,
+        "fi_target": fi_target,
+        "fi_progress_amount": _cash_total_latest(db, user_id),
+        "high_apr_threshold": high_apr_threshold,
+        "debts": debts,
+        "minimum_extra_payment_setting": _to_float(_settings_value(settings, ["financialOS", "debt", "minExtraPayment"], 0.0), 0.0),
+    }
+    result = _build_financial_os_v2_from_snapshot(snapshot)
+    result["inputs"] = {
+        "monthly_essentials_sources": {
+            "registry_essentials_monthly": registry_baseline["essential_monthly"],
+            "profile_essentials_monthly": profile_essentials,
+            "avg_essential_spend_monthly": avg_essential_spend,
+            "selected_monthly_essentials": monthly_essentials,
+        },
+        "monthly_discretionary_sources": {
+            "cap_source": cap_details["source"],
+            "avg_discretionary_spend_monthly": avg_discretionary_spend,
+            "registry_discretionary_monthly": registry_baseline["discretionary_monthly"],
+            "planned_monthly_discretionary_baseline": planned_monthly_discretionary_baseline,
+        },
+        "monthly_debt_minimums_total": registry_baseline["debt_minimums_monthly"],
+        "upcoming_summary": upcoming_summary,
+        "debt_total_balance": debt_snapshot["total_balance"],
+        "weighted_apr": debt_snapshot["weighted_apr"],
+        "high_apr_threshold": high_apr_threshold,
+    }
+    return result
+
+
+def _financial_os_v2_stage(financial_os_v2: dict) -> str:
+    priority = str(((financial_os_v2 or {}).get("next_best_action") or {}).get("priority") or "").strip().lower()
+    if priority in {"protect_due_soon", "build_runway", "hold_cash"}:
+        return "Stabilize"
+    if priority == "pay_high_apr_debt":
+        return "Attack Debt"
+    if priority == "fund_fi":
+        return "Build Wealth"
+    if priority == "discretionary":
+        return "Build Security"
+    return "Unknown"
 
 
 def _clamp01(value: float) -> float:
@@ -7562,50 +8275,43 @@ def os_intelligence(
     goals = _goal_value_map(db, user_id)
     debts = _active_debts_for_intelligence(db, user_id)
     debt_snapshot = _debt_totals_snapshot(debts)
+    financial_os_v2 = _compute_financial_os_v2(db, user_id, window_days=window_days)
 
-    safe_to_spend = round(float(cash_total) - float(upcoming_total) - float(buffer), 2)
-    runway_target_months = _goal_value(goals, "runway_target_months", 3.0) or 3.0
+    safe_to_spend = round(_to_float(financial_os_v2.get("current_period_safe_to_spend"), 0.0), 2)
+    runway_target_months = round(_to_float(financial_os_v2.get("runway_target_months"), 3.0), 2) or 3.0
     runway_months = None
-    if essentials_total > 0:
-        runway_months = round(cash_total / essentials_total, 1)
+    v2_monthly_essentials = round(_to_float(financial_os_v2.get("monthly_essentials"), essentials_total), 2)
+    if v2_monthly_essentials > 0:
+        runway_months = round(_to_float(financial_os_v2.get("runway_reserve_current"), 0.0) / v2_monthly_essentials, 1)
 
-    emergency_target_amount = _goal_value(goals, "emergency_fund_target", None)
-    if emergency_target_amount is None:
-        emergency_target_amount = round(essentials_total * runway_target_months, 2) if essentials_total > 0 else max(cash_total, 0.0)
-
-    fi_cash_target = _goal_value(goals, "fi_target", None)
-    if fi_cash_target is None or fi_cash_target <= 0:
-        fi_cash_target = emergency_target_amount
-        fi_target_label = "Emergency fund target"
-    else:
-        fi_target_label = "Configured FI cash target"
+    emergency_target_amount = round(_to_float(financial_os_v2.get("runway_reserve_target"), 0.0), 2)
+    fi_cash_target = round(_to_float(financial_os_v2.get("fi_target"), 0.0), 2)
+    fi_target_label = "Configured FI cash target" if _goal_value(goals, "fi_target", None) else "Derived FI cash target"
 
     non_debt_upcoming_total = round(
-        _to_float(upcoming_summary.get("bill_total"), 0.0) + _to_float(upcoming_summary.get("manual_bill_total"), 0.0),
+        _to_float(financial_os_v2.get("upcoming_obligations"), 0.0),
         2,
     )
-    upcoming_debt_minimum_total = round(_to_float(upcoming_summary.get("debt_minimum_total"), 0.0), 2)
-    available_for_minimums = round(max(cash_total - non_debt_upcoming_total - buffer, 0.0), 2)
+    upcoming_debt_minimum_total = round(_to_float(financial_os_v2.get("debt_minimums"), 0.0), 2)
+    available_for_minimums = round(max(_to_float(cash_total, 0.0) - non_debt_upcoming_total, 0.0), 2)
 
     recommendation = None
     priority_debt = _priority_debt_for_intelligence(debts)
-    extra_payment_details = _recommended_extra_payment_details(
-        available_sts=safe_to_spend,
-        debt_balance=_to_float(getattr(priority_debt, "balance", None), 0.0) if priority_debt else 0.0,
-        minimum_extra_payment=minimum_extra_payment,
-    )
-    available_sts = extra_payment_details["available_sts"]
-    recurring_extra_payment = extra_payment_details["recommended_extra_payment"]
-    if priority_debt and recurring_extra_payment > 0:
-        recommendation = {
-            "debt_id": priority_debt.id,
-            "name": priority_debt.name,
-            "last4": priority_debt.last4,
-            "apr": priority_debt.apr,
-            "available_sts": available_sts,
-            "recommended_extra_payment": recurring_extra_payment,
-            "why": "Highest APR debt first (avalanche) after upcoming obligations and buffer are protected. Recommendation is capped so it stays realistic month to month.",
-        }
+    available_sts = safe_to_spend
+    recurring_extra_payment = round(_to_float((financial_os_v2.get("debt_payoff_projection") or {}).get("recurring_extra_payment"), 0.0), 2)
+    target_debt_id = (financial_os_v2.get("debt_payoff_projection") or {}).get("target_debt_id")
+    for projected_debt in (financial_os_v2.get("debt_payoff_projection") or {}).get("debts") or []:
+        if target_debt_id and projected_debt.get("debt_id") == target_debt_id:
+            recommendation = {
+                "debt_id": projected_debt.get("debt_id"),
+                "name": projected_debt.get("name"),
+                "last4": None,
+                "apr": projected_debt.get("apr"),
+                "available_sts": available_sts,
+                "recommended_extra_payment": round(_to_float(projected_debt.get("recommended_extra_payment"), 0.0), 2),
+                "why": "Highest APR debt first after due-soon obligations, runway, and the discretionary cap are protected.",
+            }
+            break
 
     health_components = []
 
@@ -7809,7 +8515,7 @@ def os_intelligence(
 
     fi_components = []
     if fi_cash_target and fi_cash_target > 0:
-        cash_progress = _clamp01(cash_total / fi_cash_target)
+        cash_progress = _clamp01(_to_float(financial_os_v2.get("fi_progress_amount"), cash_total) / fi_cash_target)
         fi_components.append({
             "label": fi_target_label,
             "weight": 40,
@@ -7838,8 +8544,7 @@ def os_intelligence(
         ),
     })
 
-    fi_weight = sum(item["weight"] for item in fi_components)
-    fi_progress_value = _round_clean(sum(item["weight"] * item["progress"] for item in fi_components) / max(fi_weight, 1))
+    fi_progress_value = _round_clean(_to_float(financial_os_v2.get("fi_progress_percent"), 0.0))
 
     impact_payload = {
         "available_sts": available_sts,
@@ -7854,7 +8559,7 @@ def os_intelligence(
         "estimated_interest_saved": None,
         "estimated_months_faster": None,
         "estimated_payoff_months_with_extra": None,
-        "formula": "Compare target debt payoff using minimum only versus minimum plus the capped repeatable extra-payment recommendation each month.",
+        "formula": "Compare minimum-only amortization versus minimum plus the reserve-supported repeatable extra payment each month.",
         "assumptions": [
             "APR and minimum payment stay constant.",
             "Assumes this extra amount can be repeated monthly.",
@@ -7862,28 +8567,18 @@ def os_intelligence(
         "explanation": "No realistic extra debt payment is recommended right now, so the debt-free countdown stays on minimum-only assumptions.",
     }
 
-    if priority_debt and recurring_extra_payment > 0:
-        minimum_due = _to_float(getattr(priority_debt, "minimum_due", None), 0.0)
-        if minimum_due > 0:
-            baseline_projection = _project_single_debt_payoff(priority_debt.balance, priority_debt.apr, minimum_due)
-            accelerated_projection = _project_single_debt_payoff(priority_debt.balance, priority_debt.apr, minimum_due + recurring_extra_payment)
-
-            if baseline_projection.get("ok") and accelerated_projection.get("ok"):
-                interest_saved = max(0.0, baseline_projection["interest_paid"] - accelerated_projection["interest_paid"])
-                months_faster = max(0, int(baseline_projection["months"] - accelerated_projection["months"]))
-                impact_payload.update({
-                    "estimated_interest_saved": round(interest_saved, 2),
-                    "estimated_months_faster": months_faster,
-                    "estimated_payoff_months_with_extra": int(accelerated_projection["months"]),
-                    "explanation": (
-                        f"Keeping the capped extra ${recurring_extra_payment:.0f}/month on {priority_debt.name} is estimated to cut "
-                        f"{months_faster} month(s) and save about ${interest_saved:.0f} on that balance."
-                    ),
-                })
-            else:
-                impact_payload["explanation"] = "The target debt has data on file, but its current minimum payment does not support a reliable payoff projection."
-        else:
-            impact_payload["explanation"] = "Add a minimum payment for the recommended target debt to unlock payoff-impact estimates."
+    for projected_debt in (financial_os_v2.get("debt_payoff_projection") or {}).get("debts") or []:
+        if target_debt_id and projected_debt.get("debt_id") == target_debt_id and recurring_extra_payment > 0:
+            impact_payload.update({
+                "estimated_interest_saved": projected_debt.get("interest_saved"),
+                "estimated_months_faster": projected_debt.get("months_saved"),
+                "estimated_payoff_months_with_extra": projected_debt.get("with_extra_months"),
+                "explanation": (
+                    f"Keeping the extra ${recurring_extra_payment:.0f}/month on {projected_debt.get('name')} is estimated to cut "
+                    f"{_to_float(projected_debt.get('months_saved'), 0.0):.0f} month(s) and save about ${_to_float(projected_debt.get('interest_saved'), 0.0):.0f}."
+                ) if projected_debt.get("with_extra_months") is not None else "The current debt inputs are not strong enough for a reliable accelerated payoff estimate.",
+            })
+            break
 
     coaching_insights = _build_coaching_insights_payload(
         db=db,
@@ -7913,11 +8608,11 @@ def os_intelligence(
         "window_days": window_days,
         "buffer": round(float(buffer), 2),
         "context": {
-            "cash_total": round(float(cash_total), 2),
-            "upcoming_total": round(float(upcoming_total), 2),
+            "cash_total": round(_to_float(cash_total, 0.0), 2),
+            "upcoming_total": round(_to_float(upcoming_total, 0.0), 2),
             "safe_to_spend_today": round(float(safe_to_spend), 2),
             "available_sts": available_sts,
-            "monthly_essentials_total": round(float(essentials_total), 2),
+            "monthly_essentials_total": round(float(v2_monthly_essentials), 2),
             "monthly_essential_bills_total": round(float(bills_total), 2),
             "monthly_debt_minimums_total": round(float(debt_mins_total), 2),
             "runway_months": runway_months,
@@ -7951,4 +8646,5 @@ def os_intelligence(
         "next_best_dollar_impact": impact_payload,
         "recommendation": recommendation,
         "insights": coaching_insights,
+        "financial_os_v2": financial_os_v2,
     }
