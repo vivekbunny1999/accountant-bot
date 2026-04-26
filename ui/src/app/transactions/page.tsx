@@ -19,6 +19,7 @@ import { useAuth } from "@/components/auth/AuthProvider";
 import {
   amountAbs,
   CATEGORY_OPTIONS,
+  classifyPlaidDisplayRows,
   categoryForStatement,
   isManualSpend,
   isPlaidSpend,
@@ -288,7 +289,7 @@ export default function TransactionsPage() {
   }, [rows]);
 
   const plaidSectionRows = useMemo(
-    () => plaidTransactions.filter((txn) => isPlaidSpend(txn)).slice(0, 10),
+    () => classifyPlaidDisplayRows(plaidTransactions.filter((txn) => isPlaidSpend(txn))),
     [plaidTransactions]
   );
 
@@ -357,7 +358,8 @@ export default function TransactionsPage() {
       return !isCreditLike(row) ? sum + amountAbs(row) : sum;
     }, 0);
 
-    const plaidSpend = plaidSectionRows.reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+    const countedPlaidSpend = plaidSectionRows.countedSpend;
+    const suspectedDuplicatePlaidSpend = plaidSectionRows.suspectedDuplicateSpend;
 
     const manualSpend = manualSectionRows.reduce((sum, row) => {
       return isManualSpend(row) ? sum + amountAbs(row.amount) : sum;
@@ -365,10 +367,12 @@ export default function TransactionsPage() {
 
     return {
       statementSpend,
-      plaidSpend,
+      countedPlaidSpend,
+      suspectedDuplicatePlaidSpend,
       manualSpend,
-      totalVisibleSpend: statementSpend + plaidSpend + manualSpend,
-      plaidRecentRows: plaidSectionRows,
+      totalVisibleSpend: statementSpend + countedPlaidSpend + manualSpend,
+      plaidRecentRows: plaidSectionRows.rows.slice(0, 10),
+      plaidSuspectedDuplicateCount: plaidSectionRows.suspectedDuplicateCount,
     };
   }, [filtered, plaidSectionRows, manualSectionRows]);
 
@@ -589,12 +593,20 @@ export default function TransactionsPage() {
           </div>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-xs text-zinc-400">Plaid spend shown</div>
-            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.plaidSpend)}</div>
+            <div className="text-xs text-zinc-400">Counted Plaid spend</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.countedPlaidSpend)}</div>
             <div className="mt-1 text-xs text-zinc-500">
               {plaidLoading ? "Loading Plaid activity..." : `${sourceSummary.plaidRecentRows.length} rows in the section below`}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-5">
+            <div className="text-xs text-amber-200">Suspected duplicate spend skipped</div>
+            <div className="mt-2 text-2xl font-semibold text-zinc-100">{fmtMoney(sourceSummary.suspectedDuplicatePlaidSpend)}</div>
+            <div className="mt-1 text-xs text-amber-100/80">
+              {sourceSummary.plaidSuspectedDuplicateCount} linked row{sourceSummary.plaidSuspectedDuplicateCount === 1 ? "" : "s"} flagged for review
             </div>
           </div>
 
@@ -628,6 +640,9 @@ export default function TransactionsPage() {
               <div className="mt-1 text-xs text-zinc-400">
                 Dashboard coaching uses linked transactions too, so this page shows recent linked activity without merging imported source tables.
               </div>
+              <div className="mt-2 text-xs text-zinc-500">
+                Suspected duplicate linked rows are hidden from spend totals but kept visible for review.
+              </div>
             </div>
             <div className="text-xs text-zinc-500">Source: Plaid</div>
           </div>
@@ -645,33 +660,55 @@ export default function TransactionsPage() {
                   <th className="py-3 pr-4">date</th>
                   <th className="py-3 pr-4">account</th>
                   <th className="py-3 pr-4">merchant</th>
+                  <th className="py-3 pr-4">status</th>
                   <th className="py-3 pr-0 text-right">amount</th>
                 </tr>
               </thead>
               <tbody className="text-zinc-200">
                 {plaidLoading ? (
                   <tr>
-                    <td colSpan={4} className="py-6 text-zinc-400">
+                    <td colSpan={5} className="py-6 text-zinc-400">
                       Loading Plaid activity...
                     </td>
                   </tr>
                 ) : sourceSummary.plaidRecentRows.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="py-6 text-zinc-400">
+                    <td colSpan={5} className="py-6 text-zinc-400">
                       No recent Plaid spend is visible right now.
                     </td>
                   </tr>
                 ) : (
                   sourceSummary.plaidRecentRows.map((txn) => (
-                    <tr key={txn.transaction_id} className="border-b border-white/5 hover:bg-white/5">
+                    <tr
+                      key={txn.transaction_id}
+                      className={[
+                        "border-b border-white/5 hover:bg-white/5",
+                        txn.suspectedDuplicate ? "bg-amber-500/5" : "",
+                      ].join(" ")}
+                    >
                       <td className="py-3 pr-4 text-zinc-300">
                         {txn.posted_date || txn.authorized_date || "-"}
                       </td>
                       <td className="py-3 pr-4">
                         <div className="text-zinc-100">{txn.account_name || "Plaid account"}</div>
-                        <div className="mt-1 text-xs text-zinc-500">{txn.institution_name || "Linked institution"}</div>
+                        <div className="mt-1 text-xs text-zinc-500">
+                          {txn.institution_name || "Linked institution"}
+                          {txn.account_mask ? ` • ****${txn.account_mask}` : ""}
+                        </div>
                       </td>
                       <td className="py-3 pr-4 text-zinc-300">{txn.merchant_name || txn.name || "-"}</td>
+                      <td className="py-3 pr-4">
+                        <span
+                          className={[
+                            "inline-flex rounded-full border px-2 py-0.5 text-[11px]",
+                            txn.suspectedDuplicate
+                              ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                              : "border-emerald-500/20 bg-emerald-500/10 text-emerald-200",
+                          ].join(" ")}
+                        >
+                          {txn.suspectedDuplicate ? "Suspected duplicate" : "Counted"}
+                        </span>
+                      </td>
                       <td className="py-3 pr-0 text-right font-mono text-zinc-100">
                         {fmtMoney(Number(txn.amount || 0))}
                       </td>

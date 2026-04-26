@@ -1503,7 +1503,12 @@ def _build_financial_os_breakdown(
         "upcoming_total": round(float(upcoming_total), 2),
         "upcoming_bills_total": round(_to_float(upcoming_summary.get("bill_total"), 0.0), 2),
         "manual_obligations_total": round(_to_float(upcoming_summary.get("manual_bill_total"), 0.0), 2),
+        "bills_manual_obligations_total": round(
+            _to_float(upcoming_summary.get("bill_total"), 0.0) + _to_float(upcoming_summary.get("manual_bill_total"), 0.0),
+            2,
+        ),
         "debt_minimums_total": round(_to_float(upcoming_summary.get("debt_minimum_total"), 0.0), 2),
+        "protected_obligations_total": round(float(upcoming_total), 2),
         "buffer": round(float(buffer), 2),
         "final_safe_to_spend": round(float(final_safe_to_spend), 2),
     }
@@ -1651,6 +1656,7 @@ def _serialize_plaid_transaction(row: PlaidTransaction) -> dict:
         "account_id": row.account.plaid_account_id if row.account else None,
         "item_id": row.item.plaid_item_id if row.item else None,
         "account_name": row.account.name if row.account else None,
+        "account_mask": row.account.mask if row.account else None,
         "institution_name": (
             row.account.institution_name
             if row.account and row.account.institution_name
@@ -6726,6 +6732,10 @@ def _resolve_monthly_discretionary_cap(
             return {
                 "cap": round(configured, 2),
                 "source": ".".join(path),
+                "mode": "explicit_monthly_cap",
+                "spend_pct": None,
+                "fallback_baseline": None,
+                "pending_income_cap": False,
             }
 
     split_mode = str(_settings_value(settings, ["financialOS", "paycheck", "splitMode"], "") or "").strip().lower()
@@ -6739,12 +6749,130 @@ def _resolve_monthly_discretionary_cap(
         return {
             "cap": round(monthly_income_baseline * (spend_pct / 100.0), 2),
             "source": f"paycheck_spend_pct_{round(spend_pct, 2)}",
+            "mode": "income_percentage_cap",
+            "spend_pct": round(spend_pct, 2),
+            "fallback_baseline": None,
+            "pending_income_cap": False,
         }
 
     derived_baseline = max(_to_float(discretionary_baseline, 0.0), _to_float(discretionary_registry_monthly, 0.0))
+    if derived_baseline > 0:
+        return {
+            "cap": round(derived_baseline, 2),
+            "source": "recent_discretionary_baseline",
+            "mode": "fallback_recent_discretionary_baseline",
+            "spend_pct": round(spend_pct, 2) if spend_pct and spend_pct > 0 else None,
+            "fallback_baseline": round(derived_baseline, 2),
+            "pending_income_cap": bool(spend_pct and spend_pct > 0 and monthly_income_baseline is None),
+        }
+
     return {
-        "cap": round(derived_baseline, 2),
-        "source": "recent_discretionary_baseline",
+        "cap": 0.0,
+        "source": "missing_discretionary_plan",
+        "mode": "missing_discretionary_plan",
+        "spend_pct": round(spend_pct, 2) if spend_pct and spend_pct > 0 else None,
+        "fallback_baseline": None,
+        "pending_income_cap": bool(spend_pct and spend_pct > 0 and monthly_income_baseline is None),
+    }
+
+
+def _financial_os_setup_reasons(
+    *,
+    monthly_income_baseline: Optional[float],
+    cap_details: dict,
+) -> list[dict]:
+    reasons: list[dict] = []
+
+    if monthly_income_baseline is None:
+        spend_pct = _to_float(cap_details.get("spend_pct"), 0.0)
+        if spend_pct > 0:
+            detail = (
+                f"Discretionary cap is set to {spend_pct:.0f}% in Settings, but there is no monthly income baseline yet "
+                "to turn that percentage into a dollar cap."
+            )
+        else:
+            detail = "No monthly income baseline is available yet, so paycheck-based planning stays incomplete."
+        reasons.append({
+            "code": "missing_monthly_income_baseline",
+            "label": "Monthly income baseline missing",
+            "detail": detail,
+        })
+
+    if str(cap_details.get("mode") or "") == "missing_discretionary_plan":
+        reasons.append({
+            "code": "missing_discretionary_plan",
+            "label": "Discretionary plan missing",
+            "detail": "Set a monthly discretionary cap or build enough recent discretionary history to derive one automatically.",
+        })
+
+    return reasons
+
+
+def _financial_os_sts_reason(
+    *,
+    obligations_funded: bool,
+    runway_funded: bool,
+    setup_required: bool,
+    monthly_discretionary_cap: float,
+    remaining_discretionary_this_month: float,
+    remaining_discretionary_this_period: float,
+    available_discretionary_cash: float,
+    savings_goal_cash: float,
+    current_period_safe_to_spend: float,
+) -> dict:
+    if not obligations_funded:
+        return {
+            "code": "obligations_not_protected",
+            "label": "Obligations not protected",
+            "detail": "Bills/manual obligations and debt minimums are not fully covered yet, so discretionary spending stays blocked.",
+            "state": "blocked",
+        }
+
+    if not runway_funded:
+        return {
+            "code": "runway_reserve_underfunded",
+            "label": "Runway reserve underfunded",
+            "detail": "Cash is being held to build the runway reserve before more discretionary spending is allowed.",
+            "state": "blocked",
+        }
+
+    if setup_required and monthly_discretionary_cap <= 0.01:
+        return {
+            "code": "no_spending_plan_or_income_baseline",
+            "label": "Setup required",
+            "detail": "Final Safe-to-Spend is $0 because there is not enough income/discretionary-plan data to create a usable monthly cap yet.",
+            "state": "setup_required",
+        }
+
+    if remaining_discretionary_this_month <= 0.01 or remaining_discretionary_this_period <= 0.01:
+        return {
+            "code": "discretionary_cap_exhausted",
+            "label": "Discretionary cap exhausted",
+            "detail": "This month's discretionary plan has already been used, so STS stays at $0 until the cap resets or the plan changes.",
+            "state": "blocked",
+        }
+
+    if available_discretionary_cash <= 0.01 and savings_goal_cash > 0.01:
+        return {
+            "code": "fi_cash_protected",
+            "label": "FI cash protected first",
+            "detail": "Runway is funded, but the remaining cash is currently reserved for the planned FI/savings contribution.",
+            "state": "blocked",
+        }
+
+    if current_period_safe_to_spend > 0.01:
+        return {
+            "code": "discretionary_room_available",
+            "label": "Discretionary room available",
+            "detail": "Protected obligations, runway, and planned savings are covered, and the current discretionary plan still has room.",
+            "state": "available",
+        }
+
+    return {
+        "code": "no_reserve_supported_discretionary_room",
+        "label": "No reserve-supported discretionary room",
+        "detail": "There is no protected discretionary room available right now, even though obligations and runway are already covered.",
+        "state": "blocked",
     }
 
 
@@ -6852,6 +6980,12 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
     monthly_income_baseline = snapshot.get("monthly_income_baseline")
     if monthly_income_baseline is not None:
         monthly_income_baseline = round(max(_to_float(monthly_income_baseline, 0.0), 0.0), 2)
+    cap_details = snapshot.get("monthly_discretionary_cap_details") or {}
+    setup_reasons = _financial_os_setup_reasons(
+        monthly_income_baseline=monthly_income_baseline,
+        cap_details=cap_details,
+    )
+    setup_required = bool(setup_reasons)
 
     month_start, month_end = _month_start_and_end(as_of_date)
     days_remaining_in_month = max((month_end - as_of_date).days + 1, 1)
@@ -6869,9 +7003,12 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
     if priority_debt and _to_float(getattr(priority_debt, "apr", None), 0.0) >= high_apr_threshold:
         high_apr_debt = priority_debt
 
+    monthly_required_spend = round(monthly_essentials + planned_monthly_discretionary_baseline, 2)
+    annual_required_spend = round(monthly_required_spend * 12.0, 2)
     fi_target = _to_float(snapshot.get("fi_target"), 0.0)
+    fi_target_source = "user_set_goal" if fi_target > 0 else "derived_annual_required_spend_x25"
     if fi_target <= 0:
-        fi_target = round((monthly_essentials + planned_monthly_discretionary_baseline) * 12.0 * 25.0, 2)
+        fi_target = round(annual_required_spend * 25.0, 2)
     fi_progress_amount = round(max(_to_float(snapshot.get("fi_progress_amount"), total_cash), 0.0), 2)
     fi_progress_percent = round((_clamp01(fi_progress_amount / max(fi_target, 1.0)) * 100.0), 2) if fi_target > 0 else 0.0
 
@@ -6910,6 +7047,7 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
 
     protected_cash = round(upcoming_obligations + debt_minimums + runway_reserve_current + savings_goal_cash, 2)
     available_discretionary_cash = round(max(total_cash - protected_cash, 0.0), 2)
+    protected_obligations_total = round(upcoming_obligations + debt_minimums, 2)
 
     remaining_discretionary_this_month = round(max(monthly_discretionary_cap - discretionary_spend_month_to_date, 0.0), 2)
     remaining_discretionary_this_period = round(
@@ -6928,6 +7066,17 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
     current_period_safe_to_spend = round(
         min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month),
         2,
+    )
+    sts_status = _financial_os_sts_reason(
+        obligations_funded=obligations_funded,
+        runway_funded=runway_funded,
+        setup_required=setup_required,
+        monthly_discretionary_cap=monthly_discretionary_cap,
+        remaining_discretionary_this_month=remaining_discretionary_this_month,
+        remaining_discretionary_this_period=remaining_discretionary_this_period,
+        available_discretionary_cash=available_discretionary_cash,
+        savings_goal_cash=savings_goal_cash,
+        current_period_safe_to_spend=current_period_safe_to_spend,
     )
 
     if monthly_fi_contribution_recommendation > 0 and fi_target > fi_progress_amount:
@@ -6976,7 +7125,7 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
             "priority": "hold_cash",
             "action": "Hold cash until a clearer surplus or spending plan appears.",
             "amount": 0.0,
-            "reason": "There is no reserve-supported discretionary room right now.",
+            "reason": sts_status["detail"],
         }
 
     debt_payoff_projection = _build_debt_payoff_projection(
@@ -6995,7 +7144,9 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         "protected_cash": protected_cash,
         "protected_runway_cash": runway_reserve_current,
         "upcoming_obligations_cash": upcoming_obligations,
+        "bills_manual_obligations_total": upcoming_obligations,
         "debt_minimums_cash": debt_minimums,
+        "protected_obligations_total": protected_obligations_total,
         "savings_goal_cash": savings_goal_cash,
         "available_discretionary_cash": available_discretionary_cash,
         "runway_reserve_target": runway_reserve_target,
@@ -7007,6 +7158,7 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         "monthly_discretionary_cap": monthly_discretionary_cap,
         "discretionary_spend_month_to_date": discretionary_spend_month_to_date,
         "remaining_discretionary_this_month": remaining_discretionary_this_month,
+        "remaining_discretionary_this_period": remaining_discretionary_this_period,
         "weekly_safe_to_spend": weekly_safe_to_spend,
         "current_period_safe_to_spend": current_period_safe_to_spend,
         "fi_target": round(fi_target, 2),
@@ -7016,11 +7168,40 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         "years_to_fi": years_to_fi,
         "next_best_action": next_best_action,
         "debt_payoff_projection": debt_payoff_projection,
+        "setup_status": {
+            "state": "setup_required" if setup_required else "ready",
+            "reasons": setup_reasons,
+        },
+        "discretionary_cap_details": {
+            "mode": cap_details.get("mode"),
+            "source": cap_details.get("source"),
+            "spend_pct": cap_details.get("spend_pct"),
+            "fallback_baseline": cap_details.get("fallback_baseline"),
+            "pending_income_cap": bool(cap_details.get("pending_income_cap")),
+            "label": (
+                "User-set monthly cap"
+                if cap_details.get("mode") == "explicit_monthly_cap"
+                else "Income percentage cap"
+                if cap_details.get("mode") == "income_percentage_cap"
+                else "Recent discretionary baseline fallback"
+                if cap_details.get("mode") == "fallback_recent_discretionary_baseline"
+                else "Missing discretionary plan"
+            ),
+        },
+        "sts_status": sts_status,
+        "fi_target_details": {
+            "source": fi_target_source,
+            "label": "User-set FI target" if fi_target_source == "user_set_goal" else "Derived FI target",
+            "monthly_required_spend": monthly_required_spend,
+            "annual_required_spend": annual_required_spend,
+            "configured_value": round(_to_float(snapshot.get("fi_target"), 0.0), 2) if _to_float(snapshot.get("fi_target"), 0.0) > 0 else None,
+            "formula": "annual_required_spend = (monthly_essentials + planned_monthly_discretionary_baseline) * 12; fi_target = annual_required_spend * 25.",
+        },
         "formula_notes": {
             "runway": "runway_reserve_target = monthly_essentials * runway_target_months; runway is protected after due-soon obligations and debt minimums.",
-            "sts": "current_period_safe_to_spend = min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month).",
+            "sts": "current_period_safe_to_spend = min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month) after protecting bills/manual obligations, debt minimums, runway, and planned FI cash.",
             "weekly_sts": "weekly_safe_to_spend = min(weekly_discretionary_allowance, available_discretionary_cash, remaining_discretionary_this_month).",
-            "fi_target": "fi_target = configured goal or ((monthly_essentials + planned_monthly_discretionary_baseline) * 12 * 25).",
+            "fi_target": "If no FI target is set, annual_required_spend = (monthly_essentials + planned_monthly_discretionary_baseline) * 12 and fi_target = annual_required_spend * 25.",
             "fi_years": "years_to_fi uses a conservative no-growth estimate and is null when there is no known monthly FI contribution.",
         },
     }
@@ -7094,6 +7275,7 @@ def _compute_financial_os_v2(
         "monthly_essentials": monthly_essentials,
         "runway_target_months": _resolve_runway_target_months(settings, goals),
         "monthly_discretionary_cap": cap_details["cap"],
+        "monthly_discretionary_cap_details": cap_details,
         "discretionary_spend_month_to_date": discretionary_spend_month_to_date,
         "planned_monthly_discretionary_baseline": planned_monthly_discretionary_baseline,
         "monthly_income_baseline": monthly_income_baseline,
@@ -7557,6 +7739,88 @@ def _looks_like_non_spend(description: Optional[str], category: Optional[str] = 
     return any(keyword in text for keyword in keywords)
 
 
+def _normalize_plaid_duplicate_token(value: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower())).strip()
+
+
+def _normalize_plaid_last4(value: Optional[str]) -> str:
+    digits = re.sub(r"\D+", "", str(value or ""))
+    return digits[-4:] if digits else ""
+
+
+def _plaid_display_account_fingerprint(
+    *,
+    account_id: Optional[str] = None,
+    account_name: Optional[str] = None,
+    account_mask: Optional[str] = None,
+) -> str:
+    normalized_name = _normalize_plaid_duplicate_token(account_name)
+    normalized_last4 = _normalize_plaid_last4(account_mask)
+    if normalized_name or normalized_last4:
+        parts = []
+        if normalized_name:
+            parts.append(f"name:{normalized_name}")
+        if normalized_last4:
+            parts.append(f"last4:{normalized_last4}")
+        return "|".join(parts)
+
+    normalized_account_id = _normalize_plaid_duplicate_token(account_id)
+    return f"id:{normalized_account_id}" if normalized_account_id else "unknown_account"
+
+
+def _plaid_display_duplicate_key(
+    *,
+    institution_name: Optional[str] = None,
+    account_id: Optional[str] = None,
+    account_name: Optional[str] = None,
+    account_mask: Optional[str] = None,
+    posted_date: Optional[str] = None,
+    authorized_date: Optional[str] = None,
+    merchant_name: Optional[str] = None,
+    name: Optional[str] = None,
+    amount: Optional[float] = None,
+) -> str:
+    institution = _normalize_plaid_duplicate_token(institution_name) or "plaid"
+    account = _plaid_display_account_fingerprint(
+        account_id=account_id,
+        account_name=account_name,
+        account_mask=account_mask,
+    )
+    posted = _normalize_plaid_duplicate_token(posted_date or authorized_date) or "unknown_date"
+    merchant = _normalize_plaid_duplicate_token(merchant_name or name) or "unknown_merchant"
+    normalized_amount = f"{_to_float(amount, 0.0):.2f}"
+    return "|".join([
+        "source:plaid",
+        f"institution:{institution}",
+        f"account:{account}",
+        f"date:{posted}",
+        f"merchant:{merchant}",
+        f"amount:{normalized_amount}",
+    ])
+
+
+def _classify_suspected_duplicate_plaid_rows(rows: list[dict]) -> list[dict]:
+    duplicate_counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        duplicate_counts[row["duplicate_key"]] += 1
+
+    seen: dict[str, int] = defaultdict(int)
+    classified: list[dict] = []
+    for row in rows:
+        duplicate_key = row["duplicate_key"]
+        duplicate_group_index = seen[duplicate_key]
+        seen[duplicate_key] += 1
+
+        enriched = dict(row)
+        enriched["counted"] = duplicate_group_index == 0
+        enriched["suspected_duplicate"] = duplicate_group_index > 0
+        enriched["duplicate_group_index"] = duplicate_group_index
+        enriched["duplicate_group_size"] = duplicate_counts[duplicate_key]
+        classified.append(enriched)
+
+    return classified
+
+
 def _source_window(rows: list[dict], days: int) -> tuple[list[dict], Optional[date]]:
     if not rows:
         return [], None
@@ -7669,6 +7933,7 @@ def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dic
         )
         .all()
     )
+    plaid_candidates = []
     for txn, account, item in plaid_rows:
         posted = _iso_to_date(getattr(txn, "posted_date", None))
         amount = _to_float(getattr(txn, "amount", None), 0.0)
@@ -7677,7 +7942,7 @@ def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dic
             continue
         if _looks_like_non_spend(merchant, getattr(txn, "category_primary", None), None):
             continue
-        out["plaid"].append({
+        plaid_candidates.append({
             "source": "plaid",
             "date": posted,
             "amount": round(abs(amount), 2),
@@ -7690,7 +7955,29 @@ def _collect_spending_activity_by_source(db: Session, user_id: str) -> tuple[dic
                 plaid_detailed=getattr(txn, "category_detailed", None),
             ),
             "reference": getattr(account, "name", None) or getattr(item, "institution_name", None) or "Plaid",
+            "duplicate_key": _plaid_display_duplicate_key(
+                institution_name=getattr(account, "institution_name", None) or getattr(item, "institution_name", None),
+                account_id=getattr(account, "plaid_account_id", None),
+                account_name=getattr(account, "name", None),
+                account_mask=getattr(account, "mask", None),
+                posted_date=getattr(txn, "posted_date", None),
+                authorized_date=getattr(txn, "authorized_date", None),
+                merchant_name=getattr(txn, "merchant_name", None),
+                name=getattr(txn, "name", None),
+                amount=getattr(txn, "amount", None),
+            ),
         })
+
+    for row in _classify_suspected_duplicate_plaid_rows(plaid_candidates):
+        if row.get("suspected_duplicate"):
+            continue
+        cleaned = dict(row)
+        cleaned.pop("duplicate_key", None)
+        cleaned.pop("duplicate_group_index", None)
+        cleaned.pop("duplicate_group_size", None)
+        cleaned.pop("counted", None)
+        cleaned.pop("suspected_duplicate", None)
+        out["plaid"].append(cleaned)
 
     coverage = {}
     for source, rows in out.items():

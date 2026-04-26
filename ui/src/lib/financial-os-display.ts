@@ -84,6 +84,27 @@ type PlaidLike = {
   category_detailed?: string | null;
 };
 
+export type PlaidDisplayLike = PlaidLike & {
+  transaction_id?: string | null;
+  account_id?: string | null;
+  account_name?: string | null;
+  account_mask?: string | null;
+  institution_name?: string | null;
+  posted_date?: string | null;
+  authorized_date?: string | null;
+};
+
+export type ClassifiedPlaidDisplayRow<T extends PlaidDisplayLike> = T & {
+  accountFingerprint: string;
+  counted: boolean;
+  duplicateGroupIndex: number;
+  duplicateGroupSize: number;
+  duplicateKey: string;
+  merchantLabel: string;
+  suspectedDuplicate: boolean;
+  transactionDate: string | null;
+};
+
 const keywordCategoryMatchers: Array<{
   category: SpendingCategory;
   patterns: string[];
@@ -288,6 +309,113 @@ export function plaidLooksLikeNonSpend(txn: PlaidLike) {
 
 export function isPlaidSpend(txn: PlaidLike) {
   return Number(txn.amount || 0) > 0 && !txn.pending && !plaidLooksLikeNonSpend(txn);
+}
+
+function normalizePlaidDuplicateToken(value?: string | null) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizePlaidLast4(value?: string | null) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  return digits ? digits.slice(-4) : "";
+}
+
+function normalizePlaidAmount(value?: number | null) {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
+}
+
+function plaidMerchantLabel(txn: PlaidDisplayLike) {
+  return String(txn.merchant_name || txn.name || "").trim();
+}
+
+function plaidTransactionDate(txn: PlaidDisplayLike) {
+  const raw = String(txn.posted_date || txn.authorized_date || "").trim();
+  return raw || null;
+}
+
+function plaidAccountFingerprint(txn: PlaidDisplayLike) {
+  const normalizedName = normalizePlaidDuplicateToken(txn.account_name);
+  const normalizedLast4 = normalizePlaidLast4(txn.account_mask);
+  if (normalizedName || normalizedLast4) {
+    return [normalizedName ? `name:${normalizedName}` : null, normalizedLast4 ? `last4:${normalizedLast4}` : null]
+      .filter(Boolean)
+      .join("|");
+  }
+
+  const normalizedAccountId = normalizePlaidDuplicateToken(txn.account_id);
+  return normalizedAccountId ? `id:${normalizedAccountId}` : "unknown_account";
+}
+
+export function plaidDisplayDuplicateKey(txn: PlaidDisplayLike) {
+  const institution = normalizePlaidDuplicateToken(txn.institution_name) || "plaid";
+  const account = plaidAccountFingerprint(txn);
+  const dateValue = normalizePlaidDuplicateToken(plaidTransactionDate(txn)) || "unknown_date";
+  const merchant = normalizePlaidDuplicateToken(plaidMerchantLabel(txn)) || "unknown_merchant";
+  const amount = normalizePlaidAmount(txn.amount);
+
+  return [
+    "source:plaid",
+    `institution:${institution}`,
+    `account:${account}`,
+    `date:${dateValue}`,
+    `merchant:${merchant}`,
+    `amount:${amount}`,
+  ].join("|");
+}
+
+export function classifyPlaidDisplayRows<T extends PlaidDisplayLike>(transactions: T[]) {
+  const counts = new Map<string, number>();
+  const seen = new Map<string, number>();
+
+  for (const txn of transactions) {
+    const key = plaidDisplayDuplicateKey(txn);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  const rows: ClassifiedPlaidDisplayRow<T>[] = transactions.map((txn) => {
+    const duplicateKey = plaidDisplayDuplicateKey(txn);
+    const duplicateGroupIndex = seen.get(duplicateKey) || 0;
+    seen.set(duplicateKey, duplicateGroupIndex + 1);
+
+    return {
+      ...txn,
+      accountFingerprint: plaidAccountFingerprint(txn),
+      counted: duplicateGroupIndex === 0,
+      duplicateGroupIndex,
+      duplicateGroupSize: counts.get(duplicateKey) || 1,
+      duplicateKey,
+      merchantLabel: plaidMerchantLabel(txn),
+      suspectedDuplicate: duplicateGroupIndex > 0,
+      transactionDate: plaidTransactionDate(txn),
+    };
+  });
+
+  const countedRows = rows.filter((row) => row.counted);
+  const suspectedDuplicateRows = rows.filter((row) => row.suspectedDuplicate);
+
+  return {
+    rows,
+    countedRows,
+    suspectedDuplicateRows,
+    countedSpend: round(sumAmounts(countedRows), 2),
+    suspectedDuplicateSpend: round(sumAmounts(suspectedDuplicateRows), 2),
+    suspectedDuplicateCount: suspectedDuplicateRows.length,
+  };
+}
+
+function sumAmounts(rows: Array<{ amount?: number | null }>) {
+  return rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+}
+
+function round(value: number, digits: number) {
+  const factor = 10 ** digits;
+  return Math.round((value + Number.EPSILON) * factor) / factor;
 }
 
 export function categoryForPlaid(txn: PlaidLike, rules?: CategoryRuleLookup): SpendingCategory {

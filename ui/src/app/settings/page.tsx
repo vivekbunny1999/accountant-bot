@@ -13,6 +13,7 @@ import {
   getOsState,
   getPasswordPolicy,
   getUserSettings,
+  listGoals,
   getPlaidAccounts,
   getPlaidTransactions,
   listDebts,
@@ -22,6 +23,7 @@ import {
   PlaidTransactionSummary,
   saveUserSettings,
   syncPlaidData,
+  upsertGoal,
   updateDebt,
 } from "@/lib/api";
 import { FALLBACK_PASSWORD_POLICY, validatePasswordAgainstPolicy } from "@/lib/password-policy";
@@ -901,6 +903,9 @@ export default function SettingsPage() {
   const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
   const [plaidCashContribution, setPlaidCashContribution] = useState(0);
   const [plaidDuplicateCount, setPlaidDuplicateCount] = useState(0);
+  const [fiTargetInput, setFiTargetInput] = useState("");
+  const [fiTargetStatus, setFiTargetStatus] = useState<string | null>(null);
+  const [fiTargetError, setFiTargetError] = useState<string | null>(null);
 
   // load persisted
   useEffect(() => {
@@ -952,6 +957,24 @@ export default function SettingsPage() {
     };
   }, [USER_ID]);
 
+  useEffect(() => {
+    if (!USER_ID) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const goals = await listGoals();
+        if (cancelled) return;
+        const fiGoal = (goals || []).find((goal) => goal.key === "fi_target");
+        setFiTargetInput(fiGoal?.value != null && Number(fiGoal.value) > 0 ? String(fiGoal.value) : "");
+      } catch {}
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [USER_ID]);
+
   // persist on change
   useEffect(() => {
     if (!loaded || !USER_ID) return;
@@ -972,6 +995,30 @@ export default function SettingsPage() {
       setDebtError(err instanceof Error ? err.message : "Failed to load debt registry");
     } finally {
       setDebtsLoading(false);
+    }
+  }
+
+  async function saveFiTarget(rawValue: string) {
+    if (!USER_ID) return;
+    const trimmed = rawValue.trim();
+    const numericValue = trimmed ? Number(trimmed.replace(/[$,\s]/g, "")) : 0;
+    if (trimmed && !Number.isFinite(numericValue)) {
+      setFiTargetError("Enter a valid dollar amount or leave it blank to use the derived formula.");
+      setFiTargetStatus(null);
+      return;
+    }
+
+    setFiTargetError(null);
+    try {
+      await upsertGoal("fi_target", {
+        value: trimmed ? Math.max(0, numericValue) : 0,
+        notes: trimmed ? "User-set FI target" : "Use derived Financial OS FI target",
+      });
+      setFiTargetInput(trimmed ? String(Math.max(0, numericValue)) : "");
+      setFiTargetStatus(trimmed ? "FI target saved." : "FI target cleared. Dashboard will use the derived formula.");
+    } catch (error) {
+      setFiTargetError(error instanceof Error ? error.message : "Failed to save FI target.");
+      setFiTargetStatus(null);
     }
   }
 
@@ -2091,6 +2138,36 @@ export default function SettingsPage() {
                     }))
                   }
                 />
+              </div>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <Input
+                  label="FI target (optional)"
+                  desc="Set your own FI cash target, or leave this blank to derive it from annual required spend x 25."
+                  value={fiTargetInput}
+                  onChange={(v) => {
+                    setFiTargetStatus(null);
+                    setFiTargetError(null);
+                    setFiTargetInput(v);
+                  }}
+                  placeholder="Leave blank to use (monthly required spend x 12 x 25)"
+                />
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                  <div className="text-sm font-medium text-zinc-100">How dashboard will explain it</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    If this field has a value, Dashboard shows that user-set target. If it is blank, Dashboard shows the derived formula:
+                    annual required spend = (monthly essentials + planned discretionary baseline) x 12, then FI target = annual required spend x 25.
+                  </div>
+                  {fiTargetStatus ? <div className="mt-3 text-xs text-emerald-300">{fiTargetStatus}</div> : null}
+                  {fiTargetError ? <div className="mt-3 text-xs text-red-300">{fiTargetError}</div> : null}
+                  <button
+                    type="button"
+                    onClick={() => saveFiTarget(fiTargetInput)}
+                    className="mt-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 hover:bg-white/10"
+                  >
+                    Save FI target
+                  </button>
+                </div>
               </div>
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
