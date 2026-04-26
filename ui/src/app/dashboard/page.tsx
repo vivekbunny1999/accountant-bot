@@ -395,6 +395,19 @@ function financialOsPriorityLabel(priority?: string | null) {
   }
 }
 
+function financialOsStatusTone(state?: string | null) {
+  switch ((state || "").toLowerCase()) {
+    case "available":
+      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-200";
+    case "setup_required":
+      return "border-amber-500/20 bg-amber-500/10 text-amber-200";
+    case "blocked":
+      return "border-red-500/20 bg-red-500/10 text-red-200";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
 function fmtMonthsCompact(months?: number | null) {
   if (months == null) return "Needs data";
   if (months <= 0) return "Debt-free";
@@ -795,10 +808,27 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     osState?.calculation?.cash_total
   );
   const financialOsUpcomingTotal = firstDashboardMoneyValue(
-    financialOsV2?.upcoming_obligations,
+    financialOsV2?.protected_obligations_total,
     osState?.upcoming_total,
     osState?.calculation?.upcoming_total,
     upcomingTotal
+  );
+  const billsManualObligationsTotal = firstDashboardMoneyValue(
+    financialOsV2?.bills_manual_obligations_total,
+    nextBestDollar?.breakdown?.bills_manual_obligations_total,
+    upcomingSummary?.bill_total != null || upcomingSummary?.manual_bill_total != null
+      ? Number(upcomingSummary?.bill_total || 0) + Number(upcomingSummary?.manual_bill_total || 0)
+      : null
+  );
+  const debtMinimumsTotal = firstDashboardMoneyValue(
+    financialOsV2?.debt_minimums_cash,
+    nextBestDollar?.breakdown?.debt_minimums_total,
+    upcomingSummary?.debt_minimum_total
+  );
+  const protectedObligationsTotal = firstDashboardMoneyValue(
+    financialOsV2?.protected_obligations_total,
+    nextBestDollar?.breakdown?.protected_obligations_total,
+    financialOsUpcomingTotal
   );
   const trackedDebtTotal = firstDashboardMoneyValue(
     osState?.debt_utilization?.total_balance,
@@ -871,6 +901,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     financialOsV2?.years_to_fi
   );
   const nextBestAction = financialOsV2?.next_best_action ?? null;
+  const stsStatus = financialOsV2?.sts_status ?? null;
+  const setupStatus = financialOsV2?.setup_status ?? null;
+  const setupReasons = setupStatus?.reasons || [];
+  const setupRequired = setupStatus?.state === "setup_required" && setupReasons.length > 0;
+  const discretionaryCapDetails = financialOsV2?.discretionary_cap_details ?? null;
+  const fiTargetDetails = financialOsV2?.fi_target_details ?? null;
   const nextBestActionAmount = firstDashboardMoneyValue(nextBestAction?.amount);
   const coachingSeverity = nextBestAction
     ? financialOsPrioritySeverity(nextBestAction.priority)
@@ -987,6 +1023,13 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         : "Projection uses the Financial OS V2 avalanche payoff model across active debts."
     : (nextDollarImpact?.explanation || "Loading impact estimate.");
   const healthTone = scoreTone(healthScore);
+  const fiTargetExplanation = hasFinancialOsV2
+    ? fiTargetDetails?.source === "user_set_goal"
+      ? `Using your user-set FI target of ${formatDashboardMoney(fiTargetDetails?.configured_value ?? fiTargetAmount)}.`
+      : fiTargetDetails?.annual_required_spend != null
+        ? `Derived FI target = annual required spend ${fmtMoney(Number(fiTargetDetails.annual_required_spend || 0))} x 25.`
+        : (financialOsV2?.formula_notes?.fi_target || "FI target details are loading.")
+    : (intelligenceContext?.fi_cash_target_label || "Loading FI target.");
   const stabilityToneClass = stabilityTone(stabilityMeter?.label);
   const osInsights = useMemo(
     () => (intelligence?.insights?.items || []).slice(0, 5),
@@ -1711,13 +1754,23 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
 
               <div className="mt-4 text-sm leading-6 text-zinc-400">
                 {hasFinancialOsV2
-                  ? "FI progress is calculated from the V2 target and the currently protected cash path, not from raw leftover cash."
+                  ? fiTargetExplanation
                   : (fiProgress?.explanation || "Loading FI progress.")}
               </div>
 
               <div className="mt-4 space-y-2">
                 {hasFinancialOsV2 ? (
                   <>
+                    <div className="flex items-start justify-between gap-3 text-xs text-zinc-400">
+                      <div>{fiTargetDetails?.label || "FI target source"}</div>
+                      <div className="font-mono text-zinc-200">
+                        {fiTargetDetails?.source === "user_set_goal" ? "User-set" : "Derived"}
+                      </div>
+                    </div>
+                    <div className="flex items-start justify-between gap-3 text-xs text-zinc-400">
+                      <div>Annual required spend</div>
+                      <div className="font-mono text-zinc-200">{formatDashboardMoney(fiTargetDetails?.annual_required_spend)}</div>
+                    </div>
                     <div className="flex items-start justify-between gap-3 text-xs text-zinc-400">
                       <div>Progress amount</div>
                       <div className="font-mono text-zinc-200">{formatDashboardMoney(fiProgressAmount)}</div>
@@ -1729,6 +1782,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     <div className="flex items-start justify-between gap-3 text-xs text-zinc-400">
                       <div>Years to FI</div>
                       <div className="font-mono text-zinc-200">{yearsToFi != null ? `${yearsToFi} yrs` : "--"}</div>
+                    </div>
+                    <div className="text-[11px] leading-5 text-zinc-500">
+                      {fiTargetDetails?.formula || financialOsV2?.formula_notes?.fi_target}
                     </div>
                   </>
                 ) : (
@@ -1818,7 +1874,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               </div>
 
               <div className="mt-2 text-xs text-zinc-400">
-                Final Safe-to-Spend is the V2 current-period allowance after obligations, runway, and FI cash are protected.
+                Final Safe-to-Spend is the V2 current-period allowance after protected obligations, runway, and FI cash are protected.
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
@@ -1827,6 +1883,31 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   unavailable: nextBestDollarUnavailable,
                 })}
               </div>
+
+              {hasFinancialOsV2 && stsStatus ? (
+                <div className={`mt-3 inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${financialOsStatusTone(stsStatus.state)}`}>
+                  {stsStatus.label || "STS status"}
+                </div>
+              ) : null}
+
+              {hasFinancialOsV2 && stsStatus?.detail ? (
+                <div className="mt-3 text-xs leading-5 text-zinc-400">
+                  {stsStatus.detail}
+                </div>
+              ) : null}
+
+              {hasFinancialOsV2 && setupRequired ? (
+                <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+                  <div className="font-medium uppercase tracking-[0.16em]">Setup required</div>
+                  <div className="mt-2 space-y-2">
+                    {setupReasons.map((reason, idx) => (
+                      <div key={`${reason.code || "setup"}-${idx}`}>
+                        <span className="text-amber-200">{reason.label || "Missing input"}:</span> {reason.detail}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {hasFinancialOsV2 ? (
                 <div className="mt-4 space-y-2 text-xs text-zinc-500">
@@ -1839,12 +1920,16 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     <span className="font-mono text-zinc-200">{formatDashboardMoney(protectedCash)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
-                    <span>Upcoming obligations</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(financialOsV2?.upcoming_obligations_cash ?? financialOsV2?.upcoming_obligations)}</span>
+                    <span>Bills/manual obligations</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(billsManualObligationsTotal)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span>Debt minimums</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(financialOsV2?.debt_minimums_cash ?? financialOsV2?.debt_minimums)}</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(debtMinimumsTotal)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Total protected obligations</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(protectedObligationsTotal)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span>Runway reserve current</span>
@@ -1865,6 +1950,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="flex items-center justify-between gap-3">
                     <span>Remaining discretionary this month</span>
                     <span className="font-mono text-zinc-200">{formatDashboardMoney(remainingDiscretionaryThisMonth)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Discretionary cap source</span>
+                    <span className="font-mono text-zinc-200">
+                      {discretionaryCapDetails?.label || "Data unavailable"}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span>Weekly Safe-to-Spend</span>
@@ -1949,6 +2040,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   : "Financial OS uses your counted cash totals, including non-duplicate linked cash accounts, before applying upcoming obligations and buffer."}
               </div>
 
+              {hasFinancialOsV2 && discretionaryCapDetails?.pending_income_cap ? (
+                <div className="mt-3 text-xs text-zinc-500">
+                  Settings has a percentage-based discretionary cap, but V2 still needs a monthly income baseline to turn that percentage into a clean dollar plan.
+                </div>
+              ) : null}
+
               {/* Small cash debug line (non-breaking) */}
               <div className="mt-3 text-xs text-zinc-500">
                 Cash import:{" "}
@@ -2030,11 +2127,14 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         <div className="mt-1 text-xs text-zinc-400">
         Next {upcomingWindowDays} days • total needed{" "}
         <span className="text-zinc-100 font-mono">
-          {formatDashboardMoney(financialOsUpcomingTotal, {
+          {formatDashboardMoney(protectedObligationsTotal, {
             loading: osStateLoading,
             unavailable: osStateUnavailable,
           })}
         </span>
+      </div>
+      <div className="mt-1 text-xs text-zinc-500">
+        Bills/manual obligations {formatDashboardMoney(billsManualObligationsTotal, { loading: osStateLoading, unavailable: osStateUnavailable })} â€¢ Debt minimums {formatDashboardMoney(debtMinimumsTotal, { loading: osStateLoading, unavailable: osStateUnavailable })} â€¢ Total protected obligations {formatDashboardMoney(protectedObligationsTotal, { loading: osStateLoading, unavailable: osStateUnavailable })}
       </div>
       <div className="mt-1 text-xs text-zinc-500">
         Bills {formatDashboardMoney(upcomingSummary?.bill_total ?? null, { loading: osStateLoading, unavailable: osStateUnavailable })} • Manual {formatDashboardMoney(upcomingSummary?.manual_bill_total ?? null, { loading: osStateLoading, unavailable: osStateUnavailable })} • Debt minimums {formatDashboardMoney(upcomingSummary?.debt_minimum_total ?? null, { loading: osStateLoading, unavailable: osStateUnavailable })}

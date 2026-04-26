@@ -865,7 +865,9 @@ export type FinancialOsBreakdown = {
   upcoming_total?: number;
   upcoming_bills_total?: number;
   manual_obligations_total?: number;
+  bills_manual_obligations_total?: number;
   debt_minimums_total?: number;
+  protected_obligations_total?: number;
   buffer?: number;
   final_safe_to_spend?: number;
 };
@@ -928,7 +930,9 @@ export type FinancialOsV2 = {
   protected_cash?: number | null;
   protected_runway_cash?: number | null;
   upcoming_obligations_cash?: number | null;
+  bills_manual_obligations_total?: number | null;
   debt_minimums_cash?: number | null;
+  protected_obligations_total?: number | null;
   savings_goal_cash?: number | null;
   available_discretionary_cash?: number | null;
   runway_reserve_target?: number | null;
@@ -940,6 +944,7 @@ export type FinancialOsV2 = {
   monthly_discretionary_cap?: number | null;
   discretionary_spend_month_to_date?: number | null;
   remaining_discretionary_this_month?: number | null;
+  remaining_discretionary_this_period?: number | null;
   weekly_safe_to_spend?: number | null;
   current_period_safe_to_spend?: number | null;
   fi_target?: number | null;
@@ -949,6 +954,36 @@ export type FinancialOsV2 = {
   years_to_fi?: number | null;
   next_best_action?: FinancialOsV2NextBestAction | null;
   debt_payoff_projection?: FinancialOsV2DebtPayoffProjection | null;
+  setup_status?: {
+    state?: string | null;
+    reasons?: Array<{
+      code?: string | null;
+      label?: string | null;
+      detail?: string | null;
+    }>;
+  };
+  discretionary_cap_details?: {
+    mode?: string | null;
+    source?: string | null;
+    spend_pct?: number | null;
+    fallback_baseline?: number | null;
+    pending_income_cap?: boolean | null;
+    label?: string | null;
+  };
+  sts_status?: {
+    code?: string | null;
+    label?: string | null;
+    detail?: string | null;
+    state?: string | null;
+  };
+  fi_target_details?: {
+    source?: string | null;
+    label?: string | null;
+    monthly_required_spend?: number | null;
+    annual_required_spend?: number | null;
+    configured_value?: number | null;
+    formula?: string | null;
+  };
   formula_notes?: {
     runway?: string | null;
     sts?: string | null;
@@ -1070,6 +1105,16 @@ export type NextBestDollarResponse = {
   financial_os_v2?: FinancialOsV2;
 };
 
+export type GoalRecord = {
+  id?: number;
+  user_id?: string;
+  key: string;
+  value?: number | null;
+  notes?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 export async function getNextBestDollar(params: {
   user_id: string;
   window_days?: number;
@@ -1080,6 +1125,20 @@ export async function getNextBestDollar(params: {
   if (params.window_days != null) qs.set("window_days", String(params.window_days));
   if (params.buffer != null) qs.set("buffer", String(params.buffer));
   return apiGet<NextBestDollarResponse>(`/os/next-best-dollar?${qs.toString()}`);
+}
+
+export async function listGoals(): Promise<GoalRecord[]> {
+  return apiGet<GoalRecord[]>("/goals");
+}
+
+export async function upsertGoal(key: string, body: { value: number; notes?: string | null }): Promise<GoalRecord> {
+  const res = await apiFetch(`/goals/${encodeURIComponent(key)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, `Save failed: ${res.status}`));
+  return res.json();
 }
 
 export type FinancialHealthComponent = {
