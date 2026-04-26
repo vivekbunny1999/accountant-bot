@@ -183,11 +183,11 @@ test.describe.serial("Accountant Bot preview QA", () => {
         await page.goto("/settings", { waitUntil: "domcontentloaded" });
         await expect(page).toHaveURL(/\/settings(?:\?.*)?$/);
         await expect(main(page).getByText("Account Security", { exact: true })).toBeVisible();
-        await expect(main(page).getByText(/Change password without breaking the existing session-based auth flow/i)).toBeVisible();
         await main(page).getByText("Account Security", { exact: true }).scrollIntoViewIfNeeded();
         await expect(main(page).getByPlaceholder("Current password").nth(1)).toBeVisible();
         await expect(main(page).getByPlaceholder("New password (8+ characters)")).toBeVisible();
         await expect(main(page).getByPlaceholder("Confirm new password")).toBeVisible();
+        await expect(main(page).getByRole("button", { name: /change password/i })).toBeVisible();
       },
     });
     await expectArtifactOutput(settingsSecurityArtifact);
