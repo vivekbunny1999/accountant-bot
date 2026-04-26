@@ -362,6 +362,39 @@ function insightTone(severity?: string | null) {
   }
 }
 
+function financialOsPrioritySeverity(priority?: string | null) {
+  switch ((priority || "").toLowerCase()) {
+    case "protect_due_soon":
+      return "critical";
+    case "build_runway":
+    case "pay_high_apr_debt":
+      return "warning";
+    case "fund_fi":
+      return "success";
+    default:
+      return "info";
+  }
+}
+
+function financialOsPriorityLabel(priority?: string | null) {
+  switch ((priority || "").toLowerCase()) {
+    case "protect_due_soon":
+      return "Protect Due Soon";
+    case "build_runway":
+      return "Build Runway";
+    case "pay_high_apr_debt":
+      return "Pay High-APR Debt";
+    case "fund_fi":
+      return "Fund FI";
+    case "discretionary":
+      return "Discretionary";
+    case "hold_cash":
+      return "Hold Cash";
+    default:
+      return "Next Step";
+  }
+}
+
 function fmtMonthsCompact(months?: number | null) {
   if (months == null) return "Needs data";
   if (months <= 0) return "Debt-free";
@@ -750,11 +783,19 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     (Boolean(nextBestDollar) || Boolean(nextBestDollarErr));
   const dashboardReady = osStateSettled && nextBestDollarSettled;
   const intelligenceContext = intelligence?.context ?? null;
+  const financialOsV2 =
+    nextBestDollar?.financial_os_v2
+    ?? intelligence?.financial_os_v2
+    ?? osState?.financial_os_v2
+    ?? null;
+  const hasFinancialOsV2 = Boolean(financialOsV2);
   const financialOsCashTotal = firstDashboardMoneyValue(
+    financialOsV2?.total_cash,
     osState?.cash_total,
     osState?.calculation?.cash_total
   );
   const financialOsUpcomingTotal = firstDashboardMoneyValue(
+    financialOsV2?.upcoming_obligations,
     osState?.upcoming_total,
     osState?.calculation?.upcoming_total,
     upcomingTotal
@@ -764,11 +805,82 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     trackedDebtItemsTotal
   );
   const safeToSpendToday = firstDashboardMoneyValue(
+    financialOsV2?.current_period_safe_to_spend,
     nextBestDollar?.safe_to_spend_today,
     nextBestDollar?.calculation?.safe_to_spend_today,
     stsBreakdown?.final_safe_to_spend,
     intelligenceContext?.safe_to_spend_today
   );
+  const weeklySafeToSpend = firstDashboardMoneyValue(
+    financialOsV2?.weekly_safe_to_spend,
+    safeToSpendToday
+  );
+  const remainingDiscretionaryThisMonth = firstDashboardMoneyValue(
+    financialOsV2?.remaining_discretionary_this_month
+  );
+  const protectedCash = firstDashboardMoneyValue(
+    financialOsV2?.protected_cash
+  );
+  const savingsGoalCash = firstDashboardMoneyValue(
+    financialOsV2?.savings_goal_cash
+  );
+  const availableDiscretionaryCash = firstDashboardMoneyValue(
+    financialOsV2?.available_discretionary_cash,
+    intelligenceContext?.available_sts,
+    nextBestDollar?.available_sts
+  );
+  const runwayReserveTarget = firstDashboardMoneyValue(
+    financialOsV2?.runway_reserve_target,
+    intelligenceContext?.emergency_target_amount
+  );
+  const runwayReserveCurrent = firstDashboardMoneyValue(
+    financialOsV2?.runway_reserve_current,
+    financialOsV2?.protected_runway_cash
+  );
+  const runwayTargetMonths = firstDashboardMoneyValue(
+    financialOsV2?.runway_target_months,
+    intelligenceContext?.runway_target_months,
+    settings.target_runway_months
+  );
+  const monthlyEssentials = firstDashboardMoneyValue(
+    financialOsV2?.monthly_essentials,
+    intelligenceContext?.monthly_essentials_total
+  );
+  const runwayMonths = (() => {
+    if (runwayReserveCurrent != null && monthlyEssentials != null && monthlyEssentials > 0) {
+      return Math.round((runwayReserveCurrent / monthlyEssentials) * 10) / 10;
+    }
+    return intelligenceContext?.runway_months ?? null;
+  })();
+  const fiTargetAmount = firstDashboardMoneyValue(
+    financialOsV2?.fi_target,
+    intelligenceContext?.fi_cash_target_amount
+  );
+  const fiProgressAmount = firstDashboardMoneyValue(
+    financialOsV2?.fi_progress_amount,
+    financialOsCashTotal
+  );
+  const fiProgressPercent = firstDashboardMoneyValue(
+    financialOsV2?.fi_progress_percent,
+    intelligence?.fi_progress?.percent
+  );
+  const fiContributionRecommendation = firstDashboardMoneyValue(
+    financialOsV2?.monthly_fi_contribution_recommendation
+  );
+  const yearsToFi = firstDashboardMoneyValue(
+    financialOsV2?.years_to_fi
+  );
+  const nextBestAction = financialOsV2?.next_best_action ?? null;
+  const nextBestActionAmount = firstDashboardMoneyValue(nextBestAction?.amount);
+  const coachingSeverity = nextBestAction
+    ? financialOsPrioritySeverity(nextBestAction.priority)
+    : intelligence?.insights?.what_to_do_next?.severity;
+  const coachingTitle = nextBestAction?.action || intelligence?.insights?.what_to_do_next?.title || "What To Do Next";
+  const coachingExplanation = nextBestAction?.reason || intelligence?.insights?.what_to_do_next?.explanation || "Waiting for your Financial OS guidance.";
+  const coachingSuggestedAction = nextBestAction?.action || intelligence?.insights?.what_to_do_next?.suggested_action || "Review the current plan.";
+  const coachingPriorityLabel = nextBestAction
+    ? financialOsPriorityLabel(nextBestAction.priority)
+    : (intelligence?.insights?.what_to_do_next?.severity || "info");
   const safeToSpendBeforeBuffer = (() => {
     const cash = firstDashboardMoneyValue(
       stsBreakdown?.total_cash,
@@ -791,7 +903,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     nextBestDollar?.buffer
   );
   const safeToSpendFormulaLabel =
-    safeToSpendBeforeBuffer != null
+    financialOsV2?.formula_notes?.sts
+      ? `${financialOsV2.formula_notes.sts} Large cash balances are not fully spendable because obligations, runway, and FI reserves stay protected first.`
+      : safeToSpendBeforeBuffer != null
       ? "Safe-to-Spend before buffer = cash total - upcoming obligations. Final Safe-to-Spend = that amount - protected buffer."
       : (nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer");
   const statementCoverage = useMemo(
@@ -831,10 +945,47 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     [fiProgress]
   );
   const nextDollarImpact = intelligence?.next_best_dollar_impact ?? null;
-  const availableStsForDebt = nextDollarImpact?.available_sts
-    ?? intelligenceContext?.available_sts
-    ?? nextBestDollar?.available_sts
-    ?? null;
+  const debtPayoffProjection = financialOsV2?.debt_payoff_projection ?? null;
+  const projectedPayoffDebt = useMemo(() => {
+    const debts = debtPayoffProjection?.debts || [];
+    if (!debts.length) return null;
+    if (debtPayoffProjection?.target_debt_id != null) {
+      const match = debts.find((item) => item.debt_id === debtPayoffProjection.target_debt_id);
+      if (match) return match;
+    }
+    return debts.find((item) => Number(item.recommended_extra_payment || 0) > 0) || debts[0] || null;
+  }, [debtPayoffProjection]);
+  const payoffRecurringExtra = firstDashboardMoneyValue(
+    projectedPayoffDebt?.recommended_extra_payment,
+    debtPayoffProjection?.recurring_extra_payment,
+    nextDollarImpact?.recommended_extra_payment
+  );
+  const payoffMonthsSaved = firstDashboardMoneyValue(
+    projectedPayoffDebt?.months_saved,
+    nextDollarImpact?.estimated_months_faster
+  );
+  const payoffInterestSaved = firstDashboardMoneyValue(
+    projectedPayoffDebt?.interest_saved,
+    nextDollarImpact?.estimated_interest_saved
+  );
+  const payoffMonthsWithExtra = firstDashboardMoneyValue(
+    projectedPayoffDebt?.with_extra_months,
+    debtPayoffProjection?.portfolio_months_with_extra,
+    nextDollarImpact?.estimated_payoff_months_with_extra
+  );
+  const availableStsForDebt = firstDashboardMoneyValue(
+    financialOsV2?.current_period_safe_to_spend,
+    nextDollarImpact?.available_sts,
+    intelligenceContext?.available_sts,
+    nextBestDollar?.available_sts
+  );
+  const payoffExplanation = debtPayoffProjection
+    ? projectedPayoffDebt?.payoff_warning === "missing_minimum_due"
+      ? "Projection is limited until the target debt has a minimum due amount."
+      : projectedPayoffDebt?.name
+        ? `Projection uses Financial OS V2 for ${projectedPayoffDebt.name}. Extra payments only start after due-soon obligations, runway reserves, and FI cash protections are covered.`
+        : "Projection uses the Financial OS V2 avalanche payoff model across active debts."
+    : (nextDollarImpact?.explanation || "Loading impact estimate.");
   const healthTone = scoreTone(healthScore);
   const stabilityToneClass = stabilityTone(stabilityMeter?.label);
   const osInsights = useMemo(
@@ -1272,33 +1423,63 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           </div>
         )}
 
-        {settings.show_financial_os_panels && whatToDoNext && (
+        {settings.show_financial_os_panels && (nextBestAction || whatToDoNext) && (
           <div className="grid gap-3 xl:grid-cols-[1.35fr,1fr]">
             <div className="rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_35%),#0E141C] p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold text-zinc-100">What To Do Next</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Coaching based on your current STS, obligations, and tracked spend.
+                    Weekly coaching now follows Financial OS V2 reserve-aware safe-to-spend.
                   </div>
                 </div>
-                <div className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${insightTone(whatToDoNext.severity)}`}>
-                  {whatToDoNext.severity}
+                <div className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${insightTone(coachingSeverity)}`}>
+                  {coachingPriorityLabel}
                 </div>
               </div>
 
               <div className="mt-5 max-w-3xl text-2xl font-semibold leading-tight text-zinc-100 sm:text-3xl">
-                {whatToDoNext.title}
+                {coachingTitle}
               </div>
 
               <div className="mt-4 max-w-2xl text-sm leading-6 text-zinc-300">
-                {whatToDoNext.explanation}
+                {coachingExplanation}
+              </div>
+
+              <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Weekly safe-to-spend</div>
+                  <div className="mt-2 text-lg font-semibold text-zinc-100">
+                    {formatDashboardMoney(weeklySafeToSpend, {
+                      loading: nextBestDollarLoadingState,
+                      unavailable: nextBestDollarUnavailable,
+                    })}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Remaining this month</div>
+                  <div className="mt-2 text-lg font-semibold text-zinc-100">
+                    {formatDashboardMoney(remainingDiscretionaryThisMonth, {
+                      loading: nextBestDollarLoadingState,
+                      unavailable: nextBestDollarUnavailable,
+                    })}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Suggested amount</div>
+                  <div className="mt-2 text-lg font-semibold text-zinc-100">
+                    {formatDashboardMoney(nextBestActionAmount, {
+                      loading: nextBestDollarLoadingState,
+                      unavailable: nextBestDollarUnavailable,
+                    })}
+                  </div>
+                </div>
               </div>
 
               <div className="mt-5 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
                 <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Suggested action</div>
                 <div className="mt-2 text-sm font-medium leading-6 text-zinc-100">
-                  {whatToDoNext.suggested_action}
+                  {coachingSuggestedAction}
                 </div>
               </div>
             </div>
@@ -1425,13 +1606,37 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                       { loading: nextBestDollarLoadingState, unavailable: nextBestDollarUnavailable }
                     )}
                   </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">Current period V2 allowance</div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Runway</div>
+                  <div className="text-xs text-zinc-400">Weekly Safe-to-Spend</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {intelligenceContext?.runway_months != null
-                      ? `${Number(intelligenceContext.runway_months).toFixed(1)} mo`
-                      : "--"}
+                    {formatDashboardMoney(weeklySafeToSpend, {
+                      loading: nextBestDollarLoadingState,
+                      unavailable: nextBestDollarUnavailable,
+                    })}
+                  </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">Reserve-aware weekly guidance</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Remaining Discretionary</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {formatDashboardMoney(remainingDiscretionaryThisMonth, {
+                      loading: nextBestDollarLoadingState,
+                      unavailable: nextBestDollarUnavailable,
+                    })}
+                  </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">Left in this month&apos;s cap</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                  <div className="text-xs text-zinc-400">Runway Reserve</div>
+                  <div className="mt-1 text-lg font-semibold text-zinc-100">
+                    {runwayMonths != null ? `${Number(runwayMonths).toFixed(1)} mo` : "--"}
+                  </div>
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    {runwayReserveCurrent != null && runwayReserveTarget != null
+                      ? `${fmtMoney(Number(runwayReserveCurrent || 0))} of ${fmtMoney(Number(runwayReserveTarget || 0))} protected${runwayTargetMonths != null ? ` • ${Number(runwayTargetMonths).toFixed(1)} mo target` : ""}`
+                      : "Protected runway cash"}
                   </div>
                 </div>
               </div>
@@ -1478,21 +1683,21 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 <div>
                   <div className="text-sm font-semibold text-zinc-100">FI Progress</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Conservative proxy, not a full FIRE calculation.
+                    V2 progress tracks the protected path toward your FI cash target.
                   </div>
                 </div>
                 <div className="text-xs text-zinc-400">
-                  {intelligenceContext?.fi_cash_target_label || "Proxy target"}
+                  {hasFinancialOsV2 ? "Financial OS V2" : (intelligenceContext?.fi_cash_target_label || "Proxy target")}
                 </div>
               </div>
 
               <div className="mt-4 flex items-end justify-between gap-3">
                 <div className="text-4xl font-semibold text-zinc-100">
-                  {fiProgress?.percent != null ? `${fiProgress.percent}%` : "--"}
+                  {fiProgressPercent != null ? `${fiProgressPercent}%` : "--"}
                 </div>
                 <div className="text-xs text-zinc-500">
-                  {intelligenceContext?.fi_cash_target_amount
-                    ? `Target ${fmtMoney(Number(intelligenceContext.fi_cash_target_amount || 0))}`
+                  {fiTargetAmount != null
+                    ? `Target ${fmtMoney(Number(fiTargetAmount || 0))}`
                     : "Target pending"}
                 </div>
               </div>
@@ -1500,34 +1705,53 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/5">
                 <div
                   className="h-full rounded-full bg-zinc-200 transition-all"
-                  style={{ width: `${clamp01(Number(fiProgress?.percent || 0) / 100) * 100}%` }}
+                  style={{ width: `${clamp01(Number(fiProgressPercent || 0) / 100) * 100}%` }}
                 />
               </div>
 
               <div className="mt-4 text-sm leading-6 text-zinc-400">
-                {fiProgress?.explanation || "Loading FI progress."}
+                {hasFinancialOsV2
+                  ? "FI progress is calculated from the V2 target and the currently protected cash path, not from raw leftover cash."
+                  : (fiProgress?.explanation || "Loading FI progress.")}
               </div>
 
               <div className="mt-4 space-y-2">
-                {fiProgressComponents.map((component, idx) => (
-                  <div key={`${component.label}-${idx}`} className="flex items-start justify-between gap-3 text-xs text-zinc-400">
-                    <div>{component.label}</div>
-                    <div className="font-mono text-zinc-200">{Math.round(Number(component.progress || 0))}%</div>
-                  </div>
-                ))}
+                {hasFinancialOsV2 ? (
+                  <>
+                    <div className="flex items-start justify-between gap-3 text-xs text-zinc-400">
+                      <div>Progress amount</div>
+                      <div className="font-mono text-zinc-200">{formatDashboardMoney(fiProgressAmount)}</div>
+                    </div>
+                    <div className="flex items-start justify-between gap-3 text-xs text-zinc-400">
+                      <div>Monthly FI contribution</div>
+                      <div className="font-mono text-zinc-200">{formatDashboardMoney(fiContributionRecommendation)}</div>
+                    </div>
+                    <div className="flex items-start justify-between gap-3 text-xs text-zinc-400">
+                      <div>Years to FI</div>
+                      <div className="font-mono text-zinc-200">{yearsToFi != null ? `${yearsToFi} yrs` : "--"}</div>
+                    </div>
+                  </>
+                ) : (
+                  fiProgressComponents.map((component, idx) => (
+                    <div key={`${component.label}-${idx}`} className="flex items-start justify-between gap-3 text-xs text-zinc-400">
+                      <div>{component.label}</div>
+                      <div className="font-mono text-zinc-200">{Math.round(Number(component.progress || 0))}%</div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-sm font-semibold text-zinc-100">Next Best Dollar Impact</div>
+                  <div className="text-sm font-semibold text-zinc-100">Debt Payoff Projection</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Uses the current recommended target debt and current debt inputs only.
+                    Uses the Financial OS V2 payoff model when available.
                   </div>
                 </div>
                 <div className="text-xs text-zinc-400">
-                  {nextDollarImpact?.target_debt?.name || nextBestDollar?.recommendation?.name || "No target"}
+                  {projectedPayoffDebt?.name || nextDollarImpact?.target_debt?.name || nextBestDollar?.recommendation?.name || "No target"}
                 </div>
               </div>
 
@@ -1535,47 +1759,47 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
                   <div className="text-xs text-zinc-400">Repeatable extra</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {fmtMoney(Number(nextDollarImpact?.recommended_extra_payment || 0))}
+                    {formatDashboardMoney(payoffRecurringExtra)}
                   </div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
                   <div className="text-xs text-zinc-400">Months faster</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {nextDollarImpact?.estimated_months_faster != null
-                      ? `${nextDollarImpact.estimated_months_faster} mo`
+                    {payoffMonthsSaved != null
+                      ? `${payoffMonthsSaved} mo`
                       : "--"}
                   </div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
                   <div className="text-xs text-zinc-400">Interest saved</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {nextDollarImpact?.estimated_interest_saved != null
-                      ? fmtMoney(Number(nextDollarImpact.estimated_interest_saved || 0))
-                      : "--"}
+                    {formatDashboardMoney(payoffInterestSaved)}
                   </div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
                   <div className="text-xs text-zinc-400">Payoff with extra</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {nextDollarImpact?.estimated_payoff_months_with_extra != null
-                      ? `${nextDollarImpact.estimated_payoff_months_with_extra} mo`
+                    {payoffMonthsWithExtra != null
+                      ? `${payoffMonthsWithExtra} mo`
                       : "--"}
                   </div>
                 </div>
               </div>
 
               <div className="mt-4 text-sm leading-6 text-zinc-400">
-                {nextDollarImpact?.explanation || "Loading impact estimate."}
+                {payoffExplanation}
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
                 {availableStsForDebt != null
-                  ? `Available STS today is ${fmtMoney(Number(availableStsForDebt || 0))}, but only the smaller repeatable extra above is assumed for debt payoff.`
+                  ? `Final Safe-to-Spend is ${fmtMoney(Number(availableStsForDebt || 0))}, but only the repeatable protected extra above is assumed for debt payoff.`
                   : "The payoff view uses the smaller repeatable extra payment, not the full STS balance."}
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                Approximation assumes this extra amount can be repeated monthly and debt APRs stay flat.
+                {payoffMonthsWithExtra != null && projectedPayoffDebt?.minimum_only_months != null
+                  ? `Minimum-only payoff for this target is about ${projectedPayoffDebt.minimum_only_months} months before the extra payment is applied.`
+                  : "Approximation assumes this extra amount can be repeated monthly and debt APRs stay flat."}
               </div>
             </div>
           </div>
@@ -1594,7 +1818,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               </div>
 
               <div className="mt-2 text-xs text-zinc-400">
-                Final Safe-to-Spend after upcoming obligations and protected buffer.
+                Final Safe-to-Spend is the V2 current-period allowance after obligations, runway, and FI cash are protected.
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
@@ -1604,7 +1828,57 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 })}
               </div>
 
-              {stsBreakdown ? (
+              {hasFinancialOsV2 ? (
+                <div className="mt-4 space-y-2 text-xs text-zinc-500">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Total cash</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(financialOsV2?.total_cash)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Protected cash</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(protectedCash)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Upcoming obligations</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(financialOsV2?.upcoming_obligations_cash ?? financialOsV2?.upcoming_obligations)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Debt minimums</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(financialOsV2?.debt_minimums_cash ?? financialOsV2?.debt_minimums)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Runway reserve current</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(runwayReserveCurrent)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Runway reserve target</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(runwayReserveTarget)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>FI cash protected</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(savingsGoalCash)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Available discretionary cash</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(availableDiscretionaryCash)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Remaining discretionary this month</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(remainingDiscretionaryThisMonth)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Weekly Safe-to-Spend</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(weeklySafeToSpend)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-300">
+                    <span>Final Safe-to-Spend</span>
+                    <span className="font-mono text-zinc-100">{formatDashboardMoney(safeToSpendToday)}</span>
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    {safeToSpendFormulaLabel}
+                  </div>
+                </div>
+              ) : stsBreakdown ? (
                 <div className="mt-4 space-y-2 text-xs text-zinc-500">
                   <div className="flex items-center justify-between gap-3">
                     <span>Total cash</span>
@@ -1670,7 +1944,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               )}
 
               <div className="mt-3 text-xs text-zinc-500">
-                Financial OS uses your counted cash totals, including non-duplicate linked cash accounts, before applying upcoming obligations and buffer.
+                {hasFinancialOsV2
+                  ? "Large cash balances are not all spendable. Financial OS V2 protects due-soon obligations, runway reserves, and planned FI cash before discretionary spending is allowed."
+                  : "Financial OS uses your counted cash totals, including non-duplicate linked cash accounts, before applying upcoming obligations and buffer."}
               </div>
 
               {/* Small cash debug line (non-breaking) */}

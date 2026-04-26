@@ -886,6 +886,78 @@ export type FinancialOsDataStatus = {
   debt_registry?: "ready" | "empty";
 };
 
+export type FinancialOsV2NextBestAction = {
+  priority?: string | null;
+  action?: string | null;
+  amount?: number | null;
+  reason?: string | null;
+  debt_id?: number | null;
+};
+
+export type FinancialOsV2DebtProjectionItem = {
+  debt_id?: number;
+  name?: string | null;
+  balance?: number | null;
+  apr?: number | null;
+  minimum_due?: number | null;
+  recommended_extra_payment?: number | null;
+  minimum_only_months?: number | null;
+  with_extra_months?: number | null;
+  months_saved?: number | null;
+  interest_saved?: number | null;
+  payoff_warning?: string | null;
+};
+
+export type FinancialOsV2DebtPayoffProjection = {
+  strategy?: string | null;
+  recurring_extra_payment?: number | null;
+  target_debt_id?: number | null;
+  debts?: FinancialOsV2DebtProjectionItem[];
+  portfolio_months_with_extra?: number | null;
+  portfolio_interest_with_extra?: number | null;
+  portfolio_warning?: string | null;
+};
+
+export type FinancialOsV2 = {
+  as_of_date?: string | null;
+  window_days?: number;
+  monthly_essentials?: number | null;
+  planned_monthly_discretionary_baseline?: number | null;
+  monthly_income_baseline?: number | null;
+  total_cash?: number | null;
+  protected_cash?: number | null;
+  protected_runway_cash?: number | null;
+  upcoming_obligations_cash?: number | null;
+  debt_minimums_cash?: number | null;
+  savings_goal_cash?: number | null;
+  available_discretionary_cash?: number | null;
+  runway_reserve_target?: number | null;
+  runway_reserve_current?: number | null;
+  runway_reserve_gap?: number | null;
+  runway_target_months?: number | null;
+  upcoming_obligations?: number | null;
+  debt_minimums?: number | null;
+  monthly_discretionary_cap?: number | null;
+  discretionary_spend_month_to_date?: number | null;
+  remaining_discretionary_this_month?: number | null;
+  weekly_safe_to_spend?: number | null;
+  current_period_safe_to_spend?: number | null;
+  fi_target?: number | null;
+  fi_progress_amount?: number | null;
+  fi_progress_percent?: number | null;
+  monthly_fi_contribution_recommendation?: number | null;
+  years_to_fi?: number | null;
+  next_best_action?: FinancialOsV2NextBestAction | null;
+  debt_payoff_projection?: FinancialOsV2DebtPayoffProjection | null;
+  formula_notes?: {
+    runway?: string | null;
+    sts?: string | null;
+    weekly_sts?: string | null;
+    fi_target?: string | null;
+    fi_years?: string | null;
+  };
+};
+
 export type OsStateResponse = {
   ok: boolean;
   user_id: string;
@@ -944,6 +1016,7 @@ export type OsStateResponse = {
     safe_to_spend_formula?: string;
   };
   debt_utilization?: any;
+  financial_os_v2?: FinancialOsV2;
 };
 
 export async function getOsState(params: { user_id: string; window_days?: number }): Promise<OsStateResponse> {
@@ -994,6 +1067,7 @@ export type NextBestDollarResponse = {
     recommended_extra_payment?: number | null;
     why?: string | null;
   } | null;
+  financial_os_v2?: FinancialOsV2;
 };
 
 export async function getNextBestDollar(params: {
@@ -1119,6 +1193,7 @@ export type FinancialOsIntelligenceResponse = {
       source_label?: string | null;
     }>;
   };
+  financial_os_v2?: FinancialOsV2;
 };
 
 export async function getFinancialOsIntelligence(params: {
@@ -1131,4 +1206,25 @@ export async function getFinancialOsIntelligence(params: {
   if (params.window_days != null) qs.set("window_days", String(params.window_days));
   if (params.buffer != null) qs.set("buffer", String(params.buffer));
   return apiGet<FinancialOsIntelligenceResponse>(`/os/intelligence?${qs.toString()}`);
+}
+
+export type FinancialOsV2StateResponse = {
+  ok: boolean;
+  user_id: string;
+  window_days: number;
+  upcoming_total?: number | null;
+  source_counts?: FinancialOsSourceCounts;
+  data_status?: FinancialOsDataStatus;
+  upcoming_items?: FinancialOsUpcomingItem[];
+  financial_os_v2?: FinancialOsV2;
+};
+
+export async function getFinancialOsV2State(params: {
+  user_id: string;
+  window_days?: number;
+}): Promise<FinancialOsV2StateResponse> {
+  const qs = new URLSearchParams();
+  qs.set("user_id", params.user_id);
+  if (params.window_days != null) qs.set("window_days", String(params.window_days));
+  return apiGet<FinancialOsV2StateResponse>(`/os/v2/state?${qs.toString()}`);
 }
