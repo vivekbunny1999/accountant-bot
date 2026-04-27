@@ -49,7 +49,7 @@ const REQUIRED_PAGE_CAPTURES: RequiredPageCapture[] = [
     route: "/dashboard",
     assertions: async (page) => {
       await expect(main(page).getByText("Dashboard", { exact: true })).toBeVisible();
-      await expect(main(page).getByText(/Discretionary.*allowance/i)).toBeVisible();
+      await expect(main(page).getByText("Discretionary spend allowance", { exact: true }).first()).toBeVisible();
       await page.getByTestId("dashboard-ready").waitFor({ state: "attached", timeout: 20_000 });
       await expect(page.getByTestId("dashboard-ready")).toHaveAttribute(
         "data-os-state-status",
