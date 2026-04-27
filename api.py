@@ -6840,7 +6840,7 @@ def _financial_os_sts_reason(
         return {
             "code": "no_spending_plan_or_income_baseline",
             "label": "Setup required",
-            "detail": "Final Safe-to-Spend is $0 because there is not enough income/discretionary-plan data to create a usable monthly cap yet.",
+            "detail": "The discretionary spending allowance is $0 because there is not enough income/discretionary-plan data to create a usable monthly cap yet.",
             "state": "setup_required",
         }
 
@@ -6848,7 +6848,7 @@ def _financial_os_sts_reason(
         return {
             "code": "discretionary_cap_exhausted",
             "label": "Discretionary cap exhausted",
-            "detail": "This month's discretionary plan has already been used, so STS stays at $0 until the cap resets or the plan changes.",
+            "detail": "This month's discretionary plan has already been used, so the discretionary spending allowance stays at $0 until the cap resets or the plan changes.",
             "state": "blocked",
         }
 
@@ -6871,7 +6871,7 @@ def _financial_os_sts_reason(
     return {
         "code": "no_reserve_supported_discretionary_room",
         "label": "No reserve-supported discretionary room",
-        "detail": "There is no protected discretionary room available right now, even though obligations and runway are already covered.",
+        "detail": "There is no protected discretionary spending room available right now, even though obligations and runway are already covered.",
         "state": "blocked",
     }
 
@@ -7078,6 +7078,13 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         savings_goal_cash=savings_goal_cash,
         current_period_safe_to_spend=current_period_safe_to_spend,
     )
+    discretionary_spending_paused = bool(
+        current_period_safe_to_spend <= 0.01
+        and (
+            remaining_discretionary_this_month <= 0.01
+            or remaining_discretionary_this_period <= 0.01
+        )
+    )
 
     if monthly_fi_contribution_recommendation > 0 and fi_target > fi_progress_amount:
         years_to_fi = round((fi_target - fi_progress_amount) / (monthly_fi_contribution_recommendation * 12.0), 1)
@@ -7101,9 +7108,23 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
     elif high_apr_debt and recurring_extra_payment > 0:
         next_best_action = {
             "priority": "pay_high_apr_debt",
-            "action": f"Send the next extra dollar to {high_apr_debt.name}.",
+            "action": (
+                f"Pause discretionary spending, but send the planned extra to {high_apr_debt.name}."
+                if discretionary_spending_paused
+                else f"Send the next planned extra to {high_apr_debt.name}."
+            ),
             "amount": recurring_extra_payment,
-            "reason": f"{high_apr_debt.name} carries the highest APR at {_to_float(getattr(high_apr_debt, 'apr', None), 0.0):.2f}%.",
+            "amount_label": "Extra payoff allocation",
+            "allocation_source": "planned_surplus_after_protections",
+            "allocation_source_label": "Planned surplus allocation",
+            "discretionary_spending_paused": discretionary_spending_paused,
+            "reason": (
+                f"The discretionary spending allowance is exhausted for now, but {high_apr_debt.name} still gets "
+                f"the repeatable extra-payment allocation after bills, minimums, runway, and planned savings are protected."
+                if discretionary_spending_paused
+                else f"{high_apr_debt.name} carries the highest APR at {_to_float(getattr(high_apr_debt, 'apr', None), 0.0):.2f}%, "
+                "so the repeatable planned surplus goes there after protections are covered."
+            ),
             "debt_id": high_apr_debt.id,
         }
     elif monthly_fi_contribution_recommendation > 0:
@@ -7111,6 +7132,10 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
             "priority": "fund_fi",
             "action": "Move the next planned surplus into FI/savings.",
             "amount": monthly_fi_contribution_recommendation,
+            "amount_label": "Planned FI allocation",
+            "allocation_source": "planned_surplus_after_protections",
+            "allocation_source_label": "Planned surplus allocation",
+            "discretionary_spending_paused": discretionary_spending_paused,
             "reason": "Runway is funded and there is no high-APR debt blocking savings progress.",
         }
     elif current_period_safe_to_spend > 0:
@@ -7118,6 +7143,10 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
             "priority": "discretionary",
             "action": "Discretionary spending is allowed inside the current period cap.",
             "amount": current_period_safe_to_spend,
+            "amount_label": "Discretionary spend allowance",
+            "allocation_source": "discretionary_spending_allowance",
+            "allocation_source_label": "Discretionary allowance",
+            "discretionary_spending_paused": False,
             "reason": "Protected reserves are funded and the spending plan still has room left this period.",
         }
     else:
@@ -7125,6 +7154,10 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
             "priority": "hold_cash",
             "action": "Hold cash until a clearer surplus or spending plan appears.",
             "amount": 0.0,
+            "amount_label": "Discretionary spend allowance",
+            "allocation_source": "protected_cash_hold",
+            "allocation_source_label": "Cash protection",
+            "discretionary_spending_paused": discretionary_spending_paused,
             "reason": sts_status["detail"],
         }
 
@@ -7161,6 +7194,10 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         "remaining_discretionary_this_period": remaining_discretionary_this_period,
         "weekly_safe_to_spend": weekly_safe_to_spend,
         "current_period_safe_to_spend": current_period_safe_to_spend,
+        "discretionary_spending_allowance": current_period_safe_to_spend,
+        "weekly_discretionary_spending_allowance": weekly_safe_to_spend,
+        "discretionary_spending_paused": discretionary_spending_paused,
+        "extra_payoff_allocation": recurring_extra_payment,
         "fi_target": round(fi_target, 2),
         "fi_progress_amount": fi_progress_amount,
         "fi_progress_percent": fi_progress_percent,
@@ -7199,7 +7236,7 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         },
         "formula_notes": {
             "runway": "runway_reserve_target = monthly_essentials * runway_target_months; runway is protected after due-soon obligations and debt minimums.",
-            "sts": "current_period_safe_to_spend = min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month) after protecting bills/manual obligations, debt minimums, runway, and planned FI cash.",
+            "sts": "discretionary_spending_allowance = min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month) after protecting bills/manual obligations, debt minimums, runway, and planned FI cash.",
             "weekly_sts": "weekly_safe_to_spend = min(weekly_discretionary_allowance, available_discretionary_cash, remaining_discretionary_this_month).",
             "fi_target": "If no FI target is set, annual_required_spend = (monthly_essentials + planned_monthly_discretionary_baseline) * 12 and fi_target = annual_required_spend * 25.",
             "fi_years": "years_to_fi uses a conservative no-growth estimate and is null when there is no known monthly FI contribution.",
@@ -8176,6 +8213,8 @@ def _build_upcoming_risk_insight(
     upcoming_total: float,
     buffer: float,
     safe_to_spend: float,
+    remaining_discretionary_this_month: float,
+    discretionary_spending_paused: bool,
     upcoming_debt_minimum_total: float,
     available_for_minimums: float,
 ) -> dict:
@@ -8211,6 +8250,26 @@ def _build_upcoming_risk_insight(
         )
 
     low_cushion = max(50.0, buffer * 0.5)
+    liquidity_cushion = round(max(cash_total - upcoming_total - buffer, 0.0), 2)
+    if discretionary_spending_paused and liquidity_cushion > low_cushion:
+        return _build_os_insight(
+            key="upcoming_risk_spending_paused",
+            title="Bills are covered; discretionary spending is paused.",
+            severity="info",
+            explanation=(
+                f"Cash still covers ${upcoming_total:.0f} of upcoming obligations plus a ${buffer:.0f} buffer by about ${liquidity_cushion:.0f}, "
+                f"but this month's discretionary allowance has been used."
+            ),
+            suggested_action=(
+                "Keep non-essential spending paused until the monthly cap resets; planned extra debt or savings allocations can still continue."
+                if remaining_discretionary_this_month <= 0.01
+                else "Keep non-essential spending paused until the current discretionary allowance resets."
+            ),
+            sources=["financial_os"],
+            rule="Use a paused-spending message instead of a thin-cushion warning when cash coverage is strong but the discretionary allowance is exhausted.",
+            score=remaining_discretionary_this_month,
+        )
+
     if safe_to_spend <= low_cushion:
         return _build_os_insight(
             key="upcoming_risk_low_cushion",
@@ -8245,13 +8304,19 @@ def _build_stability_insight(
     stability_label: str,
     stability_value: float,
     stability_explanation: str,
+    discretionary_spending_paused: bool,
     runway_months: Optional[float],
     runway_target_months: float,
 ) -> dict:
     label = (stability_label or "Stable").strip()
     lowered = label.lower()
     severity = "success" if lowered in {"strong", "stable"} else "warning"
+    if lowered == "cash stable, spending paused":
+        severity = "info"
     title = (
+        "Cash is stable, but discretionary spending is paused."
+        if lowered == "cash stable, spending paused"
+        else
         "Debt minimums are covered, but stability is fragile."
         if lowered == "fragile"
         else "Short-term stability is improving, but still needs margin."
@@ -8261,6 +8326,8 @@ def _build_stability_insight(
     action = "Hold extra cash in checking until STS and runway improve."
     if lowered in {"strong", "stable"}:
         action = "Keep following the current plan and use surplus deliberately, not reactively."
+    elif discretionary_spending_paused or lowered == "cash stable, spending paused":
+        action = "Keep discretionary spending paused until the cap resets; planned extra debt or savings allocations can still follow the protected plan."
     elif runway_months is not None and runway_months < runway_target_months:
         action = f"Keep building cash until runway moves closer to {runway_target_months:.1f} months."
 
@@ -8350,6 +8417,8 @@ def _build_what_to_do_next_insight(
     stability_label: str,
     priority_debt: Optional[Debt],
     recurring_extra_payment: float,
+    remaining_discretionary_this_month: float,
+    discretionary_spending_paused: bool,
     runway_months: Optional[float],
     runway_target_months: float,
     upcoming_debt_minimum_total: float,
@@ -8400,6 +8469,20 @@ def _build_what_to_do_next_insight(
 
     if priority_debt and recurring_extra_payment > 0:
         debt_name = priority_debt.name or "your highest-APR debt"
+        if discretionary_spending_paused:
+            return _build_os_insight(
+                key="what_to_do_next",
+                title=f"Pause discretionary spending, but send the planned extra to {debt_name}.",
+                severity="info" if stability_value >= 60 else "warning",
+                explanation=(
+                    f"Your discretionary spending allowance is ${available_sts:.0f} this period, but cash still covers bills and reserves. "
+                    f"The extra ${recurring_extra_payment:.0f} recommendation is a planned surplus allocation, not extra room to spend."
+                ),
+                suggested_action=f"Keep non-essential spending paused and apply the planned extra payment to {debt_name}.",
+                sources=["financial_os"],
+                rule="When the discretionary allowance is exhausted but a repeatable surplus still exists, pause discretionary spend while continuing the protected extra debt plan.",
+                score=recurring_extra_payment,
+            )
         return _build_os_insight(
             key="what_to_do_next",
             title=f"Put an extra ${recurring_extra_payment:.0f} toward {debt_name}.",
@@ -8411,6 +8494,20 @@ def _build_what_to_do_next_insight(
             sources=["financial_os"],
             rule="If STS is positive and bills/minimums are covered, direct the capped extra-payment recommendation to the highest-APR active debt.",
             score=recurring_extra_payment,
+        )
+
+    if discretionary_spending_paused and remaining_discretionary_this_month <= 0.01:
+        return _build_os_insight(
+            key="what_to_do_next",
+            title="Pause discretionary spending until the monthly cap resets.",
+            severity="info",
+            explanation=(
+                f"Cash coverage is holding, but the discretionary spending allowance is ${safe_to_spend:.0f} because this month's cap is exhausted."
+            ),
+            suggested_action="Keep bills protected and wait for the next cap reset before new non-essential spending.",
+            sources=["financial_os"],
+            rule="If protected cash is healthy but the discretionary cap is exhausted and no extra allocation is available, keep discretionary spending paused.",
+            score=abs(safe_to_spend),
         )
 
     return _build_os_insight(
@@ -8435,6 +8532,8 @@ def _build_coaching_insights_payload(
     upcoming_total: float,
     safe_to_spend: float,
     available_sts: float,
+    remaining_discretionary_this_month: float,
+    discretionary_spending_paused: bool,
     stability_label: str,
     stability_value: float,
     stability_explanation: str,
@@ -8458,6 +8557,8 @@ def _build_coaching_insights_payload(
         stability_label=stability_label,
         priority_debt=priority_debt,
         recurring_extra_payment=recurring_extra_payment,
+        remaining_discretionary_this_month=remaining_discretionary_this_month,
+        discretionary_spending_paused=discretionary_spending_paused,
         runway_months=runway_months,
         runway_target_months=runway_target_months,
         upcoming_debt_minimum_total=upcoming_debt_minimum_total,
@@ -8472,6 +8573,8 @@ def _build_coaching_insights_payload(
             upcoming_total=upcoming_total,
             buffer=buffer,
             safe_to_spend=safe_to_spend,
+            remaining_discretionary_this_month=remaining_discretionary_this_month,
+            discretionary_spending_paused=discretionary_spending_paused,
             upcoming_debt_minimum_total=upcoming_debt_minimum_total,
             available_for_minimums=available_for_minimums,
         ),
@@ -8496,6 +8599,7 @@ def _build_coaching_insights_payload(
             stability_label=stability_label,
             stability_value=stability_value,
             stability_explanation=stability_explanation,
+            discretionary_spending_paused=discretionary_spending_paused,
             runway_months=runway_months,
             runway_target_months=runway_target_months,
         ),
@@ -8565,6 +8669,15 @@ def os_intelligence(
     financial_os_v2 = _compute_financial_os_v2(db, user_id, window_days=window_days)
 
     safe_to_spend = round(_to_float(financial_os_v2.get("current_period_safe_to_spend"), 0.0), 2)
+    remaining_discretionary_this_month = round(_to_float(financial_os_v2.get("remaining_discretionary_this_month"), 0.0), 2)
+    remaining_discretionary_this_period = round(_to_float(financial_os_v2.get("remaining_discretionary_this_period"), 0.0), 2)
+    discretionary_spending_paused = bool(
+        safe_to_spend <= 0.01
+        and (
+            remaining_discretionary_this_month <= 0.01
+            or remaining_discretionary_this_period <= 0.01
+        )
+    )
     runway_target_months = round(_to_float(financial_os_v2.get("runway_target_months"), 3.0), 2) or 3.0
     runway_months = None
     v2_monthly_essentials = round(_to_float(financial_os_v2.get("monthly_essentials"), essentials_total), 2)
@@ -8596,7 +8709,10 @@ def os_intelligence(
                 "apr": projected_debt.get("apr"),
                 "available_sts": available_sts,
                 "recommended_extra_payment": round(_to_float(projected_debt.get("recommended_extra_payment"), 0.0), 2),
-                "why": "Highest APR debt first after due-soon obligations, runway, and the discretionary cap are protected.",
+                "why": (
+                    "Highest APR debt first after due-soon obligations, runway, and the discretionary cap are protected. "
+                    "This extra payment comes from planned repeatable surplus, not from the discretionary spending allowance."
+                ),
             }
             break
 
@@ -8726,7 +8842,12 @@ def os_intelligence(
     financial_health_score = _round_clean((health_points / health_weights) * 100.0) if health_weights > 0 else 0
 
     stability_factors = []
-    sts_factor = 100.0 if safe_to_spend >= 0 else max(0.0, 100.0 - min(100.0, (abs(safe_to_spend) / max(buffer, 100.0)) * 100.0))
+    if safe_to_spend < 0:
+        sts_factor = max(0.0, 100.0 - min(100.0, (abs(safe_to_spend) / max(buffer, 100.0)) * 100.0))
+    elif discretionary_spending_paused:
+        sts_factor = 35.0
+    else:
+        sts_factor = 100.0
     stability_factors.append(("sts", 40, sts_factor))
     obligation_factor = _clamp01(cash_total / max(upcoming_total + buffer, 1.0)) * 100.0
     stability_factors.append(("obligations", 30, obligation_factor))
@@ -8739,7 +8860,9 @@ def os_intelligence(
 
     stability_weight = sum(weight for _, weight, _ in stability_factors)
     stability_value = _round_clean(sum((weight * value) for _, weight, value in stability_factors) / max(stability_weight, 1))
-    if stability_value < 35:
+    if discretionary_spending_paused and stability_value >= 60 and obligation_factor >= 90:
+        stability_label = "Cash stable, spending paused"
+    elif stability_value < 35:
         stability_label = "Fragile"
     elif stability_value < 60:
         stability_label = "Stabilizing"
@@ -8752,6 +8875,10 @@ def os_intelligence(
         stability_explanation = f"Upcoming obligations and buffer currently exceed cash by {abs(safe_to_spend):.0f}."
     elif upcoming_debt_minimum_total > 0 and available_for_minimums < upcoming_debt_minimum_total:
         stability_explanation = "Short-term cash is positive, but upcoming debt minimums are only partially covered after other obligations."
+    elif discretionary_spending_paused:
+        stability_explanation = (
+            "Cash is strong and bills are covered, but discretionary spending is paused because the monthly cap is exhausted."
+        )
     elif runway_months is not None and runway_months < runway_target_months:
         stability_explanation = f"Near-term cash is covered, but runway is only {runway_months:.1f} of {runway_target_months:.1f} target months."
     else:
@@ -8876,6 +9003,8 @@ def os_intelligence(
         upcoming_total=upcoming_total,
         safe_to_spend=safe_to_spend,
         available_sts=available_sts,
+        remaining_discretionary_this_month=remaining_discretionary_this_month,
+        discretionary_spending_paused=discretionary_spending_paused,
         stability_label=stability_label,
         stability_value=stability_value,
         stability_explanation=stability_explanation,
