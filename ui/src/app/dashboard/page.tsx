@@ -837,14 +837,17 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     osState?.debt_utilization?.total_balance,
     trackedDebtItemsTotal
   );
-  const safeToSpendToday = firstDashboardMoneyValue(
+  const discretionarySpendAllowance = firstDashboardMoneyValue(
+    financialOsV2?.discretionary_spending_allowance,
     financialOsV2?.current_period_safe_to_spend,
     nextBestDollar?.safe_to_spend_today,
     nextBestDollar?.calculation?.safe_to_spend_today,
     stsBreakdown?.final_safe_to_spend,
     intelligenceContext?.safe_to_spend_today
   );
+  const safeToSpendToday = discretionarySpendAllowance;
   const weeklySafeToSpend = firstDashboardMoneyValue(
+    financialOsV2?.weekly_discretionary_spending_allowance,
     financialOsV2?.weekly_safe_to_spend,
     safeToSpendToday
   );
@@ -911,6 +914,14 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const discretionaryCapDetails = financialOsV2?.discretionary_cap_details ?? null;
   const fiTargetDetails = financialOsV2?.fi_target_details ?? null;
   const nextBestActionAmount = firstDashboardMoneyValue(nextBestAction?.amount);
+  const extraPayoffAllocation = firstDashboardMoneyValue(
+    financialOsV2?.extra_payoff_allocation,
+    nextBestAction?.priority === "pay_high_apr_debt" ? nextBestAction?.amount : null,
+    financialOsV2?.debt_payoff_projection?.recurring_extra_payment
+  );
+  const discretionarySpendingPaused = Boolean(
+    financialOsV2?.discretionary_spending_paused ?? nextBestAction?.discretionary_spending_paused
+  );
   const coachingSeverity = nextBestAction
     ? financialOsPrioritySeverity(nextBestAction.priority)
     : intelligence?.insights?.what_to_do_next?.severity;
@@ -920,6 +931,8 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const coachingPriorityLabel = nextBestAction
     ? financialOsPriorityLabel(nextBestAction.priority)
     : (intelligence?.insights?.what_to_do_next?.severity || "info");
+  const coachingAmountLabel = nextBestAction?.amount_label || "Suggested amount";
+  const coachingSourceLabel = nextBestAction?.allocation_source_label || null;
   const safeToSpendBeforeBuffer = (() => {
     const cash = firstDashboardMoneyValue(
       stsBreakdown?.total_cash,
@@ -945,7 +958,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     financialOsV2?.formula_notes?.sts
       ? `${financialOsV2.formula_notes.sts} Large cash balances are not fully spendable because obligations, runway, and FI reserves stay protected first.`
       : safeToSpendBeforeBuffer != null
-      ? "Safe-to-Spend before buffer = cash total - upcoming obligations. Final Safe-to-Spend = that amount - protected buffer."
+      ? "Safe-to-Spend before buffer = cash total - upcoming obligations. Discretionary spending allowance = that amount after protected limits are applied."
       : (nextBestDollar?.calculation?.formula || "safe_to_spend_today = cash_total - upcoming_total - buffer");
   const statementCoverage = useMemo(
     () => statementsTrackedByDebt(latestPerCard as any, trackedDebtItems as any),
@@ -1013,6 +1026,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     nextDollarImpact?.estimated_payoff_months_with_extra
   );
   const availableStsForDebt = firstDashboardMoneyValue(
+    financialOsV2?.discretionary_spending_allowance,
     financialOsV2?.current_period_safe_to_spend,
     nextDollarImpact?.available_sts,
     intelligenceContext?.available_sts,
@@ -1034,6 +1048,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         : (financialOsV2?.formula_notes?.fi_target || "FI target details are loading.")
     : (intelligenceContext?.fi_cash_target_label || "Loading FI target.");
   const stabilityToneClass = stabilityTone(stabilityMeter?.label);
+  const payoffAllocationNote =
+    availableStsForDebt != null && Number(payoffRecurringExtra || 0) > 0 && Number(availableStsForDebt || 0) <= 0
+      ? "Discretionary spend allowance is $0, but the extra payoff allocation above comes from planned monthly surplus after bills, minimums, runway, and savings protections."
+      : availableStsForDebt != null
+      ? `Discretionary spend allowance is ${fmtMoney(Number(availableStsForDebt || 0))}, and the payoff model still only uses the repeatable protected extra above rather than the full allowance.`
+      : "The payoff view uses the smaller repeatable extra payment, not the full discretionary spending allowance.";
   const osInsights = useMemo(
     () => (intelligence?.insights?.items || []).slice(0, 5),
     [intelligence]
@@ -1496,9 +1516,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 {coachingExplanation}
               </div>
 
-              <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Weekly safe-to-spend</div>
+                <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Weekly spend allowance</div>
                   <div className="mt-2 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(weeklySafeToSpend, {
                       loading: nextBestDollarLoadingState,
@@ -1507,7 +1527,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   </div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Remaining this month</div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Allowance left this month</div>
                   <div className="mt-2 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(remainingDiscretionaryThisMonth, {
                       loading: nextBestDollarLoadingState,
@@ -1516,7 +1536,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   </div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Suggested amount</div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">{coachingAmountLabel}</div>
                   <div className="mt-2 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(nextBestActionAmount, {
                       loading: nextBestDollarLoadingState,
@@ -1531,6 +1551,11 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 <div className="mt-2 text-sm font-medium leading-6 text-zinc-100">
                   {coachingSuggestedAction}
                 </div>
+                {coachingSourceLabel ? (
+                  <div className="mt-2 text-xs leading-5 text-zinc-400">
+                    Source: {coachingSourceLabel}. {discretionarySpendingPaused ? "A $0 spending allowance means discretionary spending is paused, not that cash is gone." : "This is tracked separately from your discretionary spending allowance."}
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -1647,16 +1672,16 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 {stabilityMeter?.explanation || "Loading stability explanation."}
               </div>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Final Safe-to-Spend</div>
+                  <div className="text-xs text-zinc-400">Discretionary spend allowance</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(
                       safeToSpendToday,
                       { loading: nextBestDollarLoadingState, unavailable: nextBestDollarUnavailable }
                     )}
                   </div>
-                  <div className="mt-1 text-[11px] text-zinc-500">Current period V2 allowance</div>
+                  <div className="mt-1 text-[11px] text-zinc-500">Current period V2 non-essential spending cap</div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
                   <div className="text-xs text-zinc-400">Weekly Safe-to-Spend</div>
@@ -1669,7 +1694,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="mt-1 text-[11px] text-zinc-500">Reserve-aware weekly guidance</div>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Remaining Discretionary</div>
+                  <div className="text-xs text-zinc-400">Remaining discretionary allowance</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(remainingDiscretionaryThisMonth, {
                       loading: nextBestDollarLoadingState,
@@ -1820,7 +1845,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
 
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Repeatable extra</div>
+                  <div className="text-xs text-zinc-400">Extra payoff allocation</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {formatDashboardMoney(payoffRecurringExtra)}
                   </div>
@@ -1854,9 +1879,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
-                {availableStsForDebt != null
-                  ? `Final Safe-to-Spend is ${fmtMoney(Number(availableStsForDebt || 0))}, but only the repeatable protected extra above is assumed for debt payoff.`
-                  : "The payoff view uses the smaller repeatable extra payment, not the full STS balance."}
+                {payoffAllocationNote}
               </div>
 
               <div className="mt-3 text-xs text-zinc-500">
@@ -1875,13 +1898,13 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-center justify-between">
                 <div className="text-sm font-semibold text-zinc-100">
-                  Safe-to-Spend Breakdown
+                  Spending Allowance Breakdown
                 </div>
                 <div className="text-xs text-zinc-400">STS formula</div>
               </div>
 
               <div className="mt-2 text-xs text-zinc-400">
-                Final Safe-to-Spend is the V2 current-period allowance after protected obligations, runway, and FI cash are protected.
+                Discretionary spend allowance is the V2 current-period non-essential spending cap after protected obligations, runway, and FI cash are protected.
               </div>
 
               <div className="mt-3 text-3xl font-semibold text-zinc-100">
@@ -1955,8 +1978,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     <span className="font-mono text-zinc-200">{formatDashboardMoney(availableDiscretionaryCash)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
-                    <span>Remaining discretionary this month</span>
+                    <span>Remaining discretionary allowance</span>
                     <span className="font-mono text-zinc-200">{formatDashboardMoney(remainingDiscretionaryThisMonth)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Extra payoff allocation</span>
+                    <span className="font-mono text-zinc-200">{formatDashboardMoney(extraPayoffAllocation)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span>Discretionary cap source</span>
@@ -1969,7 +1996,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     <span className="font-mono text-zinc-200">{formatDashboardMoney(weeklySafeToSpend)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-300">
-                    <span>Final Safe-to-Spend</span>
+                    <span>Discretionary spend allowance</span>
                     <span className="font-mono text-zinc-100">{formatDashboardMoney(safeToSpendToday)}</span>
                   </div>
                   <div className="text-[11px] text-zinc-500">
@@ -2024,7 +2051,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     <span className="font-mono text-zinc-200">{formatDashboardMoney(protectedBuffer)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-300">
-                    <span>Final Safe-to-Spend</span>
+                    <span>Discretionary spend allowance</span>
                     <span className="font-mono text-zinc-100">{formatDashboardMoney(safeToSpendToday)}</span>
                   </div>
                   <div className="text-[11px] text-zinc-500">
@@ -2043,7 +2070,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
 
               <div className="mt-3 text-xs text-zinc-500">
                 {hasFinancialOsV2
-                  ? "Large cash balances are not all spendable. Financial OS V2 protects due-soon obligations, runway reserves, and planned FI cash before discretionary spending is allowed."
+                  ? "A $0 discretionary spending allowance does not mean cash is gone. Financial OS V2 protects due-soon obligations, runway reserves, and planned FI cash before non-essential spending is allowed."
                   : "Financial OS uses your counted cash totals, including non-duplicate linked cash accounts, before applying upcoming obligations and buffer."}
               </div>
 

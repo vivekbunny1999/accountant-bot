@@ -893,7 +893,11 @@ export type FinancialOsV2NextBestAction = {
   priority?: string | null;
   action?: string | null;
   amount?: number | null;
+  amount_label?: string | null;
   reason?: string | null;
+  allocation_source?: string | null;
+  allocation_source_label?: string | null;
+  discretionary_spending_paused?: boolean | null;
   debt_id?: number | null;
 };
 
@@ -948,6 +952,10 @@ export type FinancialOsV2 = {
   remaining_discretionary_this_period?: number | null;
   weekly_safe_to_spend?: number | null;
   current_period_safe_to_spend?: number | null;
+  discretionary_spending_allowance?: number | null;
+  weekly_discretionary_spending_allowance?: number | null;
+  discretionary_spending_paused?: boolean | null;
+  extra_payoff_allocation?: number | null;
   fi_target?: number | null;
   fi_progress_amount?: number | null;
   fi_progress_percent?: number | null;
