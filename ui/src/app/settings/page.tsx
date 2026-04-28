@@ -10,6 +10,8 @@ import {
   createPlaidLinkToken,
   Debt,
   exchangePlaidPublicToken,
+  FinancialOsSetupItem,
+  FinancialOsSetupStatus,
   getOsState,
   getPasswordPolicy,
   getUserSettings,
@@ -75,6 +77,72 @@ function formatDateTime(value?: string | null) {
   const dt = new Date(value);
   if (Number.isNaN(dt.getTime())) return value;
   return dt.toLocaleString();
+}
+
+function setupStatusLabel(status?: string | null) {
+  switch ((status || "").toLowerCase()) {
+    case "confirmed":
+      return "Confirmed";
+    case "detected":
+      return "Detected";
+    case "default":
+      return "Default";
+    case "missing":
+      return "Missing";
+    case "derived":
+      return "Derived";
+    default:
+      return "Unknown";
+  }
+}
+
+function setupStatusTone(status?: string | null) {
+  switch ((status || "").toLowerCase()) {
+    case "confirmed":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "detected":
+    case "derived":
+      return "border-sky-500/30 bg-sky-500/10 text-sky-200";
+    case "default":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+    case "missing":
+      return "border-red-500/30 bg-red-500/10 text-red-200";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
+function trustLevelTone(level?: string | null) {
+  switch ((level || "").toLowerCase()) {
+    case "high":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "medium":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+    case "low":
+      return "border-red-500/30 bg-red-500/10 text-red-200";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
+function formatSetupItemValue(item?: FinancialOsSetupItem | null) {
+  if (!item || item.value == null || item.value === "") return null;
+  if (typeof item.value === "string") return item.value;
+
+  switch (item.key) {
+    case "monthly_income":
+      return `${formatMoney(item.value)}/month`;
+    case "fixed_essentials":
+      return `${formatMoney(item.value)}/month`;
+    case "runway_target":
+      return `${Number(item.value).toFixed(Number.isInteger(item.value) ? 0 : 1)} months`;
+    case "fi_target":
+      return formatMoney(item.value);
+    case "debt_registry":
+      return `${item.value} ${Number(item.value) === 1 ? "debt" : "debts"}`;
+    default:
+      return String(item.value);
+  }
 }
 
 function loadPlaidLinkScript(): Promise<void> {
@@ -180,6 +248,7 @@ type SettingsModel = {
 
     /** Paycheck split preferences */
     paycheck: {
+      monthlyIncome: number;
       cadence: PaycheckCadence;
       paydayHint: string; // "Fri" / "Every other Wed" etc (free text)
       splitMode: "ThreeCaps" | "ManualBuckets";
@@ -375,6 +444,7 @@ function defaultSettings(): SettingsModel {
         debtCostRateHighPct: 18,
       },
       paycheck: {
+        monthlyIncome: 0,
         cadence: "Weekly",
         paydayHint: "Friday",
         splitMode: "ThreeCaps",
@@ -903,6 +973,7 @@ export default function SettingsPage() {
   const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
   const [plaidCashContribution, setPlaidCashContribution] = useState(0);
   const [plaidDuplicateCount, setPlaidDuplicateCount] = useState(0);
+  const [setupStatus, setSetupStatus] = useState<FinancialOsSetupStatus | null>(null);
   const [fiTargetInput, setFiTargetInput] = useState("");
   const [fiTargetStatus, setFiTargetStatus] = useState<string | null>(null);
   const [fiTargetError, setFiTargetError] = useState<string | null>(null);
@@ -1044,6 +1115,7 @@ export default function SettingsPage() {
       setPlaidTransactions(txRes.transactions || []);
       setPlaidCashContribution(Number(osState?.cash_sources?.plaid_cash_total || 0));
       setPlaidDuplicateCount((osState?.cash_sources?.plaid_duplicate_accounts_skipped || []).length);
+      setSetupStatus(osState?.setup_status || osState?.financial_os_v2?.setup_status || null);
       if (!opts?.silent && (accountsRes.accounts?.length || 0) > 0) {
         setPlaidStatus(
           `Loaded ${accountsRes.accounts.length} linked Plaid account${accountsRes.accounts.length === 1 ? "" : "s"}.`
@@ -1077,6 +1149,9 @@ export default function SettingsPage() {
       alerts: settings.alerts.enabled ? settings.alerts.frequency : "Off",
     };
   }, [settings]);
+  const setupItems = setupStatus?.items ?? [];
+  const setupCompletedCount = Number(setupStatus?.completed_count ?? 0);
+  const setupTotalCount = Number(setupStatus?.total_count ?? setupItems.length ?? 0);
 
   const verificationConfigured = Boolean(bootstrap?.beta?.email_verification_configured && user?.email_verification_configured);
   const verificationMeta = emailVerificationMeta(user?.email_verification_status, verificationConfigured);
@@ -1404,6 +1479,90 @@ export default function SettingsPage() {
         <div className="grid gap-5 lg:grid-cols-2">
           {/* LEFT: Financial OS */}
           <div className="space-y-5">
+            <Card>
+              <div id="setup-entry" className="scroll-mt-24">
+                <SectionTitle
+                  title="Financial OS Setup"
+                  subtitle="Start here. These few inputs power the dashboard recommendations."
+                />
+                <Divider />
+
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase tracking-[0.18em] ${trustLevelTone(setupStatus?.trust_level)}`}>
+                    Trust level: {setupStatus?.trust_level || "Loading"}
+                  </span>
+                  <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-200">
+                    Completed: {setupCompletedCount} / {setupTotalCount || 7}
+                  </span>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-300">
+                  {(setupStatus?.trust_level || "").toLowerCase() === "high"
+                    ? "Recommendations are based on confirmed setup."
+                    : (setupStatus?.trust_level || "").toLowerCase() === "medium"
+                    ? "Recommendations are usable, but some assumptions should be confirmed."
+                    : "Some recommendations are estimated until setup is completed."}
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Link href="/settings#setup-income" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                    Income / paycheck
+                  </Link>
+                  <Link href="/bills" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                    Bills
+                  </Link>
+                  <Link href="/debts" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                    Debts
+                  </Link>
+                  <Link href="/settings#setup-fi-target" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                    FI target
+                  </Link>
+                  <Link href="/settings#setup-runway" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                    Runway target
+                  </Link>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  {setupItems.length ? (
+                    setupItems.map((item) => {
+                      const formattedValue = formatSetupItemValue(item);
+                      return (
+                        <div key={item.key || item.label} className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="text-sm font-medium text-zinc-100">{item.label}</div>
+                                <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${setupStatusTone(item.status)}`}>
+                                  {setupStatusLabel(item.status)}
+                                </span>
+                              </div>
+                              {formattedValue ? (
+                                <div className="mt-2 text-sm font-medium text-zinc-200">{formattedValue}</div>
+                              ) : null}
+                              <div className="mt-2 text-sm leading-6 text-zinc-400">{item.reason}</div>
+                            </div>
+
+                            {item.href ? (
+                              <Link
+                                href={item.href}
+                                className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+                              >
+                                {item.action || "Open"}
+                              </Link>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                      Setup checklist is loading.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
+
             {/* Safe-to-Spend */}
             <Card>
               <SectionTitle
@@ -1530,13 +1689,14 @@ export default function SettingsPage() {
 
             {/* Stage targets */}
             <Card>
-              <SectionTitle
-                title="Stage Targets"
-                subtitle="Set the milestones that guide your Financial OS stage and progress."
-              />
-              <Divider />
+              <div id="setup-runway" className="scroll-mt-24">
+                <SectionTitle
+                  title="Stage Targets"
+                  subtitle="Set the milestones that guide your Financial OS stage and progress."
+                />
+                <Divider />
 
-              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-2">
                 <NumberInput
                   label="Crisis threshold"
                   desc="If runway falls below this, the app treats money as urgent."
@@ -1646,22 +1806,46 @@ export default function SettingsPage() {
                     }))
                   }
                 />
-              </div>
+                </div>
 
-              <div className="mt-3 text-xs text-zinc-500">
-                These targets help the app choose the next priority automatically.
+                <div className="mt-3 text-xs text-zinc-500">
+                  These targets help the app choose the next priority automatically.
+                </div>
               </div>
             </Card>
 
             {/* Paycheck splits */}
             <Card>
-              <SectionTitle
-                title="Paycheck Split"
-                subtitle="Choose how each paycheck should be divided across bills, day-to-day spending, and extra progress."
-              />
-              <Divider />
+              <div id="setup-income" className="scroll-mt-24">
+                <SectionTitle
+                  title="Paycheck Split"
+                  subtitle="Choose how each paycheck should be divided across bills, day-to-day spending, and extra progress."
+                />
+                <Divider />
 
-              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-3">
+                <Input
+                  label="Monthly income confirmation"
+                  desc="Optional setup confirmation for the trust checklist."
+                  value={settings.financialOS.paycheck.monthlyIncome > 0 ? String(settings.financialOS.paycheck.monthlyIncome) : ""}
+                  onChange={(v) =>
+                    setSettings((p) => {
+                      const trimmed = v.trim();
+                      const parsed = trimmed ? Number(trimmed.replace(/[$,\s]/g, "")) : 0;
+                      return {
+                        ...p,
+                        financialOS: {
+                          ...p.financialOS,
+                          paycheck: {
+                            ...p.financialOS.paycheck,
+                            monthlyIncome: trimmed && Number.isFinite(parsed) ? Math.max(0, parsed) : 0,
+                          },
+                        },
+                      };
+                    })
+                  }
+                  placeholder="3766.76"
+                />
                 <Select
                   label="Pay cadence"
                   desc="Used to time forecasts and paycheck reminders."
@@ -1692,9 +1876,9 @@ export default function SettingsPage() {
                   }
                   placeholder="Friday"
                 />
-              </div>
+                </div>
 
-              <div className="mt-3">
+                <div className="mt-3">
                 <ChipGroup
                   label="Split mode"
                   desc="Three Caps keeps things simple. Custom buckets lets you set exact percentages."
@@ -1713,9 +1897,9 @@ export default function SettingsPage() {
                     { label: "Custom Buckets", value: "ManualBuckets" },
                   ]}
                 />
-              </div>
+                </div>
 
-              {settings.financialOS.paycheck.splitMode === "ThreeCaps" ? (
+                {settings.financialOS.paycheck.splitMode === "ThreeCaps" ? (
                 <div className="mt-3 grid gap-3 sm:grid-cols-3">
                   <NumberInput
                     label="Essentials cap"
@@ -1859,9 +2043,9 @@ export default function SettingsPage() {
                     }
                   />
                 </div>
-              )}
+                )}
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Select
                   label="Rounding"
                   desc="Rounds recommendations into cleaner numbers."
@@ -1882,18 +2066,20 @@ export default function SettingsPage() {
                     { label: "Nearest $10", value: "Nearest10" },
                   ]}
                 />
+                </div>
               </div>
             </Card>
 
             {/* Debt strategy */}
             <Card>
-              <SectionTitle
-                title="Debt Strategy"
-                subtitle="Choose the payoff style that should guide extra payments when money is available."
-              />
-              <Divider />
+              <div id="setup-debt-strategy" className="scroll-mt-24">
+                <SectionTitle
+                  title="Debt Strategy"
+                  subtitle="Choose the payoff style that should guide extra payments when money is available."
+                />
+                <Divider />
 
-              <ChipGroup<DebtStrategy>
+                <ChipGroup<DebtStrategy>
                 label="Strategy"
                 desc="Avalanche focuses on interest. Snowball focuses on quick wins. Hybrid balances both with safety rules."
                 value={settings.financialOS.debt.strategy}
@@ -1908,9 +2094,9 @@ export default function SettingsPage() {
                   { label: "Snowball", value: "Snowball" },
                   { label: "Hybrid (Next Best Dollar)", value: "Hybrid (Next Best Dollar)" },
                 ]}
-              />
+                />
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <NumberInput
                   label="Minimum extra payment"
                   desc="Ignore tiny extra payment suggestions below this amount."
@@ -1947,9 +2133,9 @@ export default function SettingsPage() {
                     }))
                   }
                 />
-              </div>
+                </div>
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Prefer keeping cards open"
                   desc="Avoids closure-style recommendations and focuses on payoff and utilization."
@@ -1979,9 +2165,9 @@ export default function SettingsPage() {
                     }))
                   }
                 />
-              </div>
+                </div>
 
-              <div className="mt-3">
+                <div className="mt-3">
                 <SectionTitle
                   title="Next Best Dollar Guardrails"
                   subtitle="These rules keep extra debt recommendations practical and low-stress."
@@ -2057,17 +2243,19 @@ export default function SettingsPage() {
                   />
                 </div>
               </div>
+              </div>
             </Card>
 
             {/* Savings & Scoreboards */}
             <Card>
-              <SectionTitle
-                title="Savings & Scoreboards"
-                subtitle="Choose your savings targets and the progress trackers you want to see around the app."
-              />
-              <Divider />
+              <div id="setup-fi-target" className="scroll-mt-24">
+                <SectionTitle
+                  title="Savings & Scoreboards"
+                  subtitle="Choose your savings targets and the progress trackers you want to see around the app."
+                />
+                <Divider />
 
-              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-2">
                 <NumberInput
                   label="Emergency fund goal"
                   desc="How many months of cushion you want in your emergency fund."
@@ -2106,9 +2294,9 @@ export default function SettingsPage() {
                     { label: "Low", value: "Low" },
                   ]}
                 />
-              </div>
+                </div>
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Enable sinking funds"
                   desc="Set aside money for expected costs like travel, car care, or gifts."
@@ -2138,9 +2326,9 @@ export default function SettingsPage() {
                     }))
                   }
                 />
-              </div>
+                </div>
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Input
                   label="FI target (optional)"
                   desc="Set your own FI cash target, or leave this blank to derive it from annual required spend x 25."
@@ -2168,9 +2356,9 @@ export default function SettingsPage() {
                     Save FI target
                   </button>
                 </div>
-              </div>
+                </div>
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Show Stability meter"
                   desc="Track whether your cash flow and runway are getting steadier."
@@ -2199,9 +2387,9 @@ export default function SettingsPage() {
                     }))
                   }
                 />
-              </div>
+                </div>
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
                   label="Show FI progress"
                   desc="Show long-term wealth progress in a simple way."
@@ -2230,6 +2418,7 @@ export default function SettingsPage() {
                     }))
                   }
                 />
+                </div>
               </div>
             </Card>
           </div>
