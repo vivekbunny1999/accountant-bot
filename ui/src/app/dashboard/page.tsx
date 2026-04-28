@@ -2,6 +2,7 @@
 
 import {
   FinancialOsDecisionPlan,
+  FinancialOsDecisionPlanAction,
   FinancialOsSetupItem,
   FinancialOsSetupStatus,
   FinancialOsV2,
@@ -179,17 +180,73 @@ function decisionPlanStatusLabel(status?: string | null) {
   }
 }
 
-function decisionPlanConfidenceTone(confidence?: string | null) {
-  switch ((confidence || "").toLowerCase()) {
-    case "high":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
-    case "medium":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-200";
-    case "low":
-      return "border-red-500/30 bg-red-500/10 text-red-200";
-    default:
-      return "border-white/10 bg-white/5 text-zinc-300";
+function decisionCommandFromText(text?: string | null) {
+  const normalized = String(text || "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized.includes("pause") && normalized.includes("spend")) return "Pause spending";
+  if (normalized.includes("debt") || normalized.includes("payment")) return "Pay debt";
+  if (
+    normalized.includes("protect") ||
+    normalized.includes("reserve") ||
+    normalized.includes("buffer") ||
+    normalized.includes("cash")
+  ) {
+    return "Protect cash";
   }
+  if (normalized.includes("setup") || normalized.includes("confirm")) return "Confirm setup";
+  if (normalized.includes("bill")) return "Review bills";
+  if (normalized.includes("save")) return "Save cash";
+  return null;
+}
+
+function decisionActionCommand(action?: FinancialOsDecisionPlanAction | null) {
+  switch ((action?.type || "").toLowerCase()) {
+    case "pause_spending":
+      return "Pause spending";
+    case "pay_debt":
+      return "Pay debt";
+    case "protect_cash":
+      return "Protect cash";
+    case "confirm_setup":
+      return "Confirm setup";
+    case "review_bill":
+      return "Review bills";
+    case "save_cash":
+      return "Save cash";
+    default: {
+      const labelCommand = decisionCommandFromText(action?.label);
+      if (labelCommand) return labelCommand;
+
+      const cleanedLabel = String(action?.label || "").trim().replace(/[.]+$/, "");
+      return cleanedLabel && cleanedLabel.length <= 36 ? cleanedLabel : null;
+    }
+  }
+}
+
+function decisionHeadlineFromActions(
+  actions: FinancialOsDecisionPlanAction[],
+  fallback?: string | null
+) {
+  const commands: string[] = [];
+
+  for (const action of actions) {
+    const command = decisionActionCommand(action);
+    if (command && !commands.includes(command)) commands.push(command);
+    if (commands.length === 2) break;
+  }
+
+  const fallbackCommand = decisionCommandFromText(fallback);
+  if (!commands.length && fallbackCommand) commands.push(fallbackCommand);
+
+  return commands.length ? commands.join(" • ") : "Review plan";
+}
+
+function decisionActionMeta(action?: FinancialOsDecisionPlanAction | null) {
+  const parts: string[] = [];
+  if (action?.amount != null) parts.push(fmtMoney(action.amount));
+  if (action?.target) parts.push(action.target);
+  if (action?.timing) parts.push(action.timing);
+  return parts.join(" • ");
 }
 
 function setupTrustCopy(status?: FinancialOsSetupStatus | null) {
@@ -514,39 +571,6 @@ function insightTone(severity?: string | null) {
       return "border-emerald-500/20 bg-emerald-500/10 text-emerald-200";
     default:
       return "border-sky-500/20 bg-sky-500/10 text-sky-200";
-  }
-}
-
-function financialOsPrioritySeverity(priority?: string | null) {
-  switch ((priority || "").toLowerCase()) {
-    case "protect_due_soon":
-      return "critical";
-    case "build_runway":
-    case "pay_high_apr_debt":
-      return "warning";
-    case "fund_fi":
-      return "success";
-    default:
-      return "info";
-  }
-}
-
-function financialOsPriorityLabel(priority?: string | null) {
-  switch ((priority || "").toLowerCase()) {
-    case "protect_due_soon":
-      return "Protect Due Soon";
-    case "build_runway":
-      return "Build Runway";
-    case "pay_high_apr_debt":
-      return "Pay High-APR Debt";
-    case "fund_fi":
-      return "Fund FI";
-    case "discretionary":
-      return "Discretionary";
-    case "hold_cash":
-      return "Hold Cash";
-    default:
-      return "Next Step";
   }
 }
 
@@ -1011,8 +1035,35 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const setupItems = setupStatus?.items ?? [];
   const setupCompletedCount = Number(setupStatus?.completed_count ?? 0);
   const setupTotalCount = Number(setupStatus?.total_count ?? setupItems.length ?? 0);
-  const decisionPlanActions = decisionPlan?.actions ?? [];
-  const decisionPlanAvoid = decisionPlan?.avoid ?? [];
+  const decisionPlanActions = useMemo(
+    () =>
+      [...(decisionPlan?.actions ?? [])]
+        .sort((left, right) => {
+          const leftPriority =
+            typeof left?.priority === "number" && Number.isFinite(left.priority)
+              ? left.priority
+              : Number.MAX_SAFE_INTEGER;
+          const rightPriority =
+            typeof right?.priority === "number" && Number.isFinite(right.priority)
+              ? right.priority
+              : Number.MAX_SAFE_INTEGER;
+          return leftPriority - rightPriority;
+        })
+        .slice(0, 3),
+    [decisionPlan?.actions]
+  );
+  const decisionPlanImportant = useMemo(
+    () =>
+      (decisionPlan?.avoid ?? [])
+        .map((item) => String(item.label || item.reason || "").trim())
+        .filter(Boolean)
+        .slice(0, 2),
+    [decisionPlan]
+  );
+  const decisionPlanHeadline = decisionHeadlineFromActions(
+    decisionPlanActions,
+    decisionPlan?.headline
+  );
   const hasFinancialOsV2 = Boolean(financialOsV2);
   const financialOsCashTotal = firstDashboardMoneyValue(
     financialOsV2?.total_cash,
@@ -1107,10 +1158,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const nextBestAction = financialOsV2?.next_best_action ?? null;
   const stsStatus = financialOsV2?.sts_status ?? null;
   const fiTargetDetails = financialOsV2?.fi_target_details ?? null;
-  const nextBestActionAmount = firstDashboardMoneyValue(nextBestAction?.amount);
-  const discretionarySpendingPaused = Boolean(
-    financialOsV2?.discretionary_spending_paused ?? nextBestAction?.discretionary_spending_paused
-  );
   const financialOsV2WithExplanation = financialOsV2 as FinancialOsV2WithExplanation | null;
   const discretionaryExplanation = ((financialOsV2WithExplanation?.discretionary_explanation) ?? (() => {
     const fallbackFinalAllowance = firstDashboardMoneyValue(
@@ -1168,17 +1215,11 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const discretionaryCapPercentLabel = formatDashboardPercent(
     discretionaryExplanation?.discretionary_cap_percent
   );
-  const coachingSeverity = nextBestAction
-    ? financialOsPrioritySeverity(nextBestAction.priority)
-    : intelligence?.insights?.what_to_do_next?.severity;
-  const coachingTitle = nextBestAction?.action || intelligence?.insights?.what_to_do_next?.title || "What To Do Next";
-  const coachingExplanation = nextBestAction?.reason || intelligence?.insights?.what_to_do_next?.explanation || "Waiting for your Financial OS guidance.";
-  const coachingSuggestedAction = nextBestAction?.action || intelligence?.insights?.what_to_do_next?.suggested_action || "Review the current plan.";
-  const coachingPriorityLabel = nextBestAction
-    ? financialOsPriorityLabel(nextBestAction.priority)
-    : (intelligence?.insights?.what_to_do_next?.severity || "info");
-  const coachingAmountLabel = nextBestAction?.amount_label || "Suggested amount";
-  const coachingSourceLabel = nextBestAction?.allocation_source_label || null;
+  const decisionPlanSummary =
+    decisionPlan?.summary ||
+    nextBestAction?.reason ||
+    intelligence?.insights?.what_to_do_next?.explanation ||
+    "Your Financial OS is preparing the clearest next step.";
   const safeToSpendBeforeBuffer = (() => {
     const cash = firstDashboardMoneyValue(
       stsBreakdown?.total_cash,
@@ -1304,10 +1345,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     () => (intelligence?.insights?.items || []).slice(0, 5),
     [intelligence]
   );
-  const whatToDoNext = intelligence?.insights?.what_to_do_next ?? osInsights[0] ?? null;
   const secondaryInsights = useMemo(
-    () => osInsights.filter((item) => item.key !== whatToDoNext?.key).slice(0, 4),
-    [osInsights, whatToDoNext]
+    () => osInsights.slice(0, 4),
+    [osInsights]
   );
   const plaidDisplaySummary = useMemo(
     () => classifyPlaidDisplayRows(plaidTransactions.filter((txn) => isPlaidSpend(txn))),
@@ -1739,70 +1779,109 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           </div>
         )}
 
-        {settings.show_financial_os_panels && (nextBestAction || whatToDoNext) && (
+        {settings.show_financial_os_panels && (
           <div className="grid gap-3 xl:grid-cols-[1.35fr,1fr]">
-            <div className="rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_35%),#0E141C] p-5">
+            <div className="rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.18),transparent_35%),#0E141C] p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_60px_rgba(8,15,25,0.35)]">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-sm font-semibold text-zinc-100">What To Do Next</div>
+                  <div className="text-sm font-semibold text-zinc-100">Decision Plan</div>
                   <div className="mt-1 text-xs text-zinc-400">
-                    Weekly coaching now follows Financial OS V2 reserve-aware safe-to-spend.
+                    Your Financial OS turns the numbers into actions.
                   </div>
                 </div>
-                <div className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${insightTone(coachingSeverity)}`}>
-                  {coachingPriorityLabel}
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase tracking-[0.18em] ${decisionPlanStatusTone(decisionPlan?.status)}`}>
+                    {decisionPlanStatusLabel(decisionPlan?.status)}
+                  </span>
+                  {decisionPlanActions.length ? (
+                    <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-200">
+                      {decisionPlanActions.length} action{decisionPlanActions.length === 1 ? "" : "s"}
+                    </span>
+                  ) : null}
                 </div>
               </div>
 
-              <div className="mt-5 max-w-3xl text-2xl font-semibold leading-tight text-zinc-100 sm:text-3xl">
-                {coachingTitle}
-              </div>
+              {decisionPlan ? (
+                <>
+                  <div className="mt-5 rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(34,197,94,0.14),transparent_42%),#0B0F14] p-5">
+                    <div className="text-2xl font-semibold leading-tight text-zinc-100 sm:text-3xl">
+                      {decisionPlanHeadline}
+                    </div>
+                    <div className="mt-3 max-w-3xl text-sm leading-6 text-zinc-300">
+                      {decisionPlanSummary}
+                    </div>
+                  </div>
 
-              <div className="mt-4 max-w-2xl text-sm leading-6 text-zinc-300">
-                {coachingExplanation}
-              </div>
+                  <div className="mt-4 space-y-3">
+                    {decisionPlanActions.length ? (
+                      decisionPlanActions.map((action, index) => {
+                        const actionMeta = decisionActionMeta(action);
 
-                <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Weekly spend allowance</div>
-                  <div className="mt-2 text-lg font-semibold text-zinc-100">
-                    {formatDashboardMoney(weeklySafeToSpend, {
-                      loading: nextBestDollarLoadingState,
-                      unavailable: nextBestDollarUnavailable,
-                    })}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Allowance left this month</div>
-                  <div className="mt-2 text-lg font-semibold text-zinc-100">
-                    {formatDashboardMoney(remainingDiscretionaryThisMonth, {
-                      loading: nextBestDollarLoadingState,
-                      unavailable: nextBestDollarUnavailable,
-                    })}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">{coachingAmountLabel}</div>
-                  <div className="mt-2 text-lg font-semibold text-zinc-100">
-                    {formatDashboardMoney(nextBestActionAmount, {
-                      loading: nextBestDollarLoadingState,
-                      unavailable: nextBestDollarUnavailable,
-                    })}
-                  </div>
-                </div>
-              </div>
+                        return (
+                          <div
+                            key={`${action.type || "action"}-${index}`}
+                            className="rounded-xl border border-white/10 bg-[#0B0F14] p-4"
+                          >
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-start gap-3">
+                                  <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xs font-semibold text-zinc-100">
+                                    {index + 1}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <div className="text-base font-semibold leading-6 text-zinc-100">
+                                      {action.label || "Next action"}
+                                    </div>
+                                    {actionMeta ? (
+                                      <div className="mt-1 text-sm text-zinc-300">{actionMeta}</div>
+                                    ) : null}
+                                    {action.reason ? (
+                                      <div className="mt-2 text-sm leading-6 text-zinc-400">
+                                        {action.reason}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </div>
 
-              <div className="mt-5 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Suggested action</div>
-                <div className="mt-2 text-sm font-medium leading-6 text-zinc-100">
-                  {coachingSuggestedAction}
-                </div>
-                {coachingSourceLabel ? (
-                  <div className="mt-2 text-xs leading-5 text-zinc-400">
-                    Source: {coachingSourceLabel}. {discretionarySpendingPaused ? "A $0 spending allowance means discretionary spending is paused, not that cash is gone." : "This is tracked separately from your discretionary spending allowance."}
+                              {action.href ? (
+                                <Link
+                                  href={action.href}
+                                  className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+                                >
+                                  {action.cta_label || "Open"}
+                                </Link>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                        Decision actions are loading.
+                      </div>
+                    )}
                   </div>
-                ) : null}
-              </div>
+
+                  {decisionPlanImportant.length ? (
+                    <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Important</div>
+                      <ul className="mt-3 space-y-2 text-sm text-zinc-300">
+                        {decisionPlanImportant.map((item, index) => (
+                          <li key={`${item}-${index}`} className="flex gap-2">
+                            <span className="text-zinc-500">-</span>
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                  {osStateLoading ? "Decision plan is loading." : "Decision plan is not available yet."}
+                </div>
+              )}
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
@@ -1827,7 +1906,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                         </div>
                       </div>
                       <div className="mt-2 text-xs leading-5 text-zinc-400">{insight.explanation}</div>
-                      <div className="mt-3 text-xs font-medium text-zinc-200">{insight.suggested_action}</div>
                     </div>
                   ))
                 ) : (
@@ -1919,124 +1997,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 </div>
               )}
             </div>
-          </div>
-        )}
-
-        {settings.show_financial_os_panels && (
-          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div className="text-sm font-semibold text-zinc-100">Decision Plan</div>
-                <div className="mt-1 text-xs text-zinc-400">
-                  Your Financial OS turns the numbers into actions.
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2 text-xs">
-                <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase tracking-[0.18em] ${decisionPlanStatusTone(decisionPlan?.status)}`}>
-                  {decisionPlanStatusLabel(decisionPlan?.status)}
-                </span>
-                {decisionPlanActions.length ? (
-                  <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-200">
-                    {decisionPlanActions.length} action{decisionPlanActions.length === 1 ? "" : "s"}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            {decisionPlan ? (
-              <>
-                <div className="mt-4 rounded-xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(34,197,94,0.12),transparent_40%),#0B0F14] p-4">
-                  <div className="text-xl font-semibold leading-tight text-zinc-100 sm:text-2xl">
-                    {decisionPlan.headline || "Follow your current Financial OS plan"}
-                  </div>
-                  <div className="mt-2 max-w-3xl text-sm leading-6 text-zinc-300">
-                    {decisionPlan.summary || "Your Financial OS is preparing the clearest next step."}
-                  </div>
-                </div>
-
-                <div className="mt-4 space-y-3">
-                  {decisionPlanActions.length ? (
-                    decisionPlanActions.map((action, index) => (
-                      <div
-                        key={`${action.type || "action"}-${index}`}
-                        className="rounded-xl border border-white/10 bg-[#0B0F14] p-4"
-                      >
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xs font-semibold text-zinc-100">
-                                {action.priority ?? index + 1}
-                              </span>
-                              <div className="text-sm font-semibold text-zinc-100">{action.label || "Next action"}</div>
-                              <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${decisionPlanConfidenceTone(action.confidence)}`}>
-                                {action.confidence || "unknown"} confidence
-                              </span>
-                            </div>
-
-                            <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">How much</div>
-                                <div className="mt-1 text-sm font-semibold text-zinc-100">
-                                  {action.amount != null ? formatDashboardMoneyOrText(action.amount, "No set amount") : "No set amount"}
-                                </div>
-                              </div>
-                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">To whom / where</div>
-                                <div className="mt-1 text-sm font-semibold text-zinc-100">
-                                  {action.target || "Current Financial OS plan"}
-                                </div>
-                              </div>
-                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">When</div>
-                                <div className="mt-1 text-sm font-semibold text-zinc-100">
-                                  {action.timing || "This period"}
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="mt-3 text-sm leading-6 text-zinc-400">
-                              {action.reason || "Follow the current Financial OS recommendation."}
-                            </div>
-                          </div>
-
-                          {action.href ? (
-                            <Link
-                              href={action.href}
-                              className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
-                            >
-                              {action.cta_label || "Open"}
-                            </Link>
-                          ) : null}
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
-                      Decision actions are loading.
-                    </div>
-                  )}
-                </div>
-
-                {decisionPlanAvoid.length ? (
-                  <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Avoid for now</div>
-                    <div className="mt-3 space-y-3">
-                      {decisionPlanAvoid.map((item, index) => (
-                        <div key={`${item.label || "avoid"}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                          <div className="text-sm font-medium text-zinc-100">{item.label || "Avoid this move"}</div>
-                          <div className="mt-1 text-sm leading-6 text-zinc-400">{item.reason}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
-                {osStateLoading ? "Decision plan is loading." : "Decision plan is not available yet."}
-              </div>
-            )}
           </div>
         )}
 
