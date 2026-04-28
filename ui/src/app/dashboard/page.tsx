@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  FinancialOsV2,
   FinancialOsIntelligenceResponse,
   getCashAccounts,
   getCashAccountTransactions,
@@ -91,6 +92,18 @@ function formatDashboardMoney(
   return fmtMoney(coerced);
 }
 
+function formatDashboardMoneyOrText(value: unknown, fallback = "Not set") {
+  const coerced = coerceDashboardMoneyValue(value);
+  if (coerced == null) return fallback;
+  return fmtMoney(coerced);
+}
+
+function formatDashboardPercent(value: unknown) {
+  const coerced = coerceDashboardMoneyValue(value);
+  if (coerced == null || coerced <= 0) return null;
+  return Number.isInteger(coerced) ? `${coerced}%` : `${coerced.toFixed(1)}%`;
+}
+
 function safeTime(s?: string | null) {
   const t = new Date(s ?? "").getTime();
   return Number.isFinite(t) ? t : 0;
@@ -131,6 +144,26 @@ function labelFromBucketKey(key: string) {
  * Categories
  * ========================= */
 type Category = SpendingCategory;
+
+type DiscretionaryExplanation = {
+  monthly_income_baseline?: number | null;
+  income_source?: string | null;
+  discretionary_cap_percent?: number | null;
+  discretionary_cap_amount?: number | null;
+  month_to_date_spend?: number | null;
+  skipped_duplicate_spend?: number | null;
+  remaining_monthly_cap?: number | null;
+  available_cash_after_protection?: number | null;
+  final_allowance?: number | null;
+  limiting_factor?: string | null;
+  reason_short?: string | null;
+  reason_detail?: string | null;
+  action?: string | null;
+};
+
+type FinancialOsV2WithExplanation = FinancialOsV2 & {
+  discretionary_explanation?: DiscretionaryExplanation | null;
+};
 
 /** =========================
  * localStorage category rules
@@ -406,6 +439,54 @@ function financialOsStatusTone(state?: string | null) {
       return "border-red-500/20 bg-red-500/10 text-red-200";
     default:
       return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
+function discretionaryExplanationTone(limitingFactor?: string | null) {
+  switch ((limitingFactor || "").toLowerCase()) {
+    case "none":
+      return "border-emerald-500/20 bg-emerald-500/10 text-emerald-200";
+    case "income_missing":
+      return "border-amber-500/20 bg-amber-500/10 text-amber-100";
+    case "cap_exhausted":
+    case "cash_protected":
+    case "period_limit":
+      return "border-red-500/20 bg-red-500/10 text-red-100";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-200";
+  }
+}
+
+function discretionaryExplanationHeadline(
+  limitingFactor?: string | null,
+  fallback?: string | null
+) {
+  switch ((limitingFactor || "").toLowerCase()) {
+    case "cap_exhausted":
+      return "Spending paused: your monthly cap is fully used.";
+    case "income_missing":
+      return "Spending paused: income not set, cap cannot be calculated.";
+    case "cash_protected":
+      return "Spending paused: cash is reserved for bills and safety buffer.";
+    case "period_limit":
+      return "Spending paused: this period's allowance has already been used.";
+    case "none":
+      return fallback || "Spending is available inside your current allowance.";
+    default:
+      return fallback || "Allowance details are loading.";
+  }
+}
+
+function incomeSourceLabel(source?: string | null) {
+  switch ((source || "").toLowerCase()) {
+    case "user_set":
+      return "User set";
+    case "detected":
+      return "Detected";
+    case "missing":
+      return "Not set";
+    default:
+      return "Unknown";
   }
 }
 
@@ -854,17 +935,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const remainingDiscretionaryThisMonth = firstDashboardMoneyValue(
     financialOsV2?.remaining_discretionary_this_month
   );
-  const protectedCash = firstDashboardMoneyValue(
-    financialOsV2?.protected_cash
-  );
-  const savingsGoalCash = firstDashboardMoneyValue(
-    financialOsV2?.savings_goal_cash
-  );
-  const availableDiscretionaryCash = firstDashboardMoneyValue(
-    financialOsV2?.available_discretionary_cash,
-    intelligenceContext?.available_sts,
-    nextBestDollar?.available_sts
-  );
   const runwayReserveTarget = firstDashboardMoneyValue(
     financialOsV2?.runway_reserve_target,
     intelligenceContext?.emergency_target_amount
@@ -908,19 +978,67 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   );
   const nextBestAction = financialOsV2?.next_best_action ?? null;
   const stsStatus = financialOsV2?.sts_status ?? null;
-  const setupStatus = financialOsV2?.setup_status ?? null;
-  const setupReasons = setupStatus?.reasons || [];
-  const setupRequired = setupStatus?.state === "setup_required" && setupReasons.length > 0;
-  const discretionaryCapDetails = financialOsV2?.discretionary_cap_details ?? null;
   const fiTargetDetails = financialOsV2?.fi_target_details ?? null;
   const nextBestActionAmount = firstDashboardMoneyValue(nextBestAction?.amount);
-  const extraPayoffAllocation = firstDashboardMoneyValue(
-    financialOsV2?.extra_payoff_allocation,
-    nextBestAction?.priority === "pay_high_apr_debt" ? nextBestAction?.amount : null,
-    financialOsV2?.debt_payoff_projection?.recurring_extra_payment
-  );
   const discretionarySpendingPaused = Boolean(
     financialOsV2?.discretionary_spending_paused ?? nextBestAction?.discretionary_spending_paused
+  );
+  const financialOsV2WithExplanation = financialOsV2 as FinancialOsV2WithExplanation | null;
+  const discretionaryExplanation = ((financialOsV2WithExplanation?.discretionary_explanation) ?? (() => {
+    const fallbackFinalAllowance = firstDashboardMoneyValue(
+      financialOsV2?.discretionary_spending_allowance,
+      financialOsV2?.current_period_safe_to_spend
+    );
+    const fallbackRemainingCap = firstDashboardMoneyValue(
+      financialOsV2?.remaining_discretionary_this_month
+    );
+    const fallbackAvailableCash = firstDashboardMoneyValue(
+      financialOsV2?.available_discretionary_cash
+    );
+    const fallbackIncomeBaseline = firstDashboardMoneyValue(
+      financialOsV2?.monthly_income_baseline
+    );
+    const fallbackFactor =
+      fallbackIncomeBaseline == null
+        ? "income_missing"
+        : (fallbackRemainingCap ?? 0) <= 0.01
+        ? "cap_exhausted"
+        : (fallbackAvailableCash ?? 0) <= 0.01
+        ? "cash_protected"
+        : (fallbackFinalAllowance ?? 0) <= 0.01
+        ? "period_limit"
+        : "none";
+
+    return {
+      monthly_income_baseline: fallbackIncomeBaseline,
+      income_source: fallbackIncomeBaseline == null ? "missing" : "detected",
+      discretionary_cap_percent: firstDashboardMoneyValue(financialOsV2?.discretionary_cap_details?.spend_pct) ?? 0,
+      discretionary_cap_amount: firstDashboardMoneyValue(financialOsV2?.monthly_discretionary_cap),
+      month_to_date_spend: firstDashboardMoneyValue(financialOsV2?.discretionary_spend_month_to_date) ?? 0,
+      skipped_duplicate_spend: 0,
+      remaining_monthly_cap: fallbackRemainingCap ?? 0,
+      available_cash_after_protection: fallbackAvailableCash ?? 0,
+      final_allowance: fallbackFinalAllowance ?? 0,
+      limiting_factor: fallbackFactor,
+      reason_short: stsStatus?.label ?? null,
+      reason_detail: stsStatus?.detail ?? null,
+      action: nextBestAction?.action ?? null,
+    };
+  })()) as DiscretionaryExplanation | null;
+  const discretionaryExplanationHeadlineText = discretionaryExplanationHeadline(
+    discretionaryExplanation?.limiting_factor,
+    discretionaryExplanation?.reason_short
+  );
+  const discretionaryExplanationToneClass = discretionaryExplanationTone(
+    discretionaryExplanation?.limiting_factor
+  );
+  const discretionaryExplanationFinalAllowance = firstDashboardMoneyValue(
+    discretionaryExplanation?.final_allowance,
+    safeToSpendToday
+  );
+  const discretionaryExplanationIsZero = (discretionaryExplanationFinalAllowance ?? 0) <= 0.01;
+  const discretionaryCapPercentLabel = formatDashboardPercent(
+    discretionaryExplanation?.discretionary_cap_percent
   );
   const coachingSeverity = nextBestAction
     ? financialOsPrioritySeverity(nextBestAction.priority)
@@ -1898,111 +2016,96 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-center justify-between">
                 <div className="text-sm font-semibold text-zinc-100">
-                  Spending Allowance Breakdown
+                  Discretionary Spend
                 </div>
-                <div className="text-xs text-zinc-400">STS formula</div>
+                <div className="text-xs text-zinc-400">Current period</div>
               </div>
 
-              <div className="mt-2 text-xs text-zinc-400">
-                Discretionary spend allowance is the V2 current-period non-essential spending cap after protected obligations, runway, and FI cash are protected.
+              <div className="mt-4 text-4xl font-semibold text-zinc-100">
+                {nextBestDollarLoadingState
+                  ? "Loading"
+                  : formatDashboardMoneyOrText(safeToSpendToday, "--")}
               </div>
 
-              <div className="mt-3 text-3xl font-semibold text-zinc-100">
-                {formatDashboardMoney(safeToSpendToday, {
-                  loading: nextBestDollarLoadingState,
-                  unavailable: nextBestDollarUnavailable,
-                })}
-              </div>
+              {hasFinancialOsV2 ? (
+                <>
+                  <div className={`mt-3 rounded-xl border px-4 py-3 text-sm font-medium ${discretionaryExplanationToneClass}`}>
+                    {discretionaryExplanationHeadlineText}
+                  </div>
 
-              {hasFinancialOsV2 && stsStatus ? (
+                  {discretionaryExplanation?.reason_detail ? (
+                    <div className="mt-3 text-sm leading-6 text-zinc-300">
+                      {discretionaryExplanation.reason_detail}
+                    </div>
+                  ) : null}
+                </>
+              ) : stsStatus ? (
                 <div className={`mt-3 inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${financialOsStatusTone(stsStatus.state)}`}>
                   {stsStatus.label || "STS status"}
                 </div>
               ) : null}
 
-              {hasFinancialOsV2 && stsStatus?.detail ? (
+              {!hasFinancialOsV2 && stsStatus?.detail ? (
                 <div className="mt-3 text-xs leading-5 text-zinc-400">
                   {stsStatus.detail}
                 </div>
               ) : null}
 
-              {hasFinancialOsV2 && setupRequired ? (
-                <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
-                  <div className="font-medium uppercase tracking-[0.16em]">Setup required</div>
-                  <div className="mt-2 space-y-2">
-                    {setupReasons.map((reason, idx) => (
-                      <div key={`${reason.code || "setup"}-${idx}`}>
-                        <span className="text-amber-200">{reason.label || "Missing input"}:</span> {reason.detail}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
               {hasFinancialOsV2 ? (
-                <div className="mt-4 space-y-2 text-xs text-zinc-500">
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Total cash</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(financialOsV2?.total_cash)}</span>
+                <>
+                  <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                    <div className="text-sm font-semibold text-zinc-100">
+                      {discretionaryExplanationIsZero ? "Why is my allowance $0?" : "Allowance breakdown"}
+                    </div>
+                    <div className="mt-3 space-y-2 text-sm text-zinc-400">
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Monthly income baseline ({incomeSourceLabel(discretionaryExplanation?.income_source)})</span>
+                        <span className="font-mono text-zinc-100">
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.monthly_income_baseline, "Not set")}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>
+                          {discretionaryCapPercentLabel
+                            ? `Discretionary cap (${discretionaryCapPercentLabel})`
+                            : "Discretionary cap"}
+                        </span>
+                        <span className="font-mono text-zinc-100">
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.discretionary_cap_amount, "Not set")}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Month-to-date discretionary spend</span>
+                        <span className="font-mono text-zinc-100">
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.month_to_date_spend, "$0.00")}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Remaining monthly cap</span>
+                        <span className="font-mono text-zinc-100">
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.remaining_monthly_cap, "$0.00")}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Available cash after protections</span>
+                        <span className="font-mono text-zinc-100">
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.available_cash_after_protection, "$0.00")}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-200">
+                        <span>Final allowance</span>
+                        <span className="font-mono text-zinc-100">
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.final_allowance, "$0.00")}
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Protected cash</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(protectedCash)}</span>
+
+                  <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-zinc-200">
+                    <span className="font-semibold text-zinc-100">Next step:</span>{" "}
+                    {discretionaryExplanation?.action || "Review your income, cap, and protected cash settings."}
                   </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Bills/manual obligations</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(billsManualObligationsTotal)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Debt minimums</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(debtMinimumsTotal)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Total protected obligations</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(protectedObligationsTotal)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Runway reserve current</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(runwayReserveCurrent)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Runway reserve target</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(runwayReserveTarget)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>FI cash protected</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(savingsGoalCash)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Available discretionary cash</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(availableDiscretionaryCash)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Remaining discretionary allowance</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(remainingDiscretionaryThisMonth)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Extra payoff allocation</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(extraPayoffAllocation)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Discretionary cap source</span>
-                    <span className="font-mono text-zinc-200">
-                      {discretionaryCapDetails?.label || "Data unavailable"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Weekly Safe-to-Spend</span>
-                    <span className="font-mono text-zinc-200">{formatDashboardMoney(weeklySafeToSpend)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-300">
-                    <span>Discretionary spend allowance</span>
-                    <span className="font-mono text-zinc-100">{formatDashboardMoney(safeToSpendToday)}</span>
-                  </div>
-                  <div className="text-[11px] text-zinc-500">
-                    {safeToSpendFormulaLabel}
-                  </div>
-                </div>
+                </>
               ) : stsBreakdown ? (
                 <div className="mt-4 space-y-2 text-xs text-zinc-500">
                   <div className="flex items-center justify-between gap-3">
@@ -2060,25 +2163,13 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 </div>
               ) : nextBestDollarUnavailable ? (
                 <div className="mt-2 text-xs text-zinc-500">
-                  STS data unavailable.
+                  Allowance data could not be loaded right now.
                 </div>
               ) : (
                 <div className="mt-2 text-xs text-zinc-500">
                   Backend STS breakdown is loading.
                 </div>
               )}
-
-              <div className="mt-3 text-xs text-zinc-500">
-                {hasFinancialOsV2
-                  ? "A $0 discretionary spending allowance does not mean cash is gone. Financial OS V2 protects due-soon obligations, runway reserves, and planned FI cash before non-essential spending is allowed."
-                  : "Financial OS uses your counted cash totals, including non-duplicate linked cash accounts, before applying upcoming obligations and buffer."}
-              </div>
-
-              {hasFinancialOsV2 && discretionaryCapDetails?.pending_income_cap ? (
-                <div className="mt-3 text-xs text-zinc-500">
-                  Settings has a percentage-based discretionary cap, but V2 still needs a monthly income baseline to turn that percentage into a clean dollar plan.
-                </div>
-              ) : null}
 
               {/* Small cash debug line (non-breaking) */}
               <div className="mt-3 text-xs text-zinc-500">

@@ -6876,6 +6876,64 @@ def _financial_os_sts_reason(
     }
 
 
+def _build_discretionary_explanation(
+    *,
+    monthly_income_baseline: Optional[float],
+    cap_details: dict,
+    monthly_discretionary_cap: float,
+    discretionary_spend_month_to_date: float,
+    remaining_discretionary_this_month: float,
+    available_discretionary_cash: float,
+    current_period_safe_to_spend: float,
+) -> dict:
+    income_source = "detected" if monthly_income_baseline is not None else "missing"
+    discretionary_cap_percent = round(max(_to_float(cap_details.get("spend_pct"), 0.0), 0.0), 2)
+    discretionary_cap_amount = round(monthly_discretionary_cap, 2) if monthly_discretionary_cap > 0.01 else None
+    final_allowance = round(max(_to_float(current_period_safe_to_spend, 0.0), 0.0), 2)
+
+    if income_source == "missing":
+        limiting_factor = "income_missing"
+        reason_short = "Spending cap cannot be calculated yet"
+        reason_detail = "No reliable monthly income detected, so discretionary cap is not fully defined."
+        action = "Add or confirm income in Settings or connect checking account."
+    elif remaining_discretionary_this_month <= 0.01:
+        limiting_factor = "cap_exhausted"
+        reason_short = "This month's discretionary cap is fully used"
+        reason_detail = "Your non-essential spending has reached your planned cap for this month."
+        action = "Pause non-essential spending until next month or adjust cap."
+    elif available_discretionary_cash <= 0.01:
+        limiting_factor = "cash_protected"
+        reason_short = "Cash is reserved for obligations and runway"
+        reason_detail = "Bills, runway reserve, and planned savings are currently protecting available cash."
+        action = "Wait until obligations clear or reduce protection settings."
+    elif final_allowance <= 0.01:
+        limiting_factor = "period_limit"
+        reason_short = "This period's discretionary allowance is used"
+        reason_detail = "Your monthly cap still has room, but this period's share has already been allocated."
+        action = "Wait for the next allowance window or keep spending paused until the month resets."
+    else:
+        limiting_factor = "none"
+        reason_short = "Allowance is available inside your current plan"
+        reason_detail = "Protected cash is covered and your current discretionary plan still has room this period."
+        action = "Stay within this allowance and review the breakdown if it changes."
+
+    return {
+        "monthly_income_baseline": monthly_income_baseline,
+        "income_source": income_source,
+        "discretionary_cap_percent": discretionary_cap_percent,
+        "discretionary_cap_amount": discretionary_cap_amount,
+        "month_to_date_spend": round(max(_to_float(discretionary_spend_month_to_date, 0.0), 0.0), 2),
+        "skipped_duplicate_spend": 0.0,
+        "remaining_monthly_cap": round(max(_to_float(remaining_discretionary_this_month, 0.0), 0.0), 2),
+        "available_cash_after_protection": round(max(_to_float(available_discretionary_cash, 0.0), 0.0), 2),
+        "final_allowance": final_allowance,
+        "limiting_factor": limiting_factor,
+        "reason_short": reason_short,
+        "reason_detail": reason_detail,
+        "action": action,
+    }
+
+
 def _project_debt_with_extra(balance: float, apr_pct: Optional[float], minimum_due: float, extra_payment: float) -> dict:
     baseline = _project_single_debt_payoff(balance, apr_pct, minimum_due)
     accelerated = _project_single_debt_payoff(balance, apr_pct, minimum_due + max(_to_float(extra_payment, 0.0), 0.0))
@@ -7067,6 +7125,15 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         min(remaining_discretionary_this_period, available_discretionary_cash, remaining_discretionary_this_month),
         2,
     )
+    discretionary_explanation = _build_discretionary_explanation(
+        monthly_income_baseline=monthly_income_baseline,
+        cap_details=cap_details,
+        monthly_discretionary_cap=monthly_discretionary_cap,
+        discretionary_spend_month_to_date=discretionary_spend_month_to_date,
+        remaining_discretionary_this_month=remaining_discretionary_this_month,
+        available_discretionary_cash=available_discretionary_cash,
+        current_period_safe_to_spend=current_period_safe_to_spend,
+    )
     sts_status = _financial_os_sts_reason(
         obligations_funded=obligations_funded,
         runway_funded=runway_funded,
@@ -7196,6 +7263,7 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         "current_period_safe_to_spend": current_period_safe_to_spend,
         "discretionary_spending_allowance": current_period_safe_to_spend,
         "weekly_discretionary_spending_allowance": weekly_safe_to_spend,
+        "discretionary_explanation": discretionary_explanation,
         "discretionary_spending_paused": discretionary_spending_paused,
         "extra_payoff_allocation": recurring_extra_payment,
         "fi_target": round(fi_target, 2),
