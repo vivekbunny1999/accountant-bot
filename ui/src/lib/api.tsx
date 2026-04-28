@@ -901,6 +901,32 @@ export type FinancialOsV2NextBestAction = {
   debt_id?: number | null;
 };
 
+export type FinancialOsDecisionPlanAction = {
+  priority?: number | null;
+  type?: "pay_debt" | "pause_spending" | "protect_cash" | "confirm_setup" | "review_bill" | "save_cash" | string | null;
+  label?: string | null;
+  amount?: number | null;
+  target?: string | null;
+  timing?: string | null;
+  reason?: string | null;
+  confidence?: "high" | "medium" | "low" | string | null;
+  cta_label?: string | null;
+  href?: string | null;
+};
+
+export type FinancialOsDecisionPlanAvoidItem = {
+  label?: string | null;
+  reason?: string | null;
+};
+
+export type FinancialOsDecisionPlan = {
+  status?: "ready" | "limited" | "blocked" | string | null;
+  headline?: string | null;
+  summary?: string | null;
+  actions?: FinancialOsDecisionPlanAction[] | null;
+  avoid?: FinancialOsDecisionPlanAvoidItem[] | null;
+};
+
 export type FinancialOsV2DebtProjectionItem = {
   debt_id?: number;
   name?: string | null;
@@ -1024,6 +1050,7 @@ export type OsStateResponse = {
   ok: boolean;
   user_id: string;
   cash_total: number;
+  decision_plan?: FinancialOsDecisionPlan | null;
   cash_sources?: {
     pdf_cash_total?: number;
     plaid_cash_total?: number;
