@@ -6366,6 +6366,7 @@ def os_state(
     cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
     upcoming_summary = _summarize_upcoming_items(upcoming_items)
     decision_plan = _build_decision_plan(financial_os_v2, upcoming_items)
+    advisor_summary = _build_advisor_summary(financial_os_v2, upcoming_items)
     return {
         "ok": True,
         "user_id": user_id,
@@ -6379,6 +6380,7 @@ def os_state(
         "upcoming_summary": upcoming_summary,
         "manual_bills": manual_bills_list,
         "decision_plan": decision_plan,
+        "advisor_summary": advisor_summary,
         "financial_os_v2": financial_os_v2,
         "setup_status": (financial_os_v2 or {}).get("setup_status") or {
             "state": "ready",
@@ -7685,6 +7687,245 @@ def _decision_plan_action_confidence(trust_level: str, *, strong: bool = False) 
     if level == "medium":
         return "medium"
     return "low"
+
+
+def _build_advisor_summary(financial_os_v2: Optional[dict], upcoming_items: Optional[list[dict]] = None) -> dict:
+    os_v2 = financial_os_v2 or {}
+    setup_status = (os_v2.get("setup_status") or {}) if isinstance(os_v2, dict) else {}
+    trust_level = str(setup_status.get("trust_level") or "").strip().lower()
+    confidence = _decision_plan_action_confidence(trust_level, strong=(trust_level == "high"))
+
+    total_cash = round(max(_to_float(os_v2.get("total_cash"), 0.0), 0.0), 2)
+    upcoming_obligations = round(max(_to_float(os_v2.get("upcoming_obligations"), 0.0), 0.0), 2)
+    debt_minimums = round(max(_to_float(os_v2.get("debt_minimums"), 0.0), 0.0), 2)
+    discretionary_allowance = round(
+        max(
+            _to_float(os_v2.get("discretionary_spending_allowance"), os_v2.get("current_period_safe_to_spend")),
+            0.0,
+        ),
+        2,
+    )
+    remaining_this_month = round(max(_to_float(os_v2.get("remaining_discretionary_this_month"), 0.0), 0.0), 2)
+    available_discretionary_cash = round(max(_to_float(os_v2.get("available_discretionary_cash"), 0.0), 0.0), 2)
+    extra_payoff_allocation = round(max(_to_float(os_v2.get("extra_payoff_allocation"), 0.0), 0.0), 2)
+    monthly_fi_contribution = round(max(_to_float(os_v2.get("monthly_fi_contribution_recommendation"), 0.0), 0.0), 2)
+    runway_target_months = round(max(_to_float(os_v2.get("runway_target_months"), 3.0), 0.0), 2) or 3.0
+    runway_reserve_current = round(max(_to_float(os_v2.get("runway_reserve_current"), 0.0), 0.0), 2)
+    runway_reserve_gap = round(max(_to_float(os_v2.get("runway_reserve_gap"), 0.0), 0.0), 2)
+    monthly_essentials = round(max(_to_float(os_v2.get("monthly_essentials"), 0.0), 0.0), 2)
+    runway_months = round(runway_reserve_current / monthly_essentials, 1) if monthly_essentials > 0 else None
+    runway_funded = runway_reserve_gap <= 0.01
+    obligations_funded = total_cash >= round(upcoming_obligations + debt_minimums, 2)
+    fi_target = round(max(_to_float(os_v2.get("fi_target"), 0.0), 0.0), 2)
+    fi_progress_amount = round(max(_to_float(os_v2.get("fi_progress_amount"), total_cash), 0.0), 2)
+    fi_progress_percent = round(max(_to_float(os_v2.get("fi_progress_percent"), 0.0), 0.0), 1)
+    fi_target_details = os_v2.get("fi_target_details") or {}
+    fi_target_source = str(fi_target_details.get("source") or "").strip().lower()
+    as_of_date = _iso_to_date(os_v2.get("as_of_date")) or date.today()
+    _, month_end = _month_start_and_end(as_of_date)
+    next_month_reset = month_end + timedelta(days=1)
+    window_days = max(int(os_v2.get("window_days") or 21), 1)
+
+    projection = os_v2.get("debt_payoff_projection") or {}
+    projection_debts = projection.get("debts") or []
+    target_debt_id = projection.get("target_debt_id") or ((os_v2.get("next_best_action") or {}).get("debt_id"))
+    priority_debt = None
+    if target_debt_id is not None:
+        priority_debt = next((item for item in projection_debts if item.get("debt_id") == target_debt_id), None)
+    if priority_debt is None:
+        priority_debt = next(
+            (item for item in projection_debts if _to_float(item.get("recommended_extra_payment"), 0.0) > 0),
+            None,
+        )
+    priority_debt_name = str((priority_debt or {}).get("name") or "").strip() or "your priority debt"
+
+    upcoming_items = upcoming_items or []
+    due_soon_item = None
+    dated_upcoming_items = []
+    for item in upcoming_items:
+        due_on = _iso_to_date(item.get("due_date")) if isinstance(item, dict) else None
+        if due_on:
+            dated_upcoming_items.append((due_on, item))
+    if dated_upcoming_items:
+        due_soon_item = sorted(dated_upcoming_items, key=lambda row: row[0])[0][1]
+    elif upcoming_items:
+        due_soon_item = upcoming_items[0]
+
+    due_soon_amount = round(max(_to_float((due_soon_item or {}).get("amount"), 0.0), 0.0), 2)
+    due_soon_name = str((due_soon_item or {}).get("name") or "").strip() or "upcoming obligations"
+    due_soon_date = _iso_to_date((due_soon_item or {}).get("due_date")) if due_soon_item else None
+
+    paused_by_monthly_cap = discretionary_allowance <= 0.01 and remaining_this_month <= 0.01
+    paused_by_protections = discretionary_allowance <= 0.01 and available_discretionary_cash <= 0.01 and remaining_this_month > 0.01
+
+    if not obligations_funded:
+        tone = "urgent"
+        headline = "Bills need protection before extra moves"
+        one_liner = (
+            "Cash does not fully cover the obligations and debt minimums inside your current planning window, "
+            "so discretionary spending and extra payoff should wait until those near-term commitments are protected."
+        )
+    elif trust_level == "low":
+        tone = "warning"
+        headline = "Use this readout carefully until setup is confirmed"
+        one_liner = (
+            "Cash coverage may be holding, but key setup inputs are still unconfirmed, so keep the plan conservative "
+            "and treat any spending or payoff move as lower-confidence until setup is finished."
+        )
+    elif not runway_funded:
+        tone = "warning"
+        headline = (
+            "Spending should stay limited while runway catches up"
+            if discretionary_allowance <= 0.01
+            else "Near-term bills are covered, but runway still needs work"
+        )
+        one_liner = (
+            "Cash is covering near-term obligations, but runway is still below target, so the next move is to keep "
+            "cash protected and limit non-essential spending until reserves catch up."
+        )
+    elif discretionary_allowance <= 0.01 and extra_payoff_allocation > 0.01:
+        tone = "calm"
+        headline = "Stable, but spending should stay paused"
+        one_liner = (
+            f"You have enough cash to protect bills and runway, but your discretionary cap is already used, so the best "
+            f"next move is to pause spending and keep sending the planned surplus to {priority_debt_name}."
+        )
+    elif extra_payoff_allocation > 0.01:
+        tone = "positive"
+        headline = "Protections are funded and surplus has a job"
+        one_liner = (
+            f"Cash is covering obligations and runway, discretionary spending still has room, and the planned surplus can "
+            f"keep going to {priority_debt_name} without using your spending allowance."
+        )
+    elif monthly_fi_contribution > 0.01:
+        tone = "positive"
+        headline = "Bills are covered and savings can keep building"
+        one_liner = (
+            "Cash is covering obligations and runway, so the current plan can keep moving planned surplus toward FI "
+            "without treating total cash as fully spendable."
+        )
+    else:
+        tone = "calm"
+        headline = (
+            "Protections are in place and spending has limits"
+            if discretionary_allowance > 0.01
+            else "Hold the current plan and protect cash"
+        )
+        one_liner = (
+            f"Cash is covering the protections already set aside, and your current discretionary window is "
+            f"{_decision_plan_money(discretionary_allowance)}, so the next move is to stay inside the plan rather than "
+            "treating total cash as fully spendable."
+        )
+
+    if due_soon_amount > 0.01:
+        if obligations_funded:
+            due_clause = f"{_decision_plan_money(due_soon_amount)} is protected for {due_soon_name}"
+        else:
+            due_clause = f"{_decision_plan_money(due_soon_amount)} is due for {due_soon_name}"
+        if due_soon_date:
+            due_clause += f" on {due_soon_date.isoformat()}"
+    elif upcoming_obligations > 0.01:
+        due_clause = (
+            f"{_decision_plan_money(upcoming_obligations)} is protected for obligations due over the next {window_days} days"
+            if obligations_funded
+            else f"{_decision_plan_money(upcoming_obligations)} of obligations still needs coverage over the next {window_days} days"
+        )
+    else:
+        due_clause = f"No obligation is due inside the next {window_days} days"
+
+    if runway_months is not None:
+        runway_clause = f"runway currently covers {runway_months:.1f} of {runway_target_months:.1f} target months"
+    else:
+        runway_clause = (
+            f"runway protection is {_decision_plan_money(runway_reserve_current)} toward a "
+            f"{_decision_plan_money(max(runway_reserve_current + runway_reserve_gap, 0.0))} target"
+        )
+
+    obligation_reason = f"{due_clause}, and {runway_clause}."
+
+    if discretionary_allowance <= 0.01 and extra_payoff_allocation > 0.01:
+        allowance_reason = (
+            f"Your discretionary cap is used, so non-essential spending stays paused, but "
+            f"{_decision_plan_money(extra_payoff_allocation)} can still go to {priority_debt_name} because debt payoff "
+            "uses planned surplus, not spending allowance."
+        )
+    elif discretionary_allowance <= 0.01:
+        pause_reason = (
+            "the monthly cap is fully used"
+            if paused_by_monthly_cap
+            else "cash is still being held for bills, runway, or planned savings"
+            if paused_by_protections
+            else "this planning window is already used"
+        )
+        allowance_reason = (
+            f"Your discretionary allowance is {_decision_plan_money(discretionary_allowance)} for this window because "
+            f"{pause_reason}, which pauses non-essential spending without meaning total cash is gone."
+        )
+    elif extra_payoff_allocation > 0.01:
+        allowance_reason = (
+            f"You still have {_decision_plan_money(discretionary_allowance)} of discretionary room this period, and "
+            f"{_decision_plan_money(extra_payoff_allocation)} is separately earmarked for {priority_debt_name}."
+        )
+    elif monthly_fi_contribution > 0.01:
+        allowance_reason = (
+            f"You still have {_decision_plan_money(discretionary_allowance)} of discretionary room this period, and "
+            f"{_decision_plan_money(monthly_fi_contribution)} of planned surplus can keep moving toward FI."
+        )
+    else:
+        allowance_reason = (
+            f"Your discretionary allowance for this window is {_decision_plan_money(discretionary_allowance)}, so "
+            "spending should still be read through the cap rather than through total cash."
+        )
+
+    if fi_target_source == "user_set_goal" and fi_target > 0.01:
+        fi_reason = (
+            f"You are at {_decision_plan_money(fi_progress_amount)} of your user-set FI target of "
+            f"{_decision_plan_money(fi_target)} ({round(fi_progress_percent):.0f}% progress)."
+        )
+    else:
+        fi_reason = (
+            f"Your FI target is currently estimated at {_decision_plan_money(fi_target)} from required spend, with "
+            f"{_decision_plan_money(fi_progress_amount)} already counted ({round(fi_progress_percent):.0f}% progress)."
+        )
+
+    if confidence == "high":
+        trust_reason = " Setup trust is high, so this is a high-confidence readout."
+    elif confidence == "medium":
+        trust_reason = " Setup trust is medium, so some inputs are still estimated."
+    else:
+        trust_reason = " Setup trust is low, so treat this as a low-confidence readout until setup is confirmed."
+
+    reasoning = [
+        obligation_reason,
+        allowance_reason,
+        f"{fi_reason}{trust_reason}",
+    ]
+
+    if trust_level == "low":
+        next_check_in = (
+            f"Review again after the remaining setup inputs are confirmed or by {next_month_reset.isoformat()}, whichever comes first."
+        )
+    elif due_soon_date and paused_by_monthly_cap:
+        next_check_in = (
+            f"Review again after {due_soon_name} clears on {due_soon_date.isoformat()} or when the monthly cap resets on {next_month_reset.isoformat()}."
+        )
+    elif due_soon_date:
+        next_check_in = f"Review again after {due_soon_name} clears on {due_soon_date.isoformat()}."
+    elif paused_by_monthly_cap:
+        next_check_in = f"Review again when the monthly cap resets on {next_month_reset.isoformat()}."
+    elif not runway_funded:
+        next_check_in = f"Review again by {next_month_reset.isoformat()} if runway has not reached the {runway_target_months:.1f}-month target sooner."
+    else:
+        next_check_in = f"Review again by {next_month_reset.isoformat()} or after any major bill, cash, or debt change."
+
+    return {
+        "tone": tone,
+        "headline": headline,
+        "one_liner": one_liner,
+        "reasoning": reasoning[:3],
+        "confidence": confidence,
+        "next_check_in": next_check_in,
+    }
 
 
 def _build_decision_plan(financial_os_v2: Optional[dict], upcoming_items: Optional[list[dict]] = None) -> dict:
