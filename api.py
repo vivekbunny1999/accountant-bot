@@ -6378,6 +6378,15 @@ def os_state(
         "upcoming_summary": upcoming_summary,
         "manual_bills": manual_bills_list,
         "financial_os_v2": financial_os_v2,
+        "setup_status": (financial_os_v2 or {}).get("setup_status") or {
+            "state": "ready",
+            "reasons": [],
+            "overall_status": "complete",
+            "trust_level": "high",
+            "completed_count": 0,
+            "total_count": 0,
+            "items": [],
+        },
         "essentials_cap_monthly": {
             "essentials_bills_total": bills_total,
             "debt_minimums_total": debt_mins_total,
@@ -6807,6 +6816,245 @@ def _financial_os_setup_reasons(
 
     return reasons
 
+def _build_financial_os_setup_status(
+    *,
+    db: Session,
+    user_id: str,
+    settings: dict,
+    goals: dict,
+    snapshot: dict,
+    monthly_income_baseline: Optional[float],
+    monthly_essentials: float,
+    planned_monthly_discretionary_baseline: float,
+    fi_target_amount: float,
+    fi_target_source: str,
+    legacy_setup_reasons: Optional[list[dict]] = None,
+) -> dict:
+    active_paychecks = (
+        db.query(Paycheck)
+        .filter(Paycheck.user_id == user_id, _active_financial_os_clause(Paycheck))
+        .all()
+    )
+    paycheck_monthly_income = round(
+        sum(
+            _monthly_equivalent_amount(
+                _to_float(getattr(paycheck, "typical_amount", None), 0.0),
+                getattr(paycheck, "frequency", None),
+            )
+            for paycheck in active_paychecks
+            if _to_float(getattr(paycheck, "typical_amount", None), 0.0) > 0
+        ),
+        2,
+    )
+    configured_monthly_income = round(
+        max(_to_float(_settings_value(settings, ["financialOS", "paycheck", "monthlyIncome"], None), 0.0), 0.0),
+        2,
+    )
+    user_set_monthly_income = configured_monthly_income if configured_monthly_income > 0 else paycheck_monthly_income
+    has_user_set_income = user_set_monthly_income > 0
+
+    bill_count = db.query(Bill.id).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill)).count()
+    manual_bill_count = (
+        db.query(ManualBill.id)
+        .filter(ManualBill.user_id == user_id, _active_financial_os_clause(ManualBill))
+        .count()
+    )
+    essentials_count = int((bill_count or 0) + (manual_bill_count or 0))
+
+    active_debt_count = db.query(Debt.id).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).count()
+
+    runway_goal_value = _to_float(goals.get("runway_target_months"), 0.0)
+    runway_target_months = round(max(_to_float(snapshot.get("runway_target_months"), 3.0), 0.0), 2) or 3.0
+    runway_setting_value = _to_float(
+        _settings_value(settings, ["financialOS", "stageTargets", "runwayMonthsSecurityGoal"], None),
+        0.0,
+    )
+    savings_goal_setting_value = _to_float(
+        _settings_value(settings, ["financialOS", "savings", "emergencyFundGoalMonths"], None),
+        0.0,
+    )
+    has_runway_override = runway_goal_value > 0 or (
+        (runway_setting_value > 0 and abs(runway_setting_value - 3.0) > 0.009)
+        or (savings_goal_setting_value > 0 and abs(savings_goal_setting_value - 3.0) > 0.009)
+    )
+
+    cadence_value = str(
+        _settings_value(settings, ["financialOS", "paycheck", "cadence"], None)
+        or (getattr(active_paychecks[0], "frequency", None) if active_paychecks else None)
+        or "Weekly"
+    ).strip() or "Weekly"
+    cadence_normalized = cadence_value.lower()
+    cadence_status = (
+        "confirmed"
+        if active_paychecks or cadence_normalized not in {"", "weekly"}
+        else "default"
+    )
+
+    debt_strategy_value = str(
+        _settings_value(settings, ["financialOS", "debt", "strategy"], None)
+        or "Hybrid (Next Best Dollar)"
+    ).strip() or "Hybrid (Next Best Dollar)"
+    debt_strategy_status = (
+        "confirmed"
+        if debt_strategy_value not in {"", "Hybrid (Next Best Dollar)"}
+        else "default"
+    )
+
+    fi_target_status = "missing"
+    if fi_target_source == "user_set_goal" and fi_target_amount > 0:
+        fi_target_status = "confirmed"
+    elif fi_target_amount > 0 and round(monthly_essentials + planned_monthly_discretionary_baseline, 2) > 0:
+        fi_target_status = "derived"
+
+    legacy_reasons: list[dict] = list(legacy_setup_reasons or [])
+    items = [
+        {
+            "key": "monthly_income",
+            "label": "Monthly income",
+            "status": "confirmed" if has_user_set_income else ("detected" if monthly_income_baseline is not None else "missing"),
+            "value": round(user_set_monthly_income, 2) if has_user_set_income else monthly_income_baseline,
+            "required": True,
+            "reason": (
+                "Using your saved paycheck amount."
+                if has_user_set_income
+                else "Using detected income. Confirm it for stronger recommendations."
+                if monthly_income_baseline is not None
+                else "No monthly income is confirmed yet."
+            ),
+            "action": "Confirm in Settings" if not has_user_set_income else "Review income",
+            "href": "/settings#setup-income",
+        },
+        {
+            "key": "fixed_essentials",
+            "label": "Fixed essentials",
+            "status": "confirmed" if essentials_count > 0 else "missing",
+            "value": monthly_essentials if monthly_essentials > 0 else None,
+            "required": True,
+            "reason": (
+                f"{essentials_count} essential bill{'s' if essentials_count != 1 else ''} are feeding your plan."
+                if essentials_count > 0
+                else "Add bills or essential obligations so the dashboard can protect them."
+            ),
+            "action": "Review bills" if essentials_count > 0 else "Add bills",
+            "href": "/bills",
+        },
+        {
+            "key": "debt_registry",
+            "label": "Debt registry",
+            "status": "confirmed" if active_debt_count > 0 else "missing",
+            "value": int(active_debt_count or 0) if active_debt_count > 0 else None,
+            "required": True,
+            "reason": (
+                f"{active_debt_count} active debt account{'s' if active_debt_count != 1 else ''} are tracked."
+                if active_debt_count > 0
+                else "Add debts so payoff recommendations have a real registry to use."
+            ),
+            "action": "Review debts" if active_debt_count > 0 else "Add debts",
+            "href": "/debts",
+        },
+        {
+            "key": "runway_target",
+            "label": "Runway target",
+            "status": "confirmed" if has_runway_override else "default",
+            "value": runway_target_months,
+            "required": False,
+            "reason": (
+                "Using your saved runway target."
+                if has_runway_override
+                else "Using the default runway target."
+            ),
+            "action": "Set runway target" if not has_runway_override else "Review runway target",
+            "href": "/settings#setup-runway",
+        },
+        {
+            "key": "fi_target",
+            "label": "FI target",
+            "status": fi_target_status,
+            "value": round(fi_target_amount, 2) if fi_target_amount > 0 else None,
+            "required": False,
+            "reason": (
+                "Using your saved FI target."
+                if fi_target_status == "confirmed"
+                else "Using annual required spend x 25."
+                if fi_target_status == "derived"
+                else "FI target is not available yet."
+            ),
+            "action": "Set FI target" if fi_target_status != "confirmed" else "Review FI target",
+            "href": "/settings#setup-fi-target",
+        },
+        {
+            "key": "paycheck_cadence",
+            "label": "Paycheck cadence",
+            "status": cadence_status,
+            "value": cadence_value,
+            "required": False,
+            "reason": (
+                "Using your saved paycheck cadence."
+                if cadence_status == "confirmed"
+                else "Using the default paycheck cadence."
+            ),
+            "action": "Confirm in Settings" if cadence_status != "confirmed" else "Review cadence",
+            "href": "/settings#setup-income",
+        },
+        {
+            "key": "debt_strategy",
+            "label": "Debt strategy",
+            "status": debt_strategy_status,
+            "value": debt_strategy_value,
+            "required": False,
+            "reason": (
+                "Using your saved debt strategy."
+                if debt_strategy_status == "confirmed"
+                else "Using the default debt strategy."
+            ),
+            "action": "Set debt strategy" if debt_strategy_status != "confirmed" else "Review strategy",
+            "href": "/settings#setup-debt-strategy",
+        },
+    ]
+
+    for item in items:
+        if item["required"] and item["status"] == "missing":
+            legacy_reasons.append({
+                "code": f"missing_{item['key']}",
+                "label": f"{item['label']} missing",
+                "detail": item["reason"],
+            })
+
+    required_missing = any(item["required"] and item["status"] == "missing" for item in items)
+    review_needed = any(
+        (item["required"] and item["status"] != "confirmed")
+        or ((not item["required"]) and item["status"] in {"default", "missing"})
+        for item in items
+    )
+
+    if required_missing:
+        overall_status = "missing_required"
+        trust_level = "low"
+    elif review_needed:
+        overall_status = "needs_review"
+        trust_level = "medium"
+    else:
+        overall_status = "complete"
+        trust_level = "high"
+
+    completed_count = sum(1 for item in items if item["status"] != "missing")
+    if any(item["key"] == "monthly_income" and item["status"] == "detected" for item in items):
+        legacy_reasons.append({
+            "code": "detected_monthly_income",
+            "label": "Monthly income detected",
+            "detail": "Income was detected from recent activity, but confirming it will make recommendations more reliable.",
+        })
+
+    return {
+        "state": "setup_required" if required_missing else "ready",
+        "reasons": legacy_reasons,
+        "overall_status": overall_status,
+        "trust_level": trust_level,
+        "completed_count": completed_count,
+        "total_count": len(items),
+        "items": items,
+    }
+
 
 def _financial_os_sts_reason(
     *,
@@ -7067,6 +7315,19 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
     fi_target_source = "user_set_goal" if fi_target > 0 else "derived_annual_required_spend_x25"
     if fi_target <= 0:
         fi_target = round(annual_required_spend * 25.0, 2)
+    setup_status = _build_financial_os_setup_status(
+        db=snapshot["db"],
+        user_id=str(snapshot.get("user_id") or ""),
+        settings=snapshot.get("settings") or {},
+        goals=snapshot.get("goals") or {},
+        snapshot=snapshot,
+        monthly_income_baseline=monthly_income_baseline,
+        monthly_essentials=monthly_essentials,
+        planned_monthly_discretionary_baseline=planned_monthly_discretionary_baseline,
+        fi_target_amount=fi_target,
+        fi_target_source=fi_target_source,
+        legacy_setup_reasons=setup_reasons,
+    )
     fi_progress_amount = round(max(_to_float(snapshot.get("fi_progress_amount"), total_cash), 0.0), 2)
     fi_progress_percent = round((_clamp01(fi_progress_amount / max(fi_target, 1.0)) * 100.0), 2) if fi_target > 0 else 0.0
 
@@ -7273,10 +7534,7 @@ def _build_financial_os_v2_from_snapshot(snapshot: dict) -> dict:
         "years_to_fi": years_to_fi,
         "next_best_action": next_best_action,
         "debt_payoff_projection": debt_payoff_projection,
-        "setup_status": {
-            "state": "setup_required" if setup_required else "ready",
-            "reasons": setup_reasons,
-        },
+        "setup_status": setup_status,
         "discretionary_cap_details": {
             "mode": cap_details.get("mode"),
             "source": cap_details.get("source"),
@@ -7372,6 +7630,10 @@ def _compute_financial_os_v2(
     )
     profile = db.query(Profile).filter(Profile.user_id == user_id).order_by(Profile.updated_at.desc(), Profile.id.desc()).first()
     snapshot = {
+        "db": db,
+        "user_id": user_id,
+        "settings": settings,
+        "goals": goals,
         "as_of_date": today,
         "window_days": window_days,
         "total_cash": _cash_total_latest(db, user_id),

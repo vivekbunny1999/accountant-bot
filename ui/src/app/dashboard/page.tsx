@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  FinancialOsSetupItem,
+  FinancialOsSetupStatus,
   FinancialOsV2,
   FinancialOsIntelligenceResponse,
   getCashAccounts,
@@ -102,6 +104,85 @@ function formatDashboardPercent(value: unknown) {
   const coerced = coerceDashboardMoneyValue(value);
   if (coerced == null || coerced <= 0) return null;
   return Number.isInteger(coerced) ? `${coerced}%` : `${coerced.toFixed(1)}%`;
+}
+
+function setupStatusLabel(status?: string | null) {
+  switch ((status || "").toLowerCase()) {
+    case "confirmed":
+      return "Confirmed";
+    case "detected":
+      return "Detected";
+    case "default":
+      return "Default";
+    case "missing":
+      return "Missing";
+    case "derived":
+      return "Derived";
+    default:
+      return "Unknown";
+  }
+}
+
+function setupStatusTone(status?: string | null) {
+  switch ((status || "").toLowerCase()) {
+    case "confirmed":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "detected":
+    case "derived":
+      return "border-sky-500/30 bg-sky-500/10 text-sky-200";
+    case "default":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+    case "missing":
+      return "border-red-500/30 bg-red-500/10 text-red-200";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
+function trustLevelTone(level?: string | null) {
+  switch ((level || "").toLowerCase()) {
+    case "high":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "medium":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+    case "low":
+      return "border-red-500/30 bg-red-500/10 text-red-200";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
+function setupTrustCopy(status?: FinancialOsSetupStatus | null) {
+  switch ((status?.trust_level || "").toLowerCase()) {
+    case "high":
+      return "Recommendations are based on confirmed setup.";
+    case "medium":
+      return "Recommendations are usable, but some assumptions should be confirmed.";
+    case "low":
+      return "Some recommendations are estimated until setup is completed.";
+    default:
+      return "Setup status is loading.";
+  }
+}
+
+function formatSetupItemValue(item?: FinancialOsSetupItem | null) {
+  if (!item || item.value == null || item.value === "") return null;
+  if (typeof item.value === "string") return item.value;
+
+  switch (item.key) {
+    case "monthly_income":
+      return `${fmtMoney(item.value)}/month`;
+    case "fixed_essentials":
+      return `${fmtMoney(item.value)}/month`;
+    case "runway_target":
+      return `${Number(item.value).toFixed(Number.isInteger(item.value) ? 0 : 1)} months`;
+    case "fi_target":
+      return fmtMoney(item.value);
+    case "debt_registry":
+      return `${item.value} ${Number(item.value) === 1 ? "debt" : "debts"}`;
+    default:
+      return String(item.value);
+  }
 }
 
 function safeTime(s?: string | null) {
@@ -885,6 +966,10 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     ?? intelligence?.financial_os_v2
     ?? osState?.financial_os_v2
     ?? null;
+  const setupStatus = (osState?.setup_status ?? financialOsV2?.setup_status ?? null) as FinancialOsSetupStatus | null;
+  const setupItems = setupStatus?.items ?? [];
+  const setupCompletedCount = Number(setupStatus?.completed_count ?? 0);
+  const setupTotalCount = Number(setupStatus?.total_count ?? setupItems.length ?? 0);
   const hasFinancialOsV2 = Boolean(financialOsV2);
   const financialOsCashTotal = firstDashboardMoneyValue(
     financialOsV2?.total_cash,
@@ -1708,6 +1793,88 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+        )}
+
+        {settings.show_financial_os_panels && (
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-zinc-100">Financial OS Setup</div>
+                <div className="mt-1 text-xs text-zinc-400">
+                  These inputs decide whether your recommendations are trusted or estimated.
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase tracking-[0.18em] ${trustLevelTone(setupStatus?.trust_level)}`}>
+                  Trust level: {setupStatus?.trust_level || (osStateLoading ? "Loading" : "Unknown")}
+                </span>
+                <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-200">
+                  Completed: {setupCompletedCount} / {setupTotalCount || 7}
+                </span>
+              </div>
+            </div>
+
+            <div
+              className={[
+                "mt-4 rounded-xl border p-4 text-sm",
+                (setupStatus?.trust_level || "").toLowerCase() === "high"
+                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100"
+                  : (setupStatus?.trust_level || "").toLowerCase() === "medium"
+                  ? "border-amber-500/20 bg-amber-500/10 text-amber-100"
+                  : "border-red-500/20 bg-red-500/10 text-red-100",
+              ].join(" ")}
+            >
+              {setupTrustCopy(setupStatus)}
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {setupItems.length ? (
+                setupItems.map((item) => {
+                  const formattedValue = formatSetupItemValue(item);
+                  return (
+                    <div
+                      key={item.key || item.label}
+                      className="rounded-xl border border-white/10 bg-[#0B0F14] p-4"
+                    >
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="text-sm font-medium text-zinc-100">{item.label}</div>
+                            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${setupStatusTone(item.status)}`}>
+                              {setupStatusLabel(item.status)}
+                            </span>
+                            {item.required ? (
+                              <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-zinc-400">
+                                Required
+                              </span>
+                            ) : null}
+                          </div>
+                          {formattedValue ? (
+                            <div className="mt-2 text-sm font-medium text-zinc-200">{formattedValue}</div>
+                          ) : null}
+                          <div className="mt-2 text-sm leading-6 text-zinc-400">{item.reason}</div>
+                        </div>
+
+                        {item.href ? (
+                          <Link
+                            href={item.href}
+                            className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+                          >
+                            {item.action || "Open"}
+                          </Link>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                  {osStateLoading ? "Setup checklist is loading." : "Setup checklist is not available yet."}
+                </div>
+              )}
             </div>
           </div>
         )}

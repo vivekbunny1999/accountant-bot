@@ -925,6 +925,31 @@ export type FinancialOsV2DebtPayoffProjection = {
   portfolio_warning?: string | null;
 };
 
+export type FinancialOsSetupItem = {
+  key?: string | null;
+  label?: string | null;
+  status?: "confirmed" | "detected" | "default" | "missing" | "derived" | string | null;
+  value?: string | number | null;
+  required?: boolean;
+  reason?: string | null;
+  action?: string | null;
+  href?: string | null;
+};
+
+export type FinancialOsSetupStatus = {
+  state?: string | null;
+  reasons?: Array<{
+    code?: string | null;
+    label?: string | null;
+    detail?: string | null;
+  }>;
+  overall_status?: "complete" | "needs_review" | "missing_required" | string | null;
+  trust_level?: "high" | "medium" | "low" | string | null;
+  completed_count?: number | null;
+  total_count?: number | null;
+  items?: FinancialOsSetupItem[];
+};
+
 export type FinancialOsV2 = {
   as_of_date?: string | null;
   window_days?: number;
@@ -963,14 +988,7 @@ export type FinancialOsV2 = {
   years_to_fi?: number | null;
   next_best_action?: FinancialOsV2NextBestAction | null;
   debt_payoff_projection?: FinancialOsV2DebtPayoffProjection | null;
-  setup_status?: {
-    state?: string | null;
-    reasons?: Array<{
-      code?: string | null;
-      label?: string | null;
-      detail?: string | null;
-    }>;
-  };
+  setup_status?: FinancialOsSetupStatus | null;
   discretionary_cap_details?: {
     mode?: string | null;
     source?: string | null;
@@ -1054,6 +1072,7 @@ export type OsStateResponse = {
     debt_minimums_total?: number;
     essentials_cap_total?: number;
   };
+  setup_status?: FinancialOsSetupStatus | null;
   calculation?: {
     cash_total?: number;
     upcoming_total?: number;
