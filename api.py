@@ -6365,6 +6365,7 @@ def os_state(
     util = os_debt_utilization(user_id=user_id, db=db, current_user=current_user)
     cash_sources = _plaid_cash_sources_payload(db, user_id, cash_total)
     upcoming_summary = _summarize_upcoming_items(upcoming_items)
+    decision_plan = _build_decision_plan(financial_os_v2, upcoming_items)
     return {
         "ok": True,
         "user_id": user_id,
@@ -6377,6 +6378,7 @@ def os_state(
         "upcoming_items": upcoming_items,
         "upcoming_summary": upcoming_summary,
         "manual_bills": manual_bills_list,
+        "decision_plan": decision_plan,
         "financial_os_v2": financial_os_v2,
         "setup_status": (financial_os_v2 or {}).get("setup_status") or {
             "state": "ready",
@@ -7665,6 +7667,326 @@ def _financial_os_v2_stage(financial_os_v2: dict) -> str:
     if priority == "discretionary":
         return "Build Security"
     return "Unknown"
+
+
+def _decision_plan_money(amount: Optional[float]) -> str:
+    value = round(max(_to_float(amount, 0.0), 0.0), 2)
+    if abs(value - round(value)) <= 0.001:
+        return f"${int(round(value)):,}"
+    return f"${value:,.2f}"
+
+
+def _decision_plan_action_confidence(trust_level: str, *, strong: bool = False) -> str:
+    level = (trust_level or "").strip().lower()
+    if strong:
+        return "high"
+    if level == "high":
+        return "high"
+    if level == "medium":
+        return "medium"
+    return "low"
+
+
+def _build_decision_plan(financial_os_v2: Optional[dict], upcoming_items: Optional[list[dict]] = None) -> dict:
+    os_v2 = financial_os_v2 or {}
+    setup_status = (os_v2.get("setup_status") or {}) if isinstance(os_v2, dict) else {}
+    trust_level = str(setup_status.get("trust_level") or "").strip().lower()
+    status = "blocked" if trust_level == "low" else "limited" if trust_level == "medium" else "ready"
+
+    discretionary_allowance = round(
+        max(
+            _to_float(os_v2.get("discretionary_spending_allowance"), os_v2.get("current_period_safe_to_spend")),
+            0.0,
+        ),
+        2,
+    )
+    remaining_this_month = round(max(_to_float(os_v2.get("remaining_discretionary_this_month"), 0.0), 0.0), 2)
+    available_discretionary_cash = round(max(_to_float(os_v2.get("available_discretionary_cash"), 0.0), 0.0), 2)
+    extra_payoff_allocation = round(max(_to_float(os_v2.get("extra_payoff_allocation"), 0.0), 0.0), 2)
+    upcoming_obligations = round(max(_to_float(os_v2.get("upcoming_obligations"), 0.0), 0.0), 2)
+    monthly_fi_contribution = round(max(_to_float(os_v2.get("monthly_fi_contribution_recommendation"), 0.0), 0.0), 2)
+    window_days = max(int(os_v2.get("window_days") or 21), 1)
+
+    projection = os_v2.get("debt_payoff_projection") or {}
+    projection_debts = projection.get("debts") or []
+    target_debt_id = projection.get("target_debt_id") or ((os_v2.get("next_best_action") or {}).get("debt_id"))
+    priority_debt = None
+    if target_debt_id is not None:
+        priority_debt = next((item for item in projection_debts if item.get("debt_id") == target_debt_id), None)
+    if priority_debt is None:
+        priority_debt = next(
+            (item for item in projection_debts if _to_float(item.get("recommended_extra_payment"), 0.0) > 0),
+            None,
+        )
+    priority_debt_name = str((priority_debt or {}).get("name") or "").strip() or "your priority debt"
+
+    upcoming_items = upcoming_items or []
+    due_soon_item = None
+    dated_upcoming_items = []
+    for item in upcoming_items:
+        due_on = _iso_to_date(item.get("due_date")) if isinstance(item, dict) else None
+        if due_on:
+            dated_upcoming_items.append((due_on, item))
+    if dated_upcoming_items:
+        due_soon_item = sorted(dated_upcoming_items, key=lambda row: row[0])[0][1]
+    elif upcoming_items:
+        due_soon_item = upcoming_items[0]
+
+    due_soon_amount = round(max(_to_float((due_soon_item or {}).get("amount"), 0.0), 0.0), 2)
+    due_soon_name = str((due_soon_item or {}).get("name") or "").strip() or "upcoming obligation"
+    due_soon_date = _iso_to_date((due_soon_item or {}).get("due_date")) if due_soon_item else None
+    due_soon_type = str((due_soon_item or {}).get("type") or "").strip().lower()
+
+    actions = []
+
+    def add_action(
+        *,
+        sort_order: int,
+        action_type: str,
+        label: str,
+        amount: Optional[float],
+        target: Optional[str],
+        timing: str,
+        reason: str,
+        confidence: str,
+        cta_label: str,
+        href: Optional[str],
+        headline_short: str,
+    ) -> None:
+        actions.append({
+            "sort_order": sort_order,
+            "type": action_type,
+            "label": label,
+            "amount": round(amount, 2) if amount is not None else None,
+            "target": target,
+            "timing": timing,
+            "reason": reason,
+            "confidence": confidence,
+            "cta_label": cta_label,
+            "href": href,
+            "headline_short": headline_short,
+        })
+
+    if trust_level == "low":
+        setup_items = setup_status.get("items") or []
+        first_setup_item = next(
+            (
+                item for item in setup_items
+                if item.get("required") and str(item.get("status") or "").strip().lower() != "confirmed"
+            ),
+            None,
+        ) or next(
+            (
+                item for item in setup_items
+                if str(item.get("status") or "").strip().lower() not in {"confirmed", "detected", "derived"}
+            ),
+            None,
+        )
+        setup_target = str((first_setup_item or {}).get("label") or "").strip() or "Financial OS setup"
+        setup_reason = str((first_setup_item or {}).get("reason") or "").strip()
+        if not setup_reason:
+            setup_reason = "Key setup inputs still need to be confirmed before the plan can be fully trusted."
+        add_action(
+            sort_order=1,
+            action_type="confirm_setup",
+            label="Confirm your Financial OS setup",
+            amount=None,
+            target=setup_target,
+            timing="Now",
+            reason=setup_reason,
+            confidence="high",
+            cta_label=str((first_setup_item or {}).get("action") or "Open setup"),
+            href=(first_setup_item or {}).get("href") or "/settings",
+            headline_short="Confirm setup",
+        )
+
+    if discretionary_allowance <= 0.01:
+        if remaining_this_month <= 0.01:
+            pause_reason = "Your monthly discretionary cap is fully used."
+            pause_timing = "Until the monthly cap resets"
+        elif available_discretionary_cash <= 0.01:
+            pause_reason = "Cash is being protected for bills, debt minimums, runway, or planned savings first."
+            pause_timing = "Until protected cash opens back up"
+        else:
+            pause_reason = "Your current period allowance is used for now."
+            pause_timing = "For the rest of this planning window"
+        add_action(
+            sort_order=2 if trust_level == "low" else 1,
+            action_type="pause_spending",
+            label="Pause non-essential spending",
+            amount=0.0,
+            target=None,
+            timing=pause_timing,
+            reason=pause_reason,
+            confidence=_decision_plan_action_confidence(trust_level),
+            cta_label="",
+            href=None,
+            headline_short="Pause spending",
+        )
+
+    if extra_payoff_allocation > 0.01 and priority_debt_name:
+        add_action(
+            sort_order=3 if trust_level == "low" else 2,
+            action_type="pay_debt",
+            label="Pay extra toward your priority debt",
+            amount=extra_payoff_allocation,
+            target=priority_debt_name,
+            timing="This month",
+            reason=(
+                f"{priority_debt_name} is still the best use of planned surplus after bills, minimums, runway, "
+                "and planned savings protections are covered."
+            ),
+            confidence=_decision_plan_action_confidence(trust_level),
+            cta_label="Review debt plan",
+            href="/debts",
+            headline_short="Pay high-APR debt",
+        )
+
+    if upcoming_obligations > 0.01:
+        bill_href = "/debts" if due_soon_type == "debt_minimum" else "/manual-bills" if due_soon_type == "manual_bill" else "/bills"
+        protect_amount = due_soon_amount if due_soon_amount > 0.01 else upcoming_obligations
+        protect_target = due_soon_name if due_soon_item else "upcoming bills"
+        protect_timing = f"Due {due_soon_date.isoformat()}" if due_soon_date else f"Over the next {window_days} days"
+        protect_reason = (
+            f"{due_soon_name} is inside your near-term planning window, so keep its cash protected before making extra moves."
+            if due_soon_item
+            else "Upcoming obligations still need protected cash before you make extra moves."
+        )
+        add_action(
+            sort_order=4 if trust_level == "low" else 3,
+            action_type="protect_cash",
+            label=f"Keep cash protected for {protect_target}" if due_soon_item else "Keep cash protected for upcoming obligations",
+            amount=protect_amount,
+            target=protect_target if due_soon_item else "Upcoming obligations",
+            timing=protect_timing,
+            reason=protect_reason,
+            confidence="high" if due_soon_item else _decision_plan_action_confidence(trust_level),
+            cta_label="Review due items",
+            href=bill_href,
+            headline_short="Protect cash",
+        )
+
+    if monthly_fi_contribution > 0.01 and extra_payoff_allocation <= 0.01:
+        add_action(
+            sort_order=5 if trust_level == "low" else 4,
+            action_type="save_cash",
+            label="Move planned surplus into savings",
+            amount=monthly_fi_contribution,
+            target="FI / savings goal",
+            timing="This month",
+            reason="Bills, minimums, and runway are covered, so planned surplus can keep building savings.",
+            confidence=_decision_plan_action_confidence(trust_level),
+            cta_label="Review savings goal",
+            href="/settings#fi-target",
+            headline_short="Save planned surplus",
+        )
+
+    if not actions:
+        add_action(
+            sort_order=1,
+            action_type="protect_cash",
+            label="Stay inside your current plan",
+            amount=discretionary_allowance if discretionary_allowance > 0.01 else None,
+            target="Current Financial OS plan",
+            timing="This period",
+            reason="Your key protections are in place, so the next step is following the current plan without forcing extra moves.",
+            confidence=_decision_plan_action_confidence(trust_level, strong=(trust_level == "high")),
+            cta_label="Review dashboard",
+            href="/dashboard",
+            headline_short="Follow the plan",
+        )
+
+    actions = sorted(actions, key=lambda item: item["sort_order"])
+    serialized_actions = []
+    for idx, action in enumerate(actions, start=1):
+        serialized_actions.append({
+            "priority": idx,
+            "type": action["type"],
+            "label": action["label"],
+            "amount": action["amount"],
+            "target": action["target"],
+            "timing": action["timing"],
+            "reason": action["reason"],
+            "confidence": action["confidence"],
+            "cta_label": action["cta_label"],
+            "href": action["href"],
+        })
+
+    headline_parts = [action["headline_short"] for action in actions[:2] if action.get("headline_short")]
+    headline = ", ".join(headline_parts) if headline_parts else "Follow your current Financial OS plan"
+
+    summary_parts = []
+    if status == "blocked":
+        summary_parts.append("Some setup details still need confirmation, so treat this plan as lower confidence until the checklist is complete.")
+    elif status == "limited":
+        summary_parts.append("This plan is usable, but a few setup details are still estimated.")
+
+    if discretionary_allowance <= 0.01:
+        summary_parts.append("Keep non-essential spending paused for now.")
+
+    if extra_payoff_allocation > 0.01 and priority_debt_name:
+        summary_parts.append(
+            f"You can still send {_decision_plan_money(extra_payoff_allocation)} to {priority_debt_name} because that payoff plan stays separate from your spending allowance."
+        )
+    elif monthly_fi_contribution > 0.01:
+        summary_parts.append(
+            f"Planned surplus can move into savings with {_decision_plan_money(monthly_fi_contribution)} this month."
+        )
+
+    if upcoming_obligations > 0.01:
+        if due_soon_item and due_soon_amount > 0.01:
+            due_phrase = f" due {due_soon_date.isoformat()}" if due_soon_date else ""
+            summary_parts.append(
+                f"Keep {_decision_plan_money(due_soon_amount)} protected for {due_soon_name}{due_phrase}."
+            )
+        else:
+            summary_parts.append(
+                f"Keep {_decision_plan_money(upcoming_obligations)} protected for obligations due over the next {window_days} days."
+            )
+
+    summary = " ".join(summary_parts[:4]).strip() or "Your Financial OS has a focused next step ready."
+
+    avoid = []
+
+    def add_avoid(label: str, reason: str) -> None:
+        if not label or not reason:
+            return
+        if any(item["label"] == label for item in avoid):
+            return
+        avoid.append({
+            "label": label,
+            "reason": reason,
+        })
+
+    add_avoid(
+        "Do not treat total cash as fully spendable",
+        "Bills, debt minimums, runway, and planned savings protections come out before discretionary spending.",
+    )
+
+    if extra_payoff_allocation > 0.01:
+        add_avoid(
+            "Do not treat debt payoff money as extra spending room",
+            "The extra debt payment is a separate planned-surplus move, not part of your discretionary allowance.",
+        )
+
+    if trust_level == "low":
+        add_avoid(
+            "Do not rely on unconfirmed setup assumptions",
+            "Finish the missing setup items first so the plan can move from blocked to trusted.",
+        )
+    elif discretionary_allowance <= 0.01:
+        add_avoid(
+            "Do not spend protected cash on non-essentials",
+            "A $0 discretionary allowance means non-essential spending is paused, not that your total cash disappeared.",
+        )
+
+    return {
+        "status": status,
+        "headline": headline,
+        "summary": summary,
+        "actions": serialized_actions,
+        "avoid": avoid[:3],
+    }
 
 
 def _clamp01(value: float) -> float:

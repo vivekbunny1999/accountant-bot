@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  FinancialOsDecisionPlan,
   FinancialOsSetupItem,
   FinancialOsSetupStatus,
   FinancialOsV2,
@@ -141,6 +142,45 @@ function setupStatusTone(status?: string | null) {
 
 function trustLevelTone(level?: string | null) {
   switch ((level || "").toLowerCase()) {
+    case "high":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "medium":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+    case "low":
+      return "border-red-500/30 bg-red-500/10 text-red-200";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
+function decisionPlanStatusTone(status?: string | null) {
+  switch ((status || "").toLowerCase()) {
+    case "ready":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "limited":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-200";
+    case "blocked":
+      return "border-red-500/30 bg-red-500/10 text-red-200";
+    default:
+      return "border-white/10 bg-white/5 text-zinc-300";
+  }
+}
+
+function decisionPlanStatusLabel(status?: string | null) {
+  switch ((status || "").toLowerCase()) {
+    case "ready":
+      return "Ready";
+    case "limited":
+      return "Limited";
+    case "blocked":
+      return "Blocked";
+    default:
+      return "Plan";
+  }
+}
+
+function decisionPlanConfidenceTone(confidence?: string | null) {
+  switch ((confidence || "").toLowerCase()) {
     case "high":
       return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
     case "medium":
@@ -966,10 +1006,13 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     ?? intelligence?.financial_os_v2
     ?? osState?.financial_os_v2
     ?? null;
+  const decisionPlan = (osState?.decision_plan ?? null) as FinancialOsDecisionPlan | null;
   const setupStatus = (osState?.setup_status ?? financialOsV2?.setup_status ?? null) as FinancialOsSetupStatus | null;
   const setupItems = setupStatus?.items ?? [];
   const setupCompletedCount = Number(setupStatus?.completed_count ?? 0);
   const setupTotalCount = Number(setupStatus?.total_count ?? setupItems.length ?? 0);
+  const decisionPlanActions = decisionPlan?.actions ?? [];
+  const decisionPlanAvoid = decisionPlan?.avoid ?? [];
   const hasFinancialOsV2 = Boolean(financialOsV2);
   const financialOsCashTotal = firstDashboardMoneyValue(
     financialOsV2?.total_cash,
@@ -1876,6 +1919,124 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {settings.show_financial_os_panels && (
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-zinc-100">Decision Plan</div>
+                <div className="mt-1 text-xs text-zinc-400">
+                  Your Financial OS turns the numbers into actions.
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase tracking-[0.18em] ${decisionPlanStatusTone(decisionPlan?.status)}`}>
+                  {decisionPlanStatusLabel(decisionPlan?.status)}
+                </span>
+                {decisionPlanActions.length ? (
+                  <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-200">
+                    {decisionPlanActions.length} action{decisionPlanActions.length === 1 ? "" : "s"}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            {decisionPlan ? (
+              <>
+                <div className="mt-4 rounded-xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(34,197,94,0.12),transparent_40%),#0B0F14] p-4">
+                  <div className="text-xl font-semibold leading-tight text-zinc-100 sm:text-2xl">
+                    {decisionPlan.headline || "Follow your current Financial OS plan"}
+                  </div>
+                  <div className="mt-2 max-w-3xl text-sm leading-6 text-zinc-300">
+                    {decisionPlan.summary || "Your Financial OS is preparing the clearest next step."}
+                  </div>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  {decisionPlanActions.length ? (
+                    decisionPlanActions.map((action, index) => (
+                      <div
+                        key={`${action.type || "action"}-${index}`}
+                        className="rounded-xl border border-white/10 bg-[#0B0F14] p-4"
+                      >
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xs font-semibold text-zinc-100">
+                                {action.priority ?? index + 1}
+                              </span>
+                              <div className="text-sm font-semibold text-zinc-100">{action.label || "Next action"}</div>
+                              <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${decisionPlanConfidenceTone(action.confidence)}`}>
+                                {action.confidence || "unknown"} confidence
+                              </span>
+                            </div>
+
+                            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">How much</div>
+                                <div className="mt-1 text-sm font-semibold text-zinc-100">
+                                  {action.amount != null ? formatDashboardMoneyOrText(action.amount, "No set amount") : "No set amount"}
+                                </div>
+                              </div>
+                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">To whom / where</div>
+                                <div className="mt-1 text-sm font-semibold text-zinc-100">
+                                  {action.target || "Current Financial OS plan"}
+                                </div>
+                              </div>
+                              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">When</div>
+                                <div className="mt-1 text-sm font-semibold text-zinc-100">
+                                  {action.timing || "This period"}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="mt-3 text-sm leading-6 text-zinc-400">
+                              {action.reason || "Follow the current Financial OS recommendation."}
+                            </div>
+                          </div>
+
+                          {action.href ? (
+                            <Link
+                              href={action.href}
+                              className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+                            >
+                              {action.cta_label || "Open"}
+                            </Link>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                      Decision actions are loading.
+                    </div>
+                  )}
+                </div>
+
+                {decisionPlanAvoid.length ? (
+                  <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Avoid for now</div>
+                    <div className="mt-3 space-y-3">
+                      {decisionPlanAvoid.map((item, index) => (
+                        <div key={`${item.label || "avoid"}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                          <div className="text-sm font-medium text-zinc-100">{item.label || "Avoid this move"}</div>
+                          <div className="mt-1 text-sm leading-6 text-zinc-400">{item.reason}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                {osStateLoading ? "Decision plan is loading." : "Decision plan is not available yet."}
+              </div>
+            )}
           </div>
         )}
 
