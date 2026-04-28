@@ -27,6 +27,7 @@ import type { CashTxn, CashAccount } from "@/types/cash";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
+import { formatMoney, formatMonths, formatShortDate } from "@/lib/format";
 import {
   listStatements,
   listStatementTransactions,
@@ -56,8 +57,7 @@ import {
  * Money / date helpers
  * ========================= */
 function fmtMoney(n: number) {
-  const v = Number(n || 0);
-  return `$${v.toFixed(2)}`;
+  return formatMoney(n || 0);
 }
 
 function hasFiniteNumber(value: unknown): value is number {
@@ -289,6 +289,37 @@ function decisionActionMeta(action?: FinancialOsDecisionPlanAction | null) {
   return parts.join(" • ");
 }
 
+function standardCtaLabel(label?: string | null) {
+  const normalized = String(label || "").toLowerCase();
+  if (normalized.includes("review")) return "Review";
+  if (normalized.includes("set") || normalized.includes("setup")) return "Set";
+  if (normalized.includes("confirm")) return "Confirm";
+  return "Open";
+}
+
+function polishDashboardCopy(value?: string | null, fallback = "") {
+  const text = String(value || fallback)
+    .replace(/this does not mean[^.?!]*[.?!]\s*/gi, "")
+    .replace(/\bshould\b/gi, "can")
+    .replace(/Spending paused:\s*/gi, "Spending paused. ")
+    .replace(/your monthly cap is fully used/gi, "Cap used")
+    .trim();
+
+  return text || fallback;
+}
+
+function shortDashboardCopy(value?: string | null, fallback = "", maxLength = 150) {
+  const text = polishDashboardCopy(value, fallback);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1).trimEnd()}...`;
+}
+
+function isInstructionalInsight(text?: string | null) {
+  const normalized = String(text || "").toLowerCase();
+  if (!normalized) return false;
+  return /\b(pause|pay|review|set|confirm|open|avoid|do not|don't|next step|what to do|should|need to)\b/.test(normalized);
+}
+
 function setupTrustCopy(status?: FinancialOsSetupStatus | null) {
   switch ((status?.trust_level || "").toLowerCase()) {
     case "high":
@@ -312,7 +343,7 @@ function formatSetupItemValue(item?: FinancialOsSetupItem | null) {
     case "fixed_essentials":
       return `${fmtMoney(item.value)}/month`;
     case "runway_target":
-      return `${Number(item.value).toFixed(Number.isInteger(item.value) ? 0 : 1)} months`;
+      return formatMonths(item.value);
     case "fi_target":
       return fmtMoney(item.value);
     case "debt_registry":
@@ -678,7 +709,7 @@ function incomeSourceLabel(source?: string | null) {
 function fmtMonthsCompact(months?: number | null) {
   if (months == null) return "Needs data";
   if (months <= 0) return "Debt-free";
-  return `${months} mo`;
+  return formatMonths(months);
 }
 
 /** =========================
@@ -721,6 +752,8 @@ type MonthSpendRow = {
   counted?: boolean;
   suspectedDuplicate?: boolean;
 };
+
+type UpcomingDashboardItem = NonNullable<OsStateResponse["upcoming_items"]>[number];
 
 export default function DashboardPage() {
   const { user, status } = useAuth();
@@ -785,6 +818,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const [intelligence, setIntelligence] = useState<FinancialOsIntelligenceResponse | null>(null);
   const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
   const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
+  const [showDetails, setShowDetails] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -1052,7 +1086,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   );
   const osCashSources = osState?.cash_sources || null;
   const stsBreakdown = nextBestDollar?.breakdown || null;
-  const upcomingSummary = osState?.upcoming_summary ?? null;
   const upcomingItemsList = upcomingItems ?? [];
   const osStateLoading = !hasAuthenticatedUser || (billsLoading && !osState);
   const nextBestDollarLoadingState = !hasAuthenticatedUser || (nextBestDollarLoading && !nextBestDollar);
@@ -1076,14 +1109,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const setupItems = setupStatus?.items ?? [];
   const setupCompletedCount = Number(setupStatus?.completed_count ?? 0);
   const setupTotalCount = Number(setupStatus?.total_count ?? setupItems.length ?? 0);
-  const advisorReasoning = useMemo(
-    () =>
-      (advisorSummary?.reasoning ?? [])
-        .map((item) => String(item || "").trim())
-        .filter(Boolean)
-        .slice(0, 3),
-    [advisorSummary]
-  );
   const decisionPlanActions = useMemo(
     () =>
       [...(decisionPlan?.actions ?? [])]
@@ -1124,18 +1149,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     osState?.upcoming_total,
     osState?.calculation?.upcoming_total,
     upcomingTotal
-  );
-  const billsManualObligationsTotal = firstDashboardMoneyValue(
-    financialOsV2?.bills_manual_obligations_total,
-    nextBestDollar?.breakdown?.bills_manual_obligations_total,
-    upcomingSummary?.bill_total != null || upcomingSummary?.manual_bill_total != null
-      ? Number(upcomingSummary?.bill_total || 0) + Number(upcomingSummary?.manual_bill_total || 0)
-      : null
-  );
-  const debtMinimumsTotal = firstDashboardMoneyValue(
-    financialOsV2?.debt_minimums_cash,
-    nextBestDollar?.breakdown?.debt_minimums_total,
-    upcomingSummary?.debt_minimum_total
   );
   const protectedObligationsTotal = firstDashboardMoneyValue(
     financialOsV2?.protected_obligations_total,
@@ -1265,10 +1278,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     discretionaryExplanation?.discretionary_cap_percent
   );
   const decisionPlanSummary =
-    decisionPlan?.summary ||
-    nextBestAction?.reason ||
-    intelligence?.insights?.what_to_do_next?.explanation ||
-    "Your Financial OS is preparing the clearest next step.";
+    shortDashboardCopy(
+      decisionPlan?.summary ||
+        nextBestAction?.reason ||
+        intelligence?.insights?.what_to_do_next?.explanation,
+      "Financial OS is preparing the clearest next step."
+    );
   const safeToSpendBeforeBuffer = (() => {
     const cash = firstDashboardMoneyValue(
       stsBreakdown?.total_cash,
@@ -1395,7 +1410,10 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     [intelligence]
   );
   const secondaryInsights = useMemo(
-    () => osInsights.slice(0, 4),
+    () =>
+      osInsights
+        .filter((insight) => !isInstructionalInsight(`${insight.title || ""} ${insight.explanation || ""}`))
+        .slice(0, 4),
     [osInsights]
   );
   const plaidDisplaySummary = useMemo(
@@ -1761,6 +1779,11 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   }, [monthTxns, monthSpendRows, cashMonthTxns, cashAccounts, cashTotals.totalCash, cashLoading, cashErr, financialOsCashTotal, settings]);
 
   const stageUi = useMemo(() => stageBadge(monthMetrics.stage), [monthMetrics.stage]);
+  const topFocusAction = shortDashboardCopy(
+    decisionPlan?.headline || decisionPlanHeadline,
+    "Review plan",
+    80
+  );
 
   return (
     <AppShell>
@@ -1775,6 +1798,15 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             data-os-state-status={osStateUnavailable ? "unavailable" : "ready"}
             data-next-best-dollar-status={nextBestDollarUnavailable ? "unavailable" : "ready"}
           />
+        ) : null}
+        {settings.show_financial_os_panels ? (
+          <div className="sticky top-0 z-30 -mx-1 rounded-xl border border-white/10 bg-[#0B0F14]/95 px-4 py-2 text-sm font-medium text-zinc-100 shadow-lg shadow-black/20 backdrop-blur">
+            <div className="truncate">
+              {stageUi.label} <span className="text-zinc-500">•</span>{" "}
+              {stabilityMeter?.label || "Stability loading"}{" "}
+              <span className="text-zinc-500">•</span> {topFocusAction}
+            </div>
+          </div>
         ) : null}
         {/* Header */}
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
@@ -1801,8 +1833,18 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           </div>
         </div>
 
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => setShowDetails((value) => !value)}
+            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+          >
+            {showDetails ? "Hide details" : "Show details"}
+          </button>
+        </div>
+
         {/* ===== Financial OS alerts ===== */}
-        {settings.show_financial_os_panels && monthMetrics.alerts.length > 0 && (
+        {showDetails && settings.show_financial_os_panels && monthMetrics.alerts.length > 0 && (
           <div className="space-y-3">
             {monthMetrics.alerts.map((a, i) => (
               <div
@@ -1828,7 +1870,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           </div>
         )}
 
-        {settings.show_financial_os_panels && (
+        {showDetails && settings.show_financial_os_panels && (
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
@@ -1894,7 +1936,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                             href={item.href}
                             className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
                           >
-                            {item.action || "Open"}
+                            {standardCtaLabel(item.action)}
                           </Link>
                         ) : null}
                       </div>
@@ -1930,26 +1972,10 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             {advisorSummary ? (
               <div className={`mt-4 rounded-xl border p-5 ${advisorSummaryTone(advisorSummary.tone)}`}>
                 <div className="text-xl font-semibold leading-tight text-zinc-100 sm:text-2xl">
-                  {advisorSummary.headline}
+                  {shortDashboardCopy(advisorSummary.headline, "Financial OS summary", 96)}
                 </div>
                 <div className="mt-3 max-w-4xl text-sm leading-6 text-zinc-300">
-                  {advisorSummary.one_liner}
-                </div>
-
-                {advisorReasoning.length ? (
-                  <ul className="mt-4 space-y-2 text-sm leading-6 text-zinc-300">
-                    {advisorReasoning.map((item, index) => (
-                      <li key={`${item}-${index}`} className="flex gap-2">
-                        <span className="text-zinc-500">-</span>
-                        <span>{item}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-
-                <div className="mt-4 border-t border-white/10 pt-3">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Next check-in</div>
-                  <div className="mt-1 text-sm text-zinc-300">{advisorSummary.next_check_in}</div>
+                  {shortDashboardCopy(advisorSummary.one_liner, "Plan status is loading.", 150)}
                 </div>
               </div>
             ) : (
@@ -1961,7 +1987,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         )}
 
         {settings.show_financial_os_panels && (
-          <div className="grid gap-3 xl:grid-cols-[1.35fr,1fr]">
+          <div className={showDetails ? "grid gap-3 xl:grid-cols-[1.35fr,1fr]" : "grid gap-3"}>
             <div className="rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.18),transparent_35%),#0E141C] p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_60px_rgba(8,15,25,0.35)]">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -2018,7 +2044,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                                     ) : null}
                                     {action.reason ? (
                                       <div className="mt-2 text-sm leading-6 text-zinc-400">
-                                        {action.reason}
+                                        {shortDashboardCopy(action.reason, "", 130)}
                                       </div>
                                     ) : null}
                                   </div>
@@ -2030,7 +2056,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                                   href={action.href}
                                   className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
                                 >
-                                  {action.cta_label || "Open"}
+                                  {standardCtaLabel(action.cta_label)}
                                 </Link>
                               ) : null}
                             </div>
@@ -2065,6 +2091,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               )}
             </div>
 
+            {showDetails ? (
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -2086,7 +2113,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                           {insight.severity}
                         </div>
                       </div>
-                      <div className="mt-2 text-xs leading-5 text-zinc-400">{insight.explanation}</div>
+                      <div className="mt-2 text-xs leading-5 text-zinc-400">
+                        {shortDashboardCopy(insight.explanation, "", 120)}
+                      </div>
                     </div>
                   ))
                 ) : (
@@ -2096,10 +2125,84 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 )}
               </div>
             </div>
+            ) : null}
           </div>
         )}
 
         {settings.show_financial_os_panels && (
+          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-zinc-100">Upcoming Obligations</div>
+                <div className="mt-1 text-xs text-zinc-400">
+                  Next {upcomingWindowDays} days •{" "}
+                  <span className="font-mono text-zinc-100">
+                    {formatDashboardMoney(protectedObligationsTotal, {
+                      loading: osStateLoading,
+                      unavailable: osStateUnavailable,
+                    })}
+                  </span>{" "}
+                  protected.
+                </div>
+              </div>
+
+              <Link
+                href="/bills"
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
+                title="Open bills"
+              >
+                Open
+              </Link>
+            </div>
+
+            {billsLoading && <div className="mt-4 text-sm text-zinc-400">Loading obligations...</div>}
+            {billsErr && <div className="mt-4 text-sm text-red-400">Data unavailable. {billsErr}</div>}
+
+            {!billsLoading && !billsErr && (
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="text-xs text-zinc-400">
+                    <tr className="border-b border-white/10">
+                      <th className="py-3 pr-4">obligation</th>
+                      <th className="py-3 pr-4">due</th>
+                      <th className="py-3 pr-0 text-right">amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-zinc-200">
+                    {upcomingItemsList.slice(0, 5).map((b: UpcomingDashboardItem) => (
+                      <tr key={b.id} className="border-b border-white/5 hover:bg-white/5">
+                        <td className="py-3 pr-4">
+                          <div className="text-zinc-100">{b.name}</div>
+                          <div className="mt-1 text-xs text-zinc-500">
+                            {b.type === "debt_minimum"
+                              ? "Debt minimum"
+                              : b.type === "manual_bill"
+                                ? "Manual obligation"
+                                : (b.autopay ? "Autopay bill" : "Bill")}
+                          </div>
+                        </td>
+                        <td className="py-3 pr-4 text-zinc-300">{formatShortDate(b.due_date)}</td>
+                        <td className="py-3 pr-0 text-right font-mono text-zinc-100">
+                          {fmtMoney(Number(b.amount || 0))}
+                        </td>
+                      </tr>
+                    ))}
+
+                    {upcomingItemsList.length === 0 && (
+                      <tr>
+                        <td className="py-6 text-zinc-400" colSpan={3}>
+                          No obligations due in the next {upcomingWindowDays} days.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {showDetails && settings.show_financial_os_panels && (
           <div className="grid gap-3 xl:grid-cols-3">
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5 xl:col-span-2">
               <div className="flex items-start justify-between gap-3">
@@ -2211,11 +2314,11 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
                   <div className="text-xs text-zinc-400">Runway Reserve</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {runwayMonths != null ? `${Number(runwayMonths).toFixed(1)} mo` : "--"}
+                    {runwayMonths != null ? formatMonths(runwayMonths) : "--"}
                   </div>
                   <div className="mt-1 text-[11px] text-zinc-500">
                     {runwayReserveCurrent != null && runwayReserveTarget != null
-                      ? `${fmtMoney(Number(runwayReserveCurrent || 0))} of ${fmtMoney(Number(runwayReserveTarget || 0))} protected${runwayTargetMonths != null ? ` • ${Number(runwayTargetMonths).toFixed(1)} mo target` : ""}`
+                      ? `${fmtMoney(Number(runwayReserveCurrent || 0))} of ${fmtMoney(Number(runwayReserveTarget || 0))} protected${runwayTargetMonths != null ? ` • ${formatMonths(runwayTargetMonths)} target` : ""}`
                       : "Protected runway cash"}
                   </div>
                 </div>
@@ -2359,7 +2462,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="text-xs text-zinc-400">Months faster</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {payoffMonthsSaved != null
-                      ? `${payoffMonthsSaved} mo`
+                      ? formatMonths(payoffMonthsSaved)
                       : "--"}
                   </div>
                 </div>
@@ -2373,7 +2476,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div className="text-xs text-zinc-400">Payoff with extra</div>
                   <div className="mt-1 text-lg font-semibold text-zinc-100">
                     {payoffMonthsWithExtra != null
-                      ? `${payoffMonthsWithExtra} mo`
+                      ? formatMonths(payoffMonthsWithExtra)
                       : "--"}
                   </div>
                 </div>
@@ -2389,7 +2492,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
 
               <div className="mt-3 text-xs text-zinc-500">
                 {payoffMonthsWithExtra != null && projectedPayoffDebt?.minimum_only_months != null
-                  ? `Minimum-only payoff for this target is about ${projectedPayoffDebt.minimum_only_months} months before the extra payment is applied.`
+                  ? `Minimum-only payoff is about ${formatMonths(projectedPayoffDebt.minimum_only_months)} before extra payments.`
                   : "Approximation assumes this extra amount can be repeated monthly and debt APRs stay flat."}
               </div>
             </div>
@@ -2397,7 +2500,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         )}
 
         {/* ===== Financial OS control panels ===== */}
-        {settings.show_financial_os_panels && (
+        {showDetails && settings.show_financial_os_panels && (
           <div className="grid gap-3 lg:grid-cols-3">
             {/* Safe-to-Spend */}
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
@@ -2464,34 +2567,30 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                       <div className="flex items-center justify-between gap-3">
                         <span>Month-to-date discretionary spend</span>
                         <span className="font-mono text-zinc-100">
-                          {formatDashboardMoneyOrText(discretionaryExplanation?.month_to_date_spend, "$0.00")}
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.month_to_date_spend, "$0")}
                         </span>
                       </div>
                       <div className="flex items-center justify-between gap-3">
                         <span>Remaining monthly cap</span>
                         <span className="font-mono text-zinc-100">
-                          {formatDashboardMoneyOrText(discretionaryExplanation?.remaining_monthly_cap, "$0.00")}
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.remaining_monthly_cap, "$0")}
                         </span>
                       </div>
                       <div className="flex items-center justify-between gap-3">
                         <span>Available cash after protections</span>
                         <span className="font-mono text-zinc-100">
-                          {formatDashboardMoneyOrText(discretionaryExplanation?.available_cash_after_protection, "$0.00")}
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.available_cash_after_protection, "$0")}
                         </span>
                       </div>
                       <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-2 text-zinc-200">
                         <span>Final allowance</span>
                         <span className="font-mono text-zinc-100">
-                          {formatDashboardMoneyOrText(discretionaryExplanation?.final_allowance, "$0.00")}
+                          {formatDashboardMoneyOrText(discretionaryExplanation?.final_allowance, "$0")}
                         </span>
                       </div>
                     </div>
                   </div>
 
-                  <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-zinc-200">
-                    <span className="font-semibold text-zinc-100">Next step:</span>{" "}
-                    {discretionaryExplanation?.action || "Review your income, cap, and protected cash settings."}
-                  </div>
                 </>
               ) : stsBreakdown ? (
                 <div className="mt-4 space-y-2 text-xs text-zinc-500">
@@ -2631,7 +2730,8 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 </span>
               </div>
             </div>
-            {/* ===== Upcoming Obligations (Phase 1) ===== */}
+            {/*
+            Legacy Upcoming Obligations card removed.
 <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
       <div className="flex items-center justify-between gap-3">
         <div>
@@ -2656,9 +2756,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     <Link
       href="/bills"
       className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
-      title="Manage bills"
+      title="Open bills"
     >
-      Manage →
+      Open
     </Link>
   </div>
 
@@ -2714,6 +2814,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     Backend Financial OS now surfaces bills, manual obligations, and debt minimums from one upcoming-obligations window.
   </div>
 </div>
+            */}
             {/* Debt strategy + caps */}
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-center justify-between">
@@ -2737,7 +2838,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
                   <div className="text-xs text-zinc-400">Runway target</div>
                   <div className="mt-1 text-sm font-semibold text-zinc-100">
-                    {Number(settings.target_runway_months || 0).toFixed(0)} months
+                    {formatMonths(settings.target_runway_months || 0)}
                   </div>
                   <div className="mt-1 text-xs text-zinc-500">
                     Used to classify stages.
@@ -2789,7 +2890,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           </div>
         )}
 
-        {settings.show_financial_os_panels && (
+        {showDetails && settings.show_financial_os_panels && (
           <div className="grid gap-3 lg:grid-cols-2">
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-start justify-between gap-3">
@@ -2803,7 +2904,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   href="/plaid"
                   className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
                 >
-                  Open Plaid →
+                  Open
                 </Link>
               </div>
 
@@ -2918,7 +3019,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                             txn.suspectedDuplicate ? "bg-amber-500/5" : "",
                           ].join(" ")}
                         >
-                          <td className="py-2 pr-3 text-zinc-400">{txn.posted_date || txn.authorized_date || "—"}</td>
+                          <td className="py-2 pr-3 text-zinc-400">
+                            {formatShortDate(txn.posted_date || txn.authorized_date)}
+                          </td>
                           <td className="py-2 pr-3">
                             <div className="text-zinc-200">{txn.account_name || "Plaid account"}</div>
                             <div className="text-[11px] text-zinc-500">
@@ -2960,6 +3063,8 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           </div>
         )}
 
+        {showDetails && (
+        <>
         {/* Stat cards (now includes cash + net worth) */}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
@@ -3259,7 +3364,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                       </div>
                     </td>
                     <td className="py-3 pr-4 text-zinc-300">{s.statement_period}</td>
-                    <td className="py-3 pr-4 text-zinc-300">{s.due_date}</td>
+                    <td className="py-3 pr-4 text-zinc-300">{formatShortDate(s.due_date)}</td>
                     <td className="py-3 pr-4 text-zinc-300">
                       {fmtMoney(s.new_balance)}
                     </td>
@@ -3269,7 +3374,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                         href={`/statements/${encodeURIComponent(s.statement_code)}`}
                         className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
                       >
-                        View
+                        Open
                       </Link>
                     </td>
                   </tr>
@@ -3297,7 +3402,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               href="/statements"
               className="text-xs text-zinc-300 hover:text-zinc-100"
             >
-              Go to Statements →
+              Open
             </Link>
           </div>
 
@@ -3334,7 +3439,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                         href={`/statements/${encodeURIComponent(s.statement_code)}`}
                         className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
                       >
-                        View
+                        Open
                       </Link>
                     </td>
                   </tr>
@@ -3351,6 +3456,8 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             </table>
           </div>
         </div>
+        </>
+        )}
       </div>
     </AppShell>
   );
