@@ -296,6 +296,14 @@ type SettingsModel = {
       showFIProgress: boolean;
       streaksEnabled: boolean;
     };
+
+    /** Explicit checklist confirmations */
+    setupConfirmations: {
+      monthlyIncomeConfirmed: boolean;
+      paycheckCadenceConfirmed: boolean;
+      runwayTargetConfirmed: boolean;
+      debtStrategyConfirmed: boolean;
+    };
   };
 
   /** 4) Alerts / Nudges */
@@ -490,6 +498,12 @@ function defaultSettings(): SettingsModel {
         showFIProgress: true,
         streaksEnabled: true,
       },
+      setupConfirmations: {
+        monthlyIncomeConfirmed: false,
+        paycheckCadenceConfirmed: false,
+        runwayTargetConfirmed: false,
+        debtStrategyConfirmed: false,
+      },
     },
     alerts: {
       enabled: true,
@@ -519,6 +533,89 @@ function defaultSettings(): SettingsModel {
     },
   };
 }
+
+const SETTINGS_SECTION_ALIASES: Record<string, string> = {
+  "setup-income": "income-paycheck",
+  "setup-runway": "runway-target",
+  "setup-fi-target": "fi-target",
+  "setup-debt-strategy": "debt-strategy",
+};
+
+function normalizeSettings(input?: Partial<SettingsModel> | null): SettingsModel {
+  const defaults = defaultSettings();
+  const source = (input && typeof input === "object" ? input : {}) as Partial<SettingsModel> & Record<string, any>;
+  const sourceFinancialOs = (source.financialOS || {}) as Record<string, any>;
+  const sourceAlerts = (source.alerts || {}) as Record<string, any>;
+
+  return {
+    ...defaults,
+    ...source,
+    profile: { ...defaults.profile, ...(source.profile || {}) },
+    categories: { ...defaults.categories, ...(source.categories || {}) },
+    financialOS: {
+      ...defaults.financialOS,
+      ...sourceFinancialOs,
+      sts: { ...defaults.financialOS.sts, ...(sourceFinancialOs.sts || {}) },
+      stageTargets: { ...defaults.financialOS.stageTargets, ...(sourceFinancialOs.stageTargets || {}) },
+      paycheck: {
+        ...defaults.financialOS.paycheck,
+        ...(sourceFinancialOs.paycheck || {}),
+        threeCaps: {
+          ...defaults.financialOS.paycheck.threeCaps,
+          ...(sourceFinancialOs.paycheck?.threeCaps || {}),
+        },
+        manualBuckets: {
+          ...defaults.financialOS.paycheck.manualBuckets,
+          ...(sourceFinancialOs.paycheck?.manualBuckets || {}),
+        },
+      },
+      debt: {
+        ...defaults.financialOS.debt,
+        ...(sourceFinancialOs.debt || {}),
+        nextBestDollar: {
+          ...defaults.financialOS.debt.nextBestDollar,
+          ...(sourceFinancialOs.debt?.nextBestDollar || {}),
+        },
+      },
+      savings: {
+        ...defaults.financialOS.savings,
+        ...(sourceFinancialOs.savings || {}),
+        defaultSinkingFunds: Array.isArray(sourceFinancialOs.savings?.defaultSinkingFunds)
+          ? sourceFinancialOs.savings.defaultSinkingFunds
+          : defaults.financialOS.savings.defaultSinkingFunds,
+      },
+      scoreboards: { ...defaults.financialOS.scoreboards, ...(sourceFinancialOs.scoreboards || {}) },
+      setupConfirmations: {
+        ...defaults.financialOS.setupConfirmations,
+        ...(sourceFinancialOs.setupConfirmations || {}),
+      },
+    },
+    alerts: {
+      ...defaults.alerts,
+      ...sourceAlerts,
+      channels: Array.isArray(sourceAlerts.channels) ? sourceAlerts.channels : defaults.alerts.channels,
+      quietHours: { ...defaults.alerts.quietHours, ...(sourceAlerts.quietHours || {}) },
+      triggers: { ...defaults.alerts.triggers, ...(sourceAlerts.triggers || {}) },
+    },
+    data: { ...defaults.data, ...(source.data || {}) },
+    privacy: { ...defaults.privacy, ...(source.privacy || {}) },
+  };
+}
+
+type SetupSaveKey = "monthly_income" | "paycheck_cadence" | "runway_target" | "debt_strategy";
+
+type SetupSaveState = {
+  busy: boolean;
+  status: string | null;
+  error: string | null;
+};
+
+const INITIAL_SETUP_SAVE_STATE: Record<SetupSaveKey, SetupSaveState> = {
+  monthly_income: { busy: false, status: null, error: null },
+  paycheck_cadence: { busy: false, status: null, error: null },
+  runway_target: { busy: false, status: null, error: null },
+  debt_strategy: { busy: false, status: null, error: null },
+};
 
 /** ------- tiny UI atoms ------- */
 function SectionTitle({
@@ -974,6 +1071,7 @@ export default function SettingsPage() {
   const [plaidCashContribution, setPlaidCashContribution] = useState(0);
   const [plaidDuplicateCount, setPlaidDuplicateCount] = useState(0);
   const [setupStatus, setSetupStatus] = useState<FinancialOsSetupStatus | null>(null);
+  const [setupSaveState, setSetupSaveState] = useState<Record<SetupSaveKey, SetupSaveState>>(INITIAL_SETUP_SAVE_STATE);
   const [fiTargetInput, setFiTargetInput] = useState("");
   const [fiTargetStatus, setFiTargetStatus] = useState<string | null>(null);
   const [fiTargetError, setFiTargetError] = useState<string | null>(null);
@@ -982,8 +1080,7 @@ export default function SettingsPage() {
   useEffect(() => {
     const s = safeJsonParse<SettingsModel>(localStorage.getItem(SETTINGS_KEY));
     if (s?.version === 1) {
-      // merge with defaults so new fields never break old saves
-      setSettings({ ...defaultSettings(), ...s });
+      setSettings(normalizeSettings(s));
     }
     setLoaded(true);
   }, []);
@@ -1014,7 +1111,7 @@ export default function SettingsPage() {
         const remote = await getUserSettings();
         if (cancelled) return;
         if (remote?.settings && Object.keys(remote.settings).length > 0) {
-          setSettings({ ...defaultSettings(), ...(remote.settings as SettingsModel) });
+          setSettings(normalizeSettings(remote.settings as SettingsModel));
         }
         if (remote?.category_rules && Object.keys(remote.category_rules).length > 0) {
           const key = (remote.settings?.categories?.rulesKey as string) || RULES_KEY_DEFAULT;
@@ -1027,6 +1124,27 @@ export default function SettingsPage() {
       cancelled = true;
     };
   }, [USER_ID]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const scrollToHashSection = () => {
+      const rawHash = window.location.hash.replace(/^#/, "");
+      if (!rawHash) return;
+      const targetId = SETTINGS_SECTION_ALIASES[rawHash] || rawHash;
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      const top = Math.max(target.getBoundingClientRect().top + window.scrollY - 96, 0);
+      window.scrollTo({ top, behavior: "smooth" });
+    };
+
+    const timer = window.setTimeout(scrollToHashSection, 80);
+    window.addEventListener("hashchange", scrollToHashSection);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("hashchange", scrollToHashSection);
+    };
+  }, []);
 
   useEffect(() => {
     if (!USER_ID) return;
@@ -1055,6 +1173,35 @@ export default function SettingsPage() {
     saveUserSettings({ settings, category_rules: rules }).catch(() => {});
   }, [settings, loaded, USER_ID]);
 
+  async function refreshSetupChecklist() {
+    if (!USER_ID) return null;
+    const osState = await getOsState({ user_id: USER_ID, window_days: 21 });
+    setSetupStatus(osState?.setup_status || osState?.financial_os_v2?.setup_status || null);
+    return osState;
+  }
+
+  async function persistSettingsSnapshot(nextSettings: SettingsModel) {
+    const normalized = normalizeSettings(nextSettings);
+    const rulesKey = normalized.categories.rulesKey || RULES_KEY_DEFAULT;
+    const rules = safeJsonParse<Record<string, any>>(localStorage.getItem(rulesKey)) ?? {};
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
+    const saved = await saveUserSettings({ settings: normalized, category_rules: rules });
+    return normalizeSettings(saved?.settings as SettingsModel);
+  }
+
+  function updateSetupSaveState(
+    key: SetupSaveKey,
+    patch: Partial<SetupSaveState>,
+  ) {
+    setSetupSaveState((prev) => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        ...patch,
+      },
+    }));
+  }
+
   async function fetchDebtRegistry() {
     if (!USER_ID) return;
     setDebtsLoading(true);
@@ -1066,6 +1213,136 @@ export default function SettingsPage() {
       setDebtError(err instanceof Error ? err.message : "Failed to load debt registry");
     } finally {
       setDebtsLoading(false);
+    }
+  }
+
+  async function handleConfirmMonthlyIncome() {
+    const monthlyIncome = Number(settings.financialOS.paycheck.monthlyIncome || 0);
+    if (!Number.isFinite(monthlyIncome) || monthlyIncome <= 0) {
+      updateSetupSaveState("monthly_income", {
+        busy: false,
+        status: null,
+        error: "Enter a monthly income before confirming it.",
+      });
+      return;
+    }
+
+    updateSetupSaveState("monthly_income", { busy: true, status: null, error: null });
+    try {
+      const nextSettings = normalizeSettings({
+        ...settings,
+        financialOS: {
+          ...settings.financialOS,
+          setupConfirmations: {
+            ...settings.financialOS.setupConfirmations,
+            monthlyIncomeConfirmed: true,
+          },
+        },
+      });
+      const savedSettings = await persistSettingsSnapshot(nextSettings);
+      setSettings(savedSettings);
+      await refreshSetupChecklist();
+      updateSetupSaveState("monthly_income", {
+        busy: false,
+        status: "Monthly income saved and confirmed.",
+        error: null,
+      });
+    } catch (error) {
+      updateSetupSaveState("monthly_income", {
+        busy: false,
+        status: null,
+        error: error instanceof Error ? error.message : "Failed to save monthly income.",
+      });
+    }
+  }
+
+  async function handleConfirmPaycheckCadence() {
+    updateSetupSaveState("paycheck_cadence", { busy: true, status: null, error: null });
+    try {
+      const nextSettings = normalizeSettings({
+        ...settings,
+        financialOS: {
+          ...settings.financialOS,
+          setupConfirmations: {
+            ...settings.financialOS.setupConfirmations,
+            paycheckCadenceConfirmed: true,
+          },
+        },
+      });
+      const savedSettings = await persistSettingsSnapshot(nextSettings);
+      setSettings(savedSettings);
+      await refreshSetupChecklist();
+      updateSetupSaveState("paycheck_cadence", {
+        busy: false,
+        status: "Paycheck cadence saved and confirmed.",
+        error: null,
+      });
+    } catch (error) {
+      updateSetupSaveState("paycheck_cadence", {
+        busy: false,
+        status: null,
+        error: error instanceof Error ? error.message : "Failed to save paycheck cadence.",
+      });
+    }
+  }
+
+  async function handleConfirmRunwayTarget() {
+    updateSetupSaveState("runway_target", { busy: true, status: null, error: null });
+    try {
+      const nextSettings = normalizeSettings({
+        ...settings,
+        financialOS: {
+          ...settings.financialOS,
+          setupConfirmations: {
+            ...settings.financialOS.setupConfirmations,
+            runwayTargetConfirmed: true,
+          },
+        },
+      });
+      const savedSettings = await persistSettingsSnapshot(nextSettings);
+      setSettings(savedSettings);
+      await refreshSetupChecklist();
+      updateSetupSaveState("runway_target", {
+        busy: false,
+        status: "Runway target saved and confirmed.",
+        error: null,
+      });
+    } catch (error) {
+      updateSetupSaveState("runway_target", {
+        busy: false,
+        status: null,
+        error: error instanceof Error ? error.message : "Failed to save runway target.",
+      });
+    }
+  }
+
+  async function handleConfirmDebtStrategy() {
+    updateSetupSaveState("debt_strategy", { busy: true, status: null, error: null });
+    try {
+      const nextSettings = normalizeSettings({
+        ...settings,
+        financialOS: {
+          ...settings.financialOS,
+          setupConfirmations: {
+            ...settings.financialOS.setupConfirmations,
+            debtStrategyConfirmed: true,
+          },
+        },
+      });
+      const savedSettings = await persistSettingsSnapshot(nextSettings);
+      setSettings(savedSettings);
+      await refreshSetupChecklist();
+      updateSetupSaveState("debt_strategy", {
+        busy: false,
+        status: "Debt strategy saved and confirmed.",
+        error: null,
+      });
+    } catch (error) {
+      updateSetupSaveState("debt_strategy", {
+        busy: false,
+        status: null,
+        error: error instanceof Error ? error.message : "Failed to save debt strategy.",
+      });
     }
   }
 
@@ -1086,6 +1363,7 @@ export default function SettingsPage() {
         notes: trimmed ? "User-set FI target" : "Use derived Financial OS FI target",
       });
       setFiTargetInput(trimmed ? String(Math.max(0, numericValue)) : "");
+      await refreshSetupChecklist();
       setFiTargetStatus(trimmed ? "FI target saved." : "FI target cleared. Dashboard will use the derived formula.");
     } catch (error) {
       setFiTargetError(error instanceof Error ? error.message : "Failed to save FI target.");
@@ -1108,7 +1386,7 @@ export default function SettingsPage() {
       const [accountsRes, txRes, osState] = await Promise.all([
         getPlaidAccounts(USER_ID),
         getPlaidTransactions({ user_id: USER_ID, limit: 12 }),
-        getOsState({ user_id: USER_ID, window_days: 21 }),
+        refreshSetupChecklist(),
       ]);
       setPlaidAccounts(accountsRes.accounts || []);
       setPlaidItems(accountsRes.items || []);
@@ -1152,6 +1430,11 @@ export default function SettingsPage() {
   const setupItems = setupStatus?.items ?? [];
   const setupCompletedCount = Number(setupStatus?.completed_count ?? 0);
   const setupTotalCount = Number(setupStatus?.total_count ?? setupItems.length ?? 0);
+  const detectedMonthlyIncome = (() => {
+    const rawValue = setupItems.find((item) => item.key === "monthly_income")?.value;
+    if (typeof rawValue === "number" && Number.isFinite(rawValue) && rawValue > 0) return rawValue;
+    return null;
+  })();
 
   const verificationConfigured = Boolean(bootstrap?.beta?.email_verification_configured && user?.email_verification_configured);
   const verificationMeta = emailVerificationMeta(user?.email_verification_status, verificationConfigured);
@@ -1243,6 +1526,7 @@ export default function SettingsPage() {
   function resetAll() {
     localStorage.removeItem(SETTINGS_KEY);
     setSettings(defaultSettings());
+    setSetupSaveState(INITIAL_SETUP_SAVE_STATE);
   }
 
   async function exportAll() {
@@ -1264,7 +1548,7 @@ export default function SettingsPage() {
     if (!obj) throw new Error("Invalid JSON");
 
     if (obj.settings?.version === 1) {
-      setSettings({ ...defaultSettings(), ...obj.settings });
+      setSettings(normalizeSettings(obj.settings));
     }
 
     // restore category rules if present
@@ -1505,20 +1789,23 @@ export default function SettingsPage() {
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <Link href="/settings#setup-income" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                  <Link href="/settings#income-paycheck" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
                     Income / paycheck
                   </Link>
-                  <Link href="/bills" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                  <Link href="/settings#bills" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
                     Bills
                   </Link>
-                  <Link href="/debts" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                  <Link href="/settings#debts" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
                     Debts
                   </Link>
-                  <Link href="/settings#setup-fi-target" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                  <Link href="/settings#fi-target" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
                     FI target
                   </Link>
-                  <Link href="/settings#setup-runway" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                  <Link href="/settings#runway-target" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
                     Runway target
+                  </Link>
+                  <Link href="/settings#debt-strategy" className="inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10">
+                    Debt strategy
                   </Link>
                 </div>
 
@@ -1689,7 +1976,7 @@ export default function SettingsPage() {
 
             {/* Stage targets */}
             <Card>
-              <div id="setup-runway" className="scroll-mt-24">
+              <div id="runway-target" className="scroll-mt-24">
                 <SectionTitle
                   title="Stage Targets"
                   subtitle="Set the milestones that guide your Financial OS stage and progress."
@@ -1749,7 +2036,8 @@ export default function SettingsPage() {
                   max={12}
                   step={0.5}
                   suffix="months"
-                  onChange={(n) =>
+                  onChange={(n) => {
+                    updateSetupSaveState("runway_target", { status: null, error: null });
                     setSettings((p) => ({
                       ...p,
                       financialOS: {
@@ -1758,9 +2046,13 @@ export default function SettingsPage() {
                           ...p.financialOS.stageTargets,
                           runwayMonthsSecurityGoal: clamp(n, 1, 12),
                         },
+                        setupConfirmations: {
+                          ...p.financialOS.setupConfirmations,
+                          runwayTargetConfirmed: false,
+                        },
                       },
-                    }))
-                  }
+                    }));
+                  }}
                 />
 
                 <NumberInput
@@ -1811,24 +2103,71 @@ export default function SettingsPage() {
                 <div className="mt-3 text-xs text-zinc-500">
                   These targets help the app choose the next priority automatically.
                 </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleConfirmRunwayTarget}
+                    disabled={setupSaveState.runway_target.busy}
+                    className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-sm text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                  >
+                    {setupSaveState.runway_target.busy ? "Saving..." : "Save runway target"}
+                  </button>
+                  {setupSaveState.runway_target.status ? (
+                    <div className="text-xs text-emerald-300">{setupSaveState.runway_target.status}</div>
+                  ) : null}
+                  {setupSaveState.runway_target.error ? (
+                    <div className="text-xs text-red-300">{setupSaveState.runway_target.error}</div>
+                  ) : null}
+                </div>
               </div>
             </Card>
 
             {/* Paycheck splits */}
             <Card>
-              <div id="setup-income" className="scroll-mt-24">
+              <div id="income-paycheck" className="scroll-mt-24">
                 <SectionTitle
                   title="Paycheck Split"
                   subtitle="Choose how each paycheck should be divided across bills, day-to-day spending, and extra progress."
                 />
                 <Divider />
 
+                <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 text-sm text-zinc-200">
+                  Confirming income makes spending caps and recommendations more trustworthy.
+                </div>
+
+                {detectedMonthlyIncome && settings.financialOS.paycheck.monthlyIncome <= 0 ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-300">
+                    <div>Detected monthly income: <span className="font-medium text-zinc-100">{formatMoney(detectedMonthlyIncome)}/month</span></div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSettings((p) => ({
+                          ...p,
+                          financialOS: {
+                            ...p.financialOS,
+                            paycheck: { ...p.financialOS.paycheck, monthlyIncome: detectedMonthlyIncome },
+                            setupConfirmations: {
+                              ...p.financialOS.setupConfirmations,
+                              monthlyIncomeConfirmed: false,
+                            },
+                          },
+                        }))
+                      }
+                      className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                    >
+                      Use detected amount
+                    </button>
+                  </div>
+                ) : null}
+
                 <div className="grid gap-3 sm:grid-cols-3">
                 <Input
                   label="Monthly income confirmation"
                   desc="Optional setup confirmation for the trust checklist."
                   value={settings.financialOS.paycheck.monthlyIncome > 0 ? String(settings.financialOS.paycheck.monthlyIncome) : ""}
-                  onChange={(v) =>
+                  onChange={(v) => {
+                    updateSetupSaveState("monthly_income", { status: null, error: null });
                     setSettings((p) => {
                       const trimmed = v.trim();
                       const parsed = trimmed ? Number(trimmed.replace(/[$,\s]/g, "")) : 0;
@@ -1840,22 +2179,34 @@ export default function SettingsPage() {
                             ...p.financialOS.paycheck,
                             monthlyIncome: trimmed && Number.isFinite(parsed) ? Math.max(0, parsed) : 0,
                           },
+                          setupConfirmations: {
+                            ...p.financialOS.setupConfirmations,
+                            monthlyIncomeConfirmed: false,
+                          },
                         },
                       };
-                    })
-                  }
+                    });
+                  }}
                   placeholder="3766.76"
                 />
                 <Select
                   label="Pay cadence"
                   desc="Used to time forecasts and paycheck reminders."
                   value={settings.financialOS.paycheck.cadence}
-                  onChange={(v) =>
+                  onChange={(v) => {
+                    updateSetupSaveState("paycheck_cadence", { status: null, error: null });
                     setSettings((p) => ({
                       ...p,
-                      financialOS: { ...p.financialOS, paycheck: { ...p.financialOS.paycheck, cadence: v as any } },
-                    }))
-                  }
+                      financialOS: {
+                        ...p.financialOS,
+                        paycheck: { ...p.financialOS.paycheck, cadence: v as any },
+                        setupConfirmations: {
+                          ...p.financialOS.setupConfirmations,
+                          paycheckCadenceConfirmed: false,
+                        },
+                      },
+                    }));
+                  }}
                   options={[
                     { label: "Weekly", value: "Weekly" },
                     { label: "Biweekly", value: "Biweekly" },
@@ -1868,14 +2219,56 @@ export default function SettingsPage() {
                   label="Payday hint"
                   desc="A plain-language note like Friday or every other Wednesday."
                   value={settings.financialOS.paycheck.paydayHint}
-                  onChange={(v) =>
+                  onChange={(v) => {
+                    updateSetupSaveState("paycheck_cadence", { status: null, error: null });
                     setSettings((p) => ({
                       ...p,
-                      financialOS: { ...p.financialOS, paycheck: { ...p.financialOS.paycheck, paydayHint: v } },
-                    }))
-                  }
+                      financialOS: {
+                        ...p.financialOS,
+                        paycheck: { ...p.financialOS.paycheck, paydayHint: v },
+                        setupConfirmations: {
+                          ...p.financialOS.setupConfirmations,
+                          paycheckCadenceConfirmed: false,
+                        },
+                      },
+                    }));
+                  }}
                   placeholder="Friday"
                 />
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleConfirmMonthlyIncome}
+                    disabled={setupSaveState.monthly_income.busy}
+                    className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-sm text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                  >
+                    {setupSaveState.monthly_income.busy ? "Saving..." : "Save and confirm income"}
+                  </button>
+                  {setupSaveState.monthly_income.status ? (
+                    <div className="text-xs text-emerald-300">{setupSaveState.monthly_income.status}</div>
+                  ) : null}
+                  {setupSaveState.monthly_income.error ? (
+                    <div className="text-xs text-red-300">{setupSaveState.monthly_income.error}</div>
+                  ) : null}
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleConfirmPaycheckCadence}
+                    disabled={setupSaveState.paycheck_cadence.busy}
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-100 hover:bg-white/10 disabled:opacity-50"
+                  >
+                    {setupSaveState.paycheck_cadence.busy ? "Saving..." : "Save cadence and payday hint"}
+                  </button>
+                  {setupSaveState.paycheck_cadence.status ? (
+                    <div className="text-xs text-emerald-300">{setupSaveState.paycheck_cadence.status}</div>
+                  ) : null}
+                  {setupSaveState.paycheck_cadence.error ? (
+                    <div className="text-xs text-red-300">{setupSaveState.paycheck_cadence.error}</div>
+                  ) : null}
                 </div>
 
                 <div className="mt-3">
@@ -2072,7 +2465,7 @@ export default function SettingsPage() {
 
             {/* Debt strategy */}
             <Card>
-              <div id="setup-debt-strategy" className="scroll-mt-24">
+              <div id="debt-strategy" className="scroll-mt-24">
                 <SectionTitle
                   title="Debt Strategy"
                   subtitle="Choose the payoff style that should guide extra payments when money is available."
@@ -2083,12 +2476,20 @@ export default function SettingsPage() {
                 label="Strategy"
                 desc="Avalanche focuses on interest. Snowball focuses on quick wins. Hybrid balances both with safety rules."
                 value={settings.financialOS.debt.strategy}
-                onChange={(v) =>
+                onChange={(v) => {
+                  updateSetupSaveState("debt_strategy", { status: null, error: null });
                   setSettings((p) => ({
                     ...p,
-                    financialOS: { ...p.financialOS, debt: { ...p.financialOS.debt, strategy: v } },
-                  }))
-                }
+                    financialOS: {
+                      ...p.financialOS,
+                      debt: { ...p.financialOS.debt, strategy: v },
+                      setupConfirmations: {
+                        ...p.financialOS.setupConfirmations,
+                        debtStrategyConfirmed: false,
+                      },
+                    },
+                  }));
+                }}
                 options={[
                   { label: "Avalanche", value: "Avalanche" },
                   { label: "Snowball", value: "Snowball" },
@@ -2242,13 +2643,29 @@ export default function SettingsPage() {
                     }
                   />
                 </div>
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleConfirmDebtStrategy}
+                    disabled={setupSaveState.debt_strategy.busy}
+                    className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-sm text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                  >
+                    {setupSaveState.debt_strategy.busy ? "Saving..." : "Save debt strategy"}
+                  </button>
+                  {setupSaveState.debt_strategy.status ? (
+                    <div className="text-xs text-emerald-300">{setupSaveState.debt_strategy.status}</div>
+                  ) : null}
+                  {setupSaveState.debt_strategy.error ? (
+                    <div className="text-xs text-red-300">{setupSaveState.debt_strategy.error}</div>
+                  ) : null}
+                </div>
               </div>
               </div>
             </Card>
 
             {/* Savings & Scoreboards */}
             <Card>
-              <div id="setup-fi-target" className="scroll-mt-24">
+              <div id="fi-target" className="scroll-mt-24">
                 <SectionTitle
                   title="Savings & Scoreboards"
                   subtitle="Choose your savings targets and the progress trackers you want to see around the app."
@@ -2264,15 +2681,20 @@ export default function SettingsPage() {
                   max={24}
                   step={1}
                   suffix="months"
-                  onChange={(n) =>
+                  onChange={(n) => {
+                    updateSetupSaveState("runway_target", { status: null, error: null });
                     setSettings((p) => ({
                       ...p,
                       financialOS: {
                         ...p.financialOS,
                         savings: { ...p.financialOS.savings, emergencyFundGoalMonths: clamp(n, 1, 24) },
+                        setupConfirmations: {
+                          ...p.financialOS.setupConfirmations,
+                          runwayTargetConfirmed: false,
+                        },
                       },
-                    }))
-                  }
+                    }));
+                  }}
                 />
 
                 <Select
@@ -2651,6 +3073,29 @@ export default function SettingsPage() {
             </Card>
 
             <Card>
+              <div id="bills" className="scroll-mt-24">
+                <SectionTitle
+                  title="Bills & Essentials"
+                  subtitle="Review recurring bills and manual obligations so Financial OS can protect them before spending."
+                  right={
+                    <Link
+                      href="/bills"
+                      className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                    >
+                      Open bills workspace
+                    </Link>
+                  }
+                />
+                <Divider />
+
+                <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 text-sm text-zinc-300">
+                  Bills and manual obligations are managed on the <Link href="/bills" className="text-zinc-100 underline underline-offset-4">Bills</Link> page. Keep that list current so due-soon protection and runway planning stay reliable.
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <div id="debts" className="scroll-mt-24">
               <SectionTitle
                 title="Debt Accounts"
                 subtitle="Review the debt accounts in your plan or jump to the full debt workspace."
@@ -2820,6 +3265,7 @@ export default function SettingsPage() {
                 )}
               </div>
               </DisclosureSection>
+              </div>
             </Card>
 
             {/* Categories & Rules */}

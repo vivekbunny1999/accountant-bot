@@ -6835,23 +6835,14 @@ def _build_financial_os_setup_status(
         .filter(Paycheck.user_id == user_id, _active_financial_os_clause(Paycheck))
         .all()
     )
-    paycheck_monthly_income = round(
-        sum(
-            _monthly_equivalent_amount(
-                _to_float(getattr(paycheck, "typical_amount", None), 0.0),
-                getattr(paycheck, "frequency", None),
-            )
-            for paycheck in active_paychecks
-            if _to_float(getattr(paycheck, "typical_amount", None), 0.0) > 0
-        ),
-        2,
-    )
     configured_monthly_income = round(
         max(_to_float(_settings_value(settings, ["financialOS", "paycheck", "monthlyIncome"], None), 0.0), 0.0),
         2,
     )
-    user_set_monthly_income = configured_monthly_income if configured_monthly_income > 0 else paycheck_monthly_income
-    has_user_set_income = user_set_monthly_income > 0
+    monthly_income_confirmed = bool(
+        _settings_value(settings, ["financialOS", "setupConfirmations", "monthlyIncomeConfirmed"], False)
+    )
+    has_confirmed_monthly_income = monthly_income_confirmed and configured_monthly_income > 0
 
     bill_count = db.query(Bill.id).filter(Bill.user_id == user_id, _active_financial_os_clause(Bill)).count()
     manual_bill_count = (
@@ -6863,19 +6854,9 @@ def _build_financial_os_setup_status(
 
     active_debt_count = db.query(Debt.id).filter(Debt.user_id == user_id, _active_financial_os_clause(Debt)).count()
 
-    runway_goal_value = _to_float(goals.get("runway_target_months"), 0.0)
     runway_target_months = round(max(_to_float(snapshot.get("runway_target_months"), 3.0), 0.0), 2) or 3.0
-    runway_setting_value = _to_float(
-        _settings_value(settings, ["financialOS", "stageTargets", "runwayMonthsSecurityGoal"], None),
-        0.0,
-    )
-    savings_goal_setting_value = _to_float(
-        _settings_value(settings, ["financialOS", "savings", "emergencyFundGoalMonths"], None),
-        0.0,
-    )
-    has_runway_override = runway_goal_value > 0 or (
-        (runway_setting_value > 0 and abs(runway_setting_value - 3.0) > 0.009)
-        or (savings_goal_setting_value > 0 and abs(savings_goal_setting_value - 3.0) > 0.009)
+    runway_target_confirmed = bool(
+        _settings_value(settings, ["financialOS", "setupConfirmations", "runwayTargetConfirmed"], False)
     )
 
     cadence_value = str(
@@ -6883,22 +6864,19 @@ def _build_financial_os_setup_status(
         or (getattr(active_paychecks[0], "frequency", None) if active_paychecks else None)
         or "Weekly"
     ).strip() or "Weekly"
-    cadence_normalized = cadence_value.lower()
-    cadence_status = (
-        "confirmed"
-        if active_paychecks or cadence_normalized not in {"", "weekly"}
-        else "default"
+    cadence_confirmed = bool(
+        _settings_value(settings, ["financialOS", "setupConfirmations", "paycheckCadenceConfirmed"], False)
     )
+    cadence_status = "confirmed" if cadence_confirmed else "default"
 
     debt_strategy_value = str(
         _settings_value(settings, ["financialOS", "debt", "strategy"], None)
         or "Hybrid (Next Best Dollar)"
     ).strip() or "Hybrid (Next Best Dollar)"
-    debt_strategy_status = (
-        "confirmed"
-        if debt_strategy_value not in {"", "Hybrid (Next Best Dollar)"}
-        else "default"
+    debt_strategy_confirmed = bool(
+        _settings_value(settings, ["financialOS", "setupConfirmations", "debtStrategyConfirmed"], False)
     )
+    debt_strategy_status = "confirmed" if debt_strategy_confirmed else "default"
 
     fi_target_status = "missing"
     if fi_target_source == "user_set_goal" and fi_target_amount > 0:
@@ -6911,18 +6889,18 @@ def _build_financial_os_setup_status(
         {
             "key": "monthly_income",
             "label": "Monthly income",
-            "status": "confirmed" if has_user_set_income else ("detected" if monthly_income_baseline is not None else "missing"),
-            "value": round(user_set_monthly_income, 2) if has_user_set_income else monthly_income_baseline,
+            "status": "confirmed" if has_confirmed_monthly_income else ("detected" if monthly_income_baseline is not None else "missing"),
+            "value": configured_monthly_income if has_confirmed_monthly_income else monthly_income_baseline,
             "required": True,
             "reason": (
-                "Using your saved paycheck amount."
-                if has_user_set_income
+                "Using your confirmed monthly income."
+                if has_confirmed_monthly_income
                 else "Using detected income. Confirm it for stronger recommendations."
                 if monthly_income_baseline is not None
-                else "No monthly income is confirmed yet."
+                else "Set and confirm monthly income so spending caps and recommendations stay grounded."
             ),
-            "action": "Confirm in Settings" if not has_user_set_income else "Review income",
-            "href": "/settings#setup-income",
+            "action": "Confirm in Settings" if not has_confirmed_monthly_income else "Review income",
+            "href": "/settings#income-paycheck",
         },
         {
             "key": "fixed_essentials",
@@ -6955,16 +6933,16 @@ def _build_financial_os_setup_status(
         {
             "key": "runway_target",
             "label": "Runway target",
-            "status": "confirmed" if has_runway_override else "default",
+            "status": "confirmed" if runway_target_confirmed else "default",
             "value": runway_target_months,
             "required": False,
             "reason": (
                 "Using your saved runway target."
-                if has_runway_override
-                else "Using the default runway target."
+                if runway_target_confirmed
+                else "Using the default runway target until you confirm one in Settings."
             ),
-            "action": "Set runway target" if not has_runway_override else "Review runway target",
-            "href": "/settings#setup-runway",
+            "action": "Confirm in Settings" if not runway_target_confirmed else "Review runway target",
+            "href": "/settings#runway-target",
         },
         {
             "key": "fi_target",
@@ -6980,7 +6958,7 @@ def _build_financial_os_setup_status(
                 else "FI target is not available yet."
             ),
             "action": "Set FI target" if fi_target_status != "confirmed" else "Review FI target",
-            "href": "/settings#setup-fi-target",
+            "href": "/settings#fi-target",
         },
         {
             "key": "paycheck_cadence",
@@ -6991,10 +6969,10 @@ def _build_financial_os_setup_status(
             "reason": (
                 "Using your saved paycheck cadence."
                 if cadence_status == "confirmed"
-                else "Using the default paycheck cadence."
+                else "Using the default paycheck cadence until you save your cadence or payday hint."
             ),
             "action": "Confirm in Settings" if cadence_status != "confirmed" else "Review cadence",
-            "href": "/settings#setup-income",
+            "href": "/settings#income-paycheck",
         },
         {
             "key": "debt_strategy",
@@ -7005,10 +6983,10 @@ def _build_financial_os_setup_status(
             "reason": (
                 "Using your saved debt strategy."
                 if debt_strategy_status == "confirmed"
-                else "Using the default debt strategy."
+                else "Using the default debt strategy until you save your preference."
             ),
-            "action": "Set debt strategy" if debt_strategy_status != "confirmed" else "Review strategy",
-            "href": "/settings#setup-debt-strategy",
+            "action": "Confirm in Settings" if debt_strategy_status != "confirmed" else "Review strategy",
+            "href": "/settings#debt-strategy",
         },
     ]
 
