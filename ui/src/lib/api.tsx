@@ -976,6 +976,15 @@ export type FinancialOsSetupStatus = {
   items?: FinancialOsSetupItem[];
 };
 
+export type FinancialOsAdvisorSummary = {
+  tone?: "calm" | "warning" | "urgent" | "positive" | string | null;
+  headline?: string | null;
+  one_liner?: string | null;
+  reasoning?: string[];
+  confidence?: "high" | "medium" | "low" | string | null;
+  next_check_in?: string | null;
+};
+
 export type FinancialOsV2 = {
   as_of_date?: string | null;
   window_days?: number;
@@ -1051,6 +1060,7 @@ export type OsStateResponse = {
   user_id: string;
   cash_total: number;
   decision_plan?: FinancialOsDecisionPlan | null;
+  advisor_summary?: FinancialOsAdvisorSummary | null;
   cash_sources?: {
     pdf_cash_total?: number;
     plaid_cash_total?: number;
