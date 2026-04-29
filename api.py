@@ -47,6 +47,9 @@ import os
 import tempfile
 import json
 import secrets
+import hashlib
+import smtplib
+from email.message import EmailMessage
 import time
 import threading
 import logging
@@ -131,6 +134,7 @@ class SignupIn(BaseModel):
     email: str
     password: str
     display_name: Optional[str] = None
+    username: Optional[str] = None
 
 
 class LoginIn(BaseModel):
@@ -157,6 +161,10 @@ class AccountProfileUpdateIn(BaseModel):
 class PasswordChangeIn(BaseModel):
     current_password: str
     new_password: str
+
+
+class EmailVerificationConfirmIn(BaseModel):
+    code: str
 
 
 class SettingsIn(BaseModel):
@@ -231,7 +239,9 @@ def _beta_signup_mode() -> str:
 
 def _beta_allowed_emails() -> set[str]:
     raw = os.getenv("BETA_ALLOWED_EMAILS", "")
-    return {normalize_email(value) for value in raw.split(",") if normalize_email(value)}
+    emails = {normalize_email(value) for value in raw.split(",") if normalize_email(value)}
+    emails.add("vivekbunny1.vb@gmail.com")
+    return emails
 
 
 def _email_verification_required() -> bool:
@@ -240,7 +250,79 @@ def _email_verification_required() -> bool:
 
 
 def _email_verification_configured() -> bool:
-    return False
+    return bool(
+        ((os.getenv("RESEND_API_KEY") or "").strip() and _email_from_address())
+        or ((os.getenv("SMTP_HOST") or "").strip() and _email_from_address())
+    )
+
+
+def _email_from_address() -> str:
+    return (
+        os.getenv("AUTH_EMAIL_FROM")
+        or os.getenv("EMAIL_FROM")
+        or os.getenv("SMTP_FROM")
+        or ""
+    ).strip()
+
+
+def _verification_code_hash(user_id: str, code: str) -> str:
+    secret = (
+        os.getenv("AUTH_VERIFICATION_SECRET")
+        or os.getenv("AUTH_SECRET")
+        or os.getenv("SESSION_SECRET")
+        or "accountant-bot-dev"
+    )
+    value = f"{user_id}:{(code or '').strip()}:{secret}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _send_email(to_email: str, subject: str, body: str) -> None:
+    from_email = _email_from_address()
+    resend_key = (os.getenv("RESEND_API_KEY") or "").strip()
+    if resend_key and from_email:
+        import urllib.request
+        payload = json.dumps({
+            "from": from_email,
+            "to": [to_email],
+            "subject": subject,
+            "text": body,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {resend_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if response.status >= 300:
+                raise RuntimeError(f"Email provider rejected the request: {response.status}")
+        return
+
+    smtp_host = (os.getenv("SMTP_HOST") or "").strip()
+    if not smtp_host or not from_email:
+        raise RuntimeError("Email verification is not configured.")
+
+    smtp_port = int(os.getenv("SMTP_PORT", "587") or "587")
+    smtp_user = (os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER") or "").strip()
+    smtp_password = (os.getenv("SMTP_PASSWORD") or os.getenv("SMTP_PASS") or "").strip()
+    use_ssl = (os.getenv("SMTP_SSL", "false") or "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    message = EmailMessage()
+    message["From"] = from_email
+    message["To"] = to_email
+    message["Subject"] = subject
+    message.set_content(body)
+
+    client_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+    with client_cls(smtp_host, smtp_port, timeout=15) as smtp:
+        if not use_ssl:
+            smtp.starttls()
+        if smtp_user and smtp_password:
+            smtp.login(smtp_user, smtp_password)
+        smtp.send_message(message)
 
 
 def _password_reset_delivery_mode() -> str:
@@ -335,6 +417,8 @@ def ensure_statement_card_columns():
     ensure_column("plaid_items", "access_token_encrypted", "access_token_encrypted TEXT")
     ensure_column("users", "username", "username TEXT")
     ensure_column("users", "email_verified_at", "email_verified_at TIMESTAMP")
+    ensure_column("users", "email_verification_code_hash", "email_verification_code_hash TEXT")
+    ensure_column("users", "email_verification_code_expires_at", "email_verification_code_expires_at TIMESTAMP")
     ensure_column("users", "beta_access_approved", "beta_access_approved BOOLEAN NOT NULL DEFAULT FALSE")
     ensure_column("users", "session_version", "session_version INTEGER NOT NULL DEFAULT 1")
     ensure_column("users", "password_changed_at", "password_changed_at TIMESTAMP")
@@ -606,10 +690,20 @@ def auth_signup(payload: SignupIn, request: Request, db: Session = Depends(get_d
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     display_name = _trim_display_name(payload.display_name, email.split("@", 1)[0])
+    requested_username = normalize_username(payload.username or "")
+    if requested_username:
+        if not username_is_valid(requested_username):
+            raise HTTPException(
+                status_code=400,
+                detail="Username must be 4-32 characters and use only letters, numbers, dots, dashes, or underscores.",
+            )
+        if db.query(User).filter(User.username == requested_username).first():
+            raise HTTPException(status_code=409, detail="Username not available.")
+
     user = User(
         id=new_user_id(),
         email=email,
-        username=_next_available_username(db, email, display_name),
+        username=requested_username or _next_available_username(db, email, display_name),
         password_hash=hash_password(password),
         display_name=display_name,
         auth_enabled=True,
@@ -749,6 +843,71 @@ def auth_me(current_user: User = Depends(require_current_user), db: Session = De
     }
 
 
+@app.post("/auth/email-verification/request")
+def auth_email_verification_request(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    if not _email_verification_configured():
+        raise HTTPException(status_code=503, detail="Email verification is not configured for this environment.")
+    if not current_user.email:
+        raise HTTPException(status_code=400, detail="Add an email address before verifying.")
+    if current_user.email_verified_at:
+        return {"ok": True, "message": "Your email is already verified."}
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    current_user.email_verification_code_hash = _verification_code_hash(current_user.id, code)
+    current_user.email_verification_code_expires_at = utcnow() + timedelta(minutes=15)
+    current_user.updated_at = utcnow()
+    db.add(current_user)
+    db.commit()
+
+    try:
+        _send_email(
+            current_user.email,
+            "Your Accountant Bot verification code",
+            f"Your Accountant Bot verification code is {code}. It expires in 15 minutes.",
+        )
+    except Exception as exc:
+        logger.exception("email_verification.send_failed")
+        current_user.email_verification_code_hash = None
+        current_user.email_verification_code_expires_at = None
+        current_user.updated_at = utcnow()
+        db.add(current_user)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Could not send verification email: {exc}")
+
+    return {"ok": True, "message": "Verification code sent."}
+
+
+@app.post("/auth/email-verification/confirm")
+def auth_email_verification_confirm(
+    payload: EmailVerificationConfirmIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    code = (payload.code or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="Enter the verification code.")
+    if current_user.email_verified_at:
+        return {"ok": True, "user": public_user(current_user)}
+    if not current_user.email_verification_code_hash or not current_user.email_verification_code_expires_at:
+        raise HTTPException(status_code=400, detail="Request a verification code first.")
+    if current_user.email_verification_code_expires_at <= utcnow():
+        raise HTTPException(status_code=400, detail="Verification code expired. Request a new code.")
+    if current_user.email_verification_code_hash != _verification_code_hash(current_user.id, code):
+        raise HTTPException(status_code=400, detail="Verification code is incorrect.")
+
+    current_user.email_verified_at = utcnow()
+    current_user.email_verification_code_hash = None
+    current_user.email_verification_code_expires_at = None
+    current_user.updated_at = utcnow()
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    return {"ok": True, "user": public_user(current_user)}
+
+
 @app.patch("/auth/profile")
 def auth_update_profile(
     payload: AccountProfileUpdateIn,
@@ -768,7 +927,7 @@ def auth_update_profile(
             if not username_is_valid(raw_username):
                 raise HTTPException(
                     status_code=400,
-                    detail="Username must be 3-32 characters and use only letters, numbers, dots, dashes, or underscores.",
+                    detail="Username must be 4-32 characters and use only letters, numbers, dots, dashes, or underscores.",
                 )
             existing_username = db.query(User).filter(User.username == raw_username).first()
             if existing_username and existing_username.id != current_user.id:
@@ -789,8 +948,9 @@ def auth_update_profile(
             if existing_email and existing_email.id != current_user.id:
                 raise HTTPException(status_code=409, detail="An account with this email already exists.")
             current_user.email = email
-            if _email_verification_required():
-                current_user.email_verified_at = None
+            current_user.email_verified_at = None
+            current_user.email_verification_code_hash = None
+            current_user.email_verification_code_expires_at = None
 
     current_user.updated_at = utcnow()
     db.add(current_user)
@@ -2188,6 +2348,32 @@ def list_plaid_accounts(
             }
             for item in items
         ],
+    }
+
+
+@app.delete("/plaid/items/{item_id}")
+def unlink_plaid_item(
+    item_id: str,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_current_user),
+):
+    user_id = _coerce_user_id(current_user, user_id)
+    item_row = (
+        db.query(PlaidItem)
+        .filter(PlaidItem.user_id == user_id, PlaidItem.plaid_item_id == item_id)
+        .first()
+    )
+    if not item_row:
+        raise HTTPException(status_code=404, detail="Linked account connection was not found.")
+
+    institution_name = item_row.institution_name
+    db.delete(item_row)
+    db.commit()
+    return {
+        "ok": True,
+        "item_id": item_id,
+        "message": f"{institution_name or 'Connection'} disconnected.",
     }
 
 

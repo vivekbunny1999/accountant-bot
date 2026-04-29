@@ -33,7 +33,16 @@ def _email_verification_required() -> bool:
 
 
 def _email_verification_configured() -> bool:
-    return False
+    from_email = (
+        os.getenv("AUTH_EMAIL_FROM")
+        or os.getenv("EMAIL_FROM")
+        or os.getenv("SMTP_FROM")
+        or ""
+    ).strip()
+    return bool(
+        ((os.getenv("RESEND_API_KEY") or "").strip() and from_email)
+        or ((os.getenv("SMTP_HOST") or "").strip() and from_email)
+    )
 
 
 def _bearer_token(authorization: Optional[str]) -> Optional[str]:

@@ -26,7 +26,7 @@ type AuthContextValue = {
   user: AuthUser | null;
   bootstrap: AuthBootstrapResponse | null;
   login: (input: { email: string; password: string }) => Promise<AuthResponse>;
-  signup: (input: { email: string; password: string; display_name?: string }) => Promise<AuthResponse>;
+  signup: (input: { email: string; password: string; display_name?: string; username?: string }) => Promise<AuthResponse>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   updateProfile: (input: {
@@ -94,7 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return res;
   }
 
-  async function handleSignup(input: { email: string; password: string; display_name?: string }) {
+  async function handleSignup(input: { email: string; password: string; display_name?: string; username?: string }) {
     const res = await apiSignup(input);
     setSessionToken(res.token, res.expires_at);
     setUser(res.user);

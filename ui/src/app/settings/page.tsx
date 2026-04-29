@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { PasswordGuidance } from "@/components/auth/PasswordGuidance";
 import { AppShell } from "@/components/layout/AppShell";
@@ -9,6 +10,7 @@ import {
   createDebt,
   createPlaidLinkToken,
   Debt,
+  confirmEmailVerification,
   exchangePlaidPublicToken,
   FinancialOsSetupItem,
   FinancialOsSetupStatus,
@@ -24,7 +26,9 @@ import {
   PlaidItemSummary,
   PlaidTransactionSummary,
   saveUserSettings,
+  requestEmailVerification,
   syncPlaidData,
+  unlinkPlaidItem,
   upsertGoal,
   updateDebt,
 } from "@/lib/api";
@@ -648,6 +652,43 @@ function Card({ children }: { children: React.ReactNode }) {
   );
 }
 
+function CollapsibleCard({
+  id,
+  title,
+  subtitle,
+  children,
+}: {
+  id?: string;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div id={id} className="scroll-mt-24 rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 text-sm font-semibold text-zinc-100">{title}</div>
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+          aria-expanded={open}
+        >
+          {open ? "Hide" : "Show"}
+        </button>
+      </div>
+      {open ? (
+        <>
+          {subtitle ? <div className="mt-1 text-xs text-zinc-400">{subtitle}</div> : null}
+          <Divider />
+          {children}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function Divider() {
   return <div className="my-4 h-px bg-white/10" />;
 }
@@ -1031,7 +1072,8 @@ function DebtFormFields({
 }
 
 export default function SettingsPage() {
-  const { user, bootstrap, updateProfile, changePassword } = useAuth();
+  const router = useRouter();
+  const { user, bootstrap, updateProfile, changePassword, refresh, logout } = useAuth();
   const USER_ID = user?.id ?? "";
   const [settings, setSettings] = useState<SettingsModel>(() => defaultSettings());
   const [loaded, setLoaded] = useState(false);
@@ -1045,6 +1087,10 @@ export default function SettingsPage() {
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
   const [accountStatus, setAccountStatus] = useState<string | null>(null);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [verificationBusy, setVerificationBusy] = useState(false);
+  const [verificationError, setVerificationError] = useState<string | null>(null);
+  const [verificationStatus, setVerificationStatus] = useState<string | null>(null);
   const [securityForm, setSecurityForm] = useState({
     current_password: "",
     new_password: "",
@@ -1067,6 +1113,7 @@ export default function SettingsPage() {
   const [plaidStatus, setPlaidStatus] = useState<string | null>(null);
   const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
   const [plaidItems, setPlaidItems] = useState<PlaidItemSummary[]>([]);
+  const [selectedPlaidItemId, setSelectedPlaidItemId] = useState("");
   const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
   const [plaidCashContribution, setPlaidCashContribution] = useState(0);
   const [plaidDuplicateCount, setPlaidDuplicateCount] = useState(0);
@@ -1390,6 +1437,10 @@ export default function SettingsPage() {
       ]);
       setPlaidAccounts(accountsRes.accounts || []);
       setPlaidItems(accountsRes.items || []);
+      setSelectedPlaidItemId((current) => {
+        if (current && (accountsRes.items || []).some((item) => item.item_id === current)) return current;
+        return accountsRes.items?.[0]?.item_id || "";
+      });
       setPlaidTransactions(txRes.transactions || []);
       setPlaidCashContribution(Number(osState?.cash_sources?.plaid_cash_total || 0));
       setPlaidDuplicateCount((osState?.cash_sources?.plaid_duplicate_accounts_skipped || []).length);
@@ -1454,9 +1505,9 @@ export default function SettingsPage() {
       setAccountError("Display name is required.");
       return;
     }
-    if (trimmedUsername && !/^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$/.test(trimmedUsername)) {
+    if (trimmedUsername && !/^[a-z0-9](?:[a-z0-9._-]{2,30}[a-z0-9])?$/.test(trimmedUsername)) {
       setAccountBusy(false);
-      setAccountError("Username must be 3-32 characters and use only letters, numbers, dots, dashes, or underscores.");
+      setAccountError("Username must be 4-32 characters and use only letters, numbers, dots, dashes, or underscores.");
       return;
     }
     if (!trimmedEmail || !trimmedEmail.includes("@")) {
@@ -1520,6 +1571,57 @@ export default function SettingsPage() {
       setSecurityError(err instanceof Error ? err.message : "Could not change password.");
     } finally {
       setSecurityBusy(false);
+    }
+  }
+
+  async function handleRequestEmailVerification() {
+    setVerificationBusy(true);
+    setVerificationError(null);
+    setVerificationStatus(null);
+    try {
+      const res = await requestEmailVerification();
+      setVerificationStatus(res.message || "Verification code sent.");
+    } catch (err) {
+      setVerificationError(err instanceof Error ? err.message : "Could not send verification code.");
+    } finally {
+      setVerificationBusy(false);
+    }
+  }
+
+  async function handleConfirmEmailVerification() {
+    setVerificationBusy(true);
+    setVerificationError(null);
+    setVerificationStatus(null);
+    try {
+      await confirmEmailVerification({ code: verificationCode.trim() });
+      setVerificationCode("");
+      await refresh();
+      setVerificationStatus("Email verified.");
+    } catch (err) {
+      setVerificationError(err instanceof Error ? err.message : "Could not verify email.");
+    } finally {
+      setVerificationBusy(false);
+    }
+  }
+
+  async function handleSettingsLogout() {
+    await logout();
+    router.replace("/login");
+  }
+
+  async function handleUnlinkPlaidItem(itemId: string) {
+    if (!USER_ID) return;
+    setPlaidBusy(true);
+    setPlaidError(null);
+    setPlaidStatus(null);
+    try {
+      const res = await unlinkPlaidItem(itemId, { user_id: USER_ID });
+      setPlaidStatus(res.message || "Connection disconnected.");
+      await fetchPlaidState({ silent: true });
+    } catch (err) {
+      setPlaidError(err instanceof Error ? err.message : "Could not disconnect account connection.");
+    } finally {
+      setPlaidBusy(false);
     }
   }
 
@@ -1851,12 +1953,10 @@ export default function SettingsPage() {
             </Card>
 
             {/* Safe-to-Spend */}
-            <Card>
-              <SectionTitle
-                title="Safe-to-Spend Controls"
-                subtitle="Choose how much breathing room to keep before the app tells you money is safe to spend."
-              />
-              <Divider />
+            <CollapsibleCard
+              title="Safe-to-Spend Controls"
+              subtitle="Choose how much breathing room to keep before the app tells you money is safe to spend."
+            >
 
               <Toggle
                 label="Turn on Safe-to-Spend"
@@ -1972,16 +2072,14 @@ export default function SettingsPage() {
               <div className="mt-3 text-xs text-zinc-500">
                 This helps keep money decisions calm and simple with one safe daily number.
               </div>
-            </Card>
+            </CollapsibleCard>
 
             {/* Stage targets */}
-            <Card>
-              <div id="runway-target" className="scroll-mt-24">
-                <SectionTitle
-                  title="Stage Targets"
-                  subtitle="Set the milestones that guide your Financial OS stage and progress."
-                />
-                <Divider />
+            <CollapsibleCard
+              id="runway-target"
+              title="Stage Targets"
+              subtitle="Set the milestones that guide your Financial OS stage and progress."
+            >
 
                 <div className="grid gap-3 sm:grid-cols-2">
                 <NumberInput
@@ -2120,17 +2218,14 @@ export default function SettingsPage() {
                     <div className="text-xs text-red-300">{setupSaveState.runway_target.error}</div>
                   ) : null}
                 </div>
-              </div>
-            </Card>
+            </CollapsibleCard>
 
             {/* Paycheck splits */}
-            <Card>
-              <div id="income-paycheck" className="scroll-mt-24">
-                <SectionTitle
-                  title="Paycheck Split"
-                  subtitle="Choose how each paycheck should be divided across bills, day-to-day spending, and extra progress."
-                />
-                <Divider />
+            <CollapsibleCard
+              id="income-paycheck"
+              title="Paycheck Split"
+              subtitle="Choose how each paycheck should be divided across bills, day-to-day spending, and extra progress."
+            >
 
                 <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 text-sm text-zinc-200">
                   Confirming income makes spending caps and recommendations more trustworthy.
@@ -2460,17 +2555,14 @@ export default function SettingsPage() {
                   ]}
                 />
                 </div>
-              </div>
-            </Card>
+            </CollapsibleCard>
 
             {/* Debt strategy */}
-            <Card>
-              <div id="debt-strategy" className="scroll-mt-24">
-                <SectionTitle
-                  title="Debt Strategy"
-                  subtitle="Choose the payoff style that should guide extra payments when money is available."
-                />
-                <Divider />
+            <CollapsibleCard
+              id="debt-strategy"
+              title="Debt Strategy"
+              subtitle="Choose the payoff style that should guide extra payments when money is available."
+            >
 
                 <ChipGroup<DebtStrategy>
                 label="Strategy"
@@ -2660,17 +2752,14 @@ export default function SettingsPage() {
                   ) : null}
                 </div>
               </div>
-              </div>
-            </Card>
+            </CollapsibleCard>
 
             {/* Savings & Scoreboards */}
-            <Card>
-              <div id="fi-target" className="scroll-mt-24">
-                <SectionTitle
-                  title="Savings & Scoreboards"
-                  subtitle="Choose your savings targets and the progress trackers you want to see around the app."
-                />
-                <Divider />
+            <CollapsibleCard
+              id="fi-target"
+              title="Savings & Scoreboards"
+              subtitle="Choose your savings targets and the progress trackers you want to see around the app."
+            >
 
                 <div className="grid gap-3 sm:grid-cols-2">
                 <NumberInput
@@ -2841,8 +2930,7 @@ export default function SettingsPage() {
                   }
                 />
                 </div>
-              </div>
-            </Card>
+            </CollapsibleCard>
           </div>
 
           {/* RIGHT: App, Categories, Alerts, Data, Privacy */}
@@ -2868,7 +2956,7 @@ export default function SettingsPage() {
                 />
                 <Input
                   label="Username"
-                  desc="An optional handle for your account."
+                  desc="Minimum 4 characters. This must be unique."
                   value={accountForm.username}
                   onChange={(v) => {
                     setAccountStatus(null);
@@ -2915,9 +3003,50 @@ export default function SettingsPage() {
                   </div>
                   <div className={`rounded-full border px-3 py-1 text-xs ${verificationMeta.tone}`}>{verificationMeta.label}</div>
                 </div>
-                {!bootstrap?.beta?.email_verification_configured ? (
-                  <div className="mt-3 text-xs text-zinc-500">Email verification is not available yet for this account.</div>
-                ) : null}
+
+                {user?.email_verified ? (
+                  <div className="mt-3 text-xs text-emerald-300">Profile is verified.</div>
+                ) : (
+                  <div className="mt-4 space-y-3">
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={handleRequestEmailVerification}
+                        disabled={verificationBusy}
+                        className="rounded-xl border border-sky-500/30 bg-sky-500/15 px-3 py-2 text-xs text-sky-100 hover:bg-sky-500/20 disabled:opacity-50"
+                      >
+                        {verificationBusy ? "Sending..." : "Send code"}
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <input
+                        className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                        value={verificationCode}
+                        onChange={(e) => {
+                          setVerificationError(null);
+                          setVerificationStatus(null);
+                          setVerificationCode(e.target.value);
+                        }}
+                        placeholder="Enter email code"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleConfirmEmailVerification}
+                        disabled={verificationBusy || !verificationCode.trim()}
+                        className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                      >
+                        Verify email
+                      </button>
+                    </div>
+                    {verificationStatus ? <div className="text-xs text-emerald-300">{verificationStatus}</div> : null}
+                    {verificationError ? <div className="text-xs text-red-300">{verificationError}</div> : null}
+                    {!bootstrap?.beta?.email_verification_configured ? (
+                      <div className="text-xs text-zinc-500">
+                        Configure Resend or SMTP environment variables on Vercel to send real email codes.
+                      </div>
+                    ) : null}
+                  </div>
+                )}
               </div>
 
               <div className="mt-3 rounded-2xl border border-white/10 bg-black/10 p-4 text-xs text-zinc-400">
@@ -3005,12 +3134,10 @@ export default function SettingsPage() {
               </div>
             </Card>
 
-            <Card>
-              <SectionTitle
-                title="Display Preferences"
-                subtitle="Control how dates, numbers, and money are shown across the app."
-              />
-              <Divider />
+            <CollapsibleCard
+              title="Display Preferences"
+              subtitle="Control how dates, numbers, and money are shown across the app."
+            >
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Select
@@ -3070,7 +3197,7 @@ export default function SettingsPage() {
                   onChange={(v) => setSettings((p) => ({ ...p, profile: { ...p.profile, compactNumbers: v } }))}
                 />
               </div>
-            </Card>
+            </CollapsibleCard>
 
             <Card>
               <div id="bills" className="scroll-mt-24">
@@ -3269,12 +3396,10 @@ export default function SettingsPage() {
             </Card>
 
             {/* Categories & Rules */}
-            <Card>
-              <SectionTitle
-                title="Spending Categories"
-                subtitle="Keep transaction labeling simple and automatic."
-              />
-              <Divider />
+            <CollapsibleCard
+              title="Spending Categories"
+              subtitle="Keep transaction labeling simple and automatic."
+            >
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <Toggle
@@ -3372,15 +3497,13 @@ export default function SettingsPage() {
               <div className="mt-3 text-xs text-zinc-500">
                 Once this is set up, new transactions should stay organized with very little effort.
               </div>
-            </Card>
+            </CollapsibleCard>
 
             {/* Alerts */}
-            <Card>
-              <SectionTitle
-                title="Alerts & Reminders"
-                subtitle="Stay informed without getting spammed."
-              />
-              <Divider />
+            <CollapsibleCard
+              title="Alerts & Reminders"
+              subtitle="Stay informed without getting spammed."
+            >
 
               <Toggle
                   label="Turn on alerts"
@@ -3507,15 +3630,13 @@ export default function SettingsPage() {
               <div className="mt-3 text-xs text-zinc-500">
                 Future-proof: once checking/savings imports are live, these triggers become powerful and automatic.
               </div>
-            </Card>
+            </CollapsibleCard>
 
             {/* Data / Import behavior */}
-            <Card>
-              <SectionTitle
-                title="Imported Data Preferences"
-                subtitle="Choose how imported data refreshes and how duplicates are handled."
-              />
-              <Divider />
+            <CollapsibleCard
+              title="Imported Data Preferences"
+              subtitle="Choose how imported data refreshes and how duplicates are handled."
+            >
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Toggle
@@ -3571,7 +3692,7 @@ export default function SettingsPage() {
                   </div>
                 </DisclosureSection>
               </div>
-            </Card>
+            </CollapsibleCard>
 
             <Card>
               <SectionTitle
@@ -3634,6 +3755,33 @@ export default function SettingsPage() {
                     Open Activity
                   </Link>
                 </div>
+
+                {plaidItems.length ? (
+                  <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="text-xs font-medium text-zinc-100">Disconnect a linked institution</div>
+                    <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                      <select
+                        className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-xs text-zinc-100 outline-none focus:border-white/20"
+                        value={selectedPlaidItemId}
+                        onChange={(e) => setSelectedPlaidItemId(e.target.value)}
+                      >
+                        {plaidItems.map((item) => (
+                          <option key={item.item_id} value={item.item_id}>
+                            {item.institution_name || "Linked institution"} - {item.status || "linked"}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleUnlinkPlaidItem(selectedPlaidItemId)}
+                        disabled={plaidBusy || !selectedPlaidItemId}
+                        className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200 hover:bg-red-500/15 disabled:opacity-50"
+                      >
+                        Disconnect
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
 
                 {plaidStatus ? (
                   <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
@@ -3848,12 +3996,14 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Footer note */}
-        <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-          <div className="text-sm font-semibold text-zinc-100">Next step</div>
-          <div className="mt-1 text-sm text-zinc-400">
-            Use Accounts, Bills, Debts, and Activity to keep everything up to date.
-          </div>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={handleSettingsLogout}
+            className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-100 hover:bg-white/10"
+          >
+            Log out
+          </button>
         </div>
       </div>
     </AppShell>

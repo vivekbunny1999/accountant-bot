@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useAuth } from "@/components/auth/AuthProvider";
 
 const primaryNav = [
@@ -21,18 +21,12 @@ const sourceNav = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const primaryIdentity = user?.display_name || user?.username || user?.email || "Signed in";
   const secondaryIdentity =
     user?.email && user.email !== primaryIdentity
       ? user.email
       : user?.username && `@${user.username}`;
-
-  async function handleLogout() {
-    await logout();
-    router.replace("/login");
-  }
 
   return (
     <div className="min-h-screen bg-[#0B0F14] text-zinc-100">
@@ -95,14 +89,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </nav>
           </div>
 
-          <div className="mt-6 border-t border-white/10 pt-4">
-            <button
-              onClick={handleLogout}
-              className="w-full rounded-xl px-3 py-2 text-left text-sm text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-100"
-            >
-              Log out
-            </button>
-          </div>
         </aside>
 
         <main className="flex-1">{children}</main>
