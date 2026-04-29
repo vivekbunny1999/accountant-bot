@@ -1784,6 +1784,40 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     "Review plan",
     80
   );
+  const spendAllowanceStatus =
+    nextBestDollarLoadingState
+      ? "Loading"
+      : nextBestDollarUnavailable
+      ? "Unavailable"
+      : Number((safeToSpendToday ?? weeklySafeToSpend) || 0) <= 0
+      ? "Paused"
+      : "Available";
+  const spendAllowanceMicrocopy =
+    spendAllowanceStatus === "Paused"
+      ? "Spending paused"
+      : spendAllowanceStatus === "Available"
+      ? "Available"
+      : spendAllowanceStatus;
+  const spendAllowanceTone =
+    spendAllowanceStatus === "Available"
+      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
+      : spendAllowanceStatus === "Paused"
+      ? "border-red-500/20 bg-red-500/10 text-red-200"
+      : "border-white/10 bg-white/5 text-zinc-300";
+  const runwayReserveLabel =
+    runwayReserveCurrent != null
+      ? `${fmtMoney(Number(runwayReserveCurrent || 0))} protected`
+      : "Protected amount loading";
+  const debtPriorityLabel =
+    debtCountdown?.priority_debt?.name
+      ? `Priority: ${debtCountdown.priority_debt.name}`
+      : projectedPayoffDebt?.name
+      ? `Priority: ${projectedPayoffDebt.name}`
+      : "Priority debt loading";
+  const payoffWithExtraLabel =
+    payoffMonthsWithExtra != null
+      ? `${formatMonths(payoffMonthsWithExtra)} with extra`
+      : "Payoff with extra loading";
 
   return (
     <AppShell>
@@ -1800,7 +1834,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           />
         ) : null}
         {settings.show_financial_os_panels ? (
-          <div className="sticky top-0 z-30 -mx-1 rounded-xl border border-white/10 bg-[#0B0F14]/95 px-4 py-2 text-sm font-medium text-zinc-100 shadow-lg shadow-black/20 backdrop-blur">
+          <div className="sticky top-0 z-30 -mx-1 rounded-xl border border-white/10 bg-[#0B0F14]/95 px-4 py-2 text-sm font-medium text-zinc-100 shadow-lg shadow-black/20 backdrop-blur print:static print:shadow-none print:backdrop-blur-none">
             <div className="truncate">
               {stageUi.label} <span className="text-zinc-500">•</span>{" "}
               {stabilityMeter?.label || "Stability loading"}{" "}
@@ -2127,6 +2161,153 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             </div>
             ) : null}
           </div>
+        )}
+
+        {settings.show_financial_os_panels && (
+          <section>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-zinc-100">OS Command Center</div>
+                <div className="mt-1 text-xs text-zinc-400">
+                  Spend, runway, debt, FI, and health in one cockpit.
+                </div>
+              </div>
+              <div className="text-xs text-zinc-500">System status</div>
+            </div>
+
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-xs text-zinc-400">Spend allowance / STS</div>
+                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                      {formatDashboardMoney(safeToSpendToday ?? weeklySafeToSpend, {
+                        loading: nextBestDollarLoadingState,
+                        unavailable: nextBestDollarUnavailable,
+                      })}
+                    </div>
+                  </div>
+                  <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${spendAllowanceTone}`}>
+                    {spendAllowanceStatus}
+                  </span>
+                </div>
+                <div className="mt-3 text-xs leading-5 text-zinc-400">
+                  {spendAllowanceMicrocopy}
+                  {weeklySafeToSpend != null ? ` • Weekly ${fmtMoney(Number(weeklySafeToSpend || 0))}` : ""}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-400">Stability Meter</div>
+                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                      {stabilityMeter?.value != null ? `${stabilityMeter.value}/100` : "Loading"}
+                    </div>
+                  </div>
+                  <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${stabilityToneClass}`}>
+                    {stabilityMeter?.label || "Loading"}
+                  </span>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className="h-full rounded-full bg-zinc-200"
+                    style={{ width: `${clamp01(Number(stabilityMeter?.value || 0) / 100) * 100}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-400">Runway Reserve</div>
+                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                      {runwayMonths != null ? formatMonths(runwayMonths) : "Loading"}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-sky-200">
+                    Runway protected
+                  </span>
+                </div>
+                <div className="mt-3 text-xs leading-5 text-zinc-400">
+                  {runwayReserveLabel}
+                  {runwayTargetMonths != null ? ` • Target ${formatMonths(runwayTargetMonths)}` : ""}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-400">Debt-free Countdown</div>
+                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                      {fmtMonthsCompact(debtCountdown?.estimated_months_remaining)}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-emerald-200">
+                    Debt payoff active
+                  </span>
+                </div>
+                <div className="mt-3 truncate text-xs leading-5 text-zinc-400">{debtPriorityLabel}</div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-400">FI Progress</div>
+                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                      {fiProgressPercent != null ? `${fiProgressPercent}%` : "Loading"}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full border border-violet-500/20 bg-violet-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-200">
+                    FI tracking
+                  </span>
+                </div>
+                <div className="mt-3 text-xs leading-5 text-zinc-400">
+                  {fiTargetAmount != null ? `Target ${fmtMoney(Number(fiTargetAmount || 0))}` : "Target loading"}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-400">Financial Health Score</div>
+                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                      {healthScore != null ? `${healthScore}/100` : "Loading"}
+                    </div>
+                  </div>
+                  <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${healthTone}`}>
+                    Health score
+                  </span>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className="h-full rounded-full bg-zinc-200"
+                    style={{ width: `${clamp01(Number(healthScore || 0) / 100) * 100}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)] sm:col-span-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-400">Debt Payoff Projection</div>
+                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                      {formatDashboardMoney(payoffRecurringExtra, {
+                        loading: nextBestDollarLoadingState && !debtPayoffProjection,
+                      })}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-emerald-200">
+                    Debt payoff active
+                  </span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs leading-5 text-zinc-400">
+                  <span>{payoffWithExtraLabel}</span>
+                  <span>{projectedPayoffDebt?.name || nextDollarImpact?.target_debt?.name || "Target debt loading"}</span>
+                </div>
+              </div>
+            </div>
+          </section>
         )}
 
         {settings.show_financial_os_panels && (
