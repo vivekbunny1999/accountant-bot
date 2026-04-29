@@ -389,10 +389,46 @@ function labelFromBucketKey(key: string) {
   return d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
 
+function monthIndexFromBucketKey(key: string) {
+  const m = /^(\d{4})-(\d{2})$/.exec(key);
+  if (!m) return null;
+  return Number(m[1]) * 12 + Number(m[2]) - 1;
+}
+
+function simulateDebtPayoff(balance: number, aprPct: number, monthlyPayment: number) {
+  const startingBalance = Math.max(0, Number(balance) || 0);
+  const payment = Math.max(0, Number(monthlyPayment) || 0);
+  const monthlyRate = Math.max(0, Number(aprPct) || 0) / 100 / 12;
+
+  if (startingBalance <= 0) {
+    return { months: 0, interest: 0, workable: true };
+  }
+
+  if (payment <= 0 || (monthlyRate > 0 && payment <= startingBalance * monthlyRate)) {
+    return { months: null, interest: null, workable: false };
+  }
+
+  let remaining = startingBalance;
+  let interest = 0;
+  let months = 0;
+
+  while (remaining > 0.01 && months < 600) {
+    const monthlyInterest = remaining * monthlyRate;
+    const principal = Math.min(remaining, payment - monthlyInterest);
+    if (principal <= 0) return { months: null, interest: null, workable: false };
+    interest += monthlyInterest;
+    remaining -= principal;
+    months += 1;
+  }
+
+  return { months, interest, workable: months < 600 };
+}
+
 /** =========================
  * Categories
  * ========================= */
 type Category = SpendingCategory;
+type TrendRange = "all" | "year" | "3m" | "1m";
 
 type DiscretionaryExplanation = {
   monthly_income_baseline?: number | null;
@@ -819,6 +855,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const [plaidAccounts, setPlaidAccounts] = useState<PlaidAccountSummary[]>([]);
   const [plaidTransactions, setPlaidTransactions] = useState<PlaidTransactionSummary[]>([]);
   const [showDetails, setShowDetails] = useState(false);
+  const [trendRange, setTrendRange] = useState<TrendRange>("1m");
+  const [showPayoffSimulator, setShowPayoffSimulator] = useState(false);
+  const [payoffSimulationExtra, setPayoffSimulationExtra] = useState("100");
 
   useEffect(() => {
     setLoading(true);
@@ -1397,6 +1436,45 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
       : availableStsForDebt != null
       ? `Discretionary spend allowance is ${fmtMoney(Number(availableStsForDebt || 0))}, and the payoff model still only uses the repeatable protected extra above rather than the full allowance.`
       : "The payoff view uses the smaller repeatable extra payment, not the full discretionary spending allowance.";
+  const payoffSimulationBalance = latestPerCard.reduce((sum, statement) => {
+    const balance = Math.max(0, Number((statement as any).new_balance || 0));
+    return sum + balance;
+  }, 0);
+  const payoffWeightedApr =
+    payoffSimulationBalance > 0
+      ? latestPerCard.reduce((sum, statement) => {
+          const balance = Math.max(0, Number((statement as any).new_balance || 0));
+          const apr = Math.max(0, Number((statement as any).apr || 0));
+          return sum + balance * apr;
+        }, 0) / payoffSimulationBalance
+      : 0;
+  const payoffBaselinePayment =
+    payoffSimulationBalance > 0
+      ? Math.max(25, Number(payoffRecurringExtra || 0), payoffSimulationBalance * 0.02)
+      : 0;
+  const payoffSimulationExtraAmount = Math.max(0, Number(payoffSimulationExtra) || 0);
+  const payoffBaselineSimulation = simulateDebtPayoff(
+    payoffSimulationBalance,
+    payoffWeightedApr,
+    payoffBaselinePayment
+  );
+  const payoffExtraSimulation = simulateDebtPayoff(
+    payoffSimulationBalance,
+    payoffWeightedApr,
+    payoffBaselinePayment + payoffSimulationExtraAmount
+  );
+  const simulatedMonthsSaved =
+    payoffBaselineSimulation.months != null && payoffExtraSimulation.months != null
+      ? Math.max(0, payoffBaselineSimulation.months - payoffExtraSimulation.months)
+      : null;
+  const simulatedInterestSaved =
+    payoffBaselineSimulation.interest != null && payoffExtraSimulation.interest != null
+      ? Math.max(0, payoffBaselineSimulation.interest - payoffExtraSimulation.interest)
+      : null;
+  const payoffSimulatorProgress =
+    payoffBaselineSimulation.months && simulatedMonthsSaved != null
+      ? clamp01(simulatedMonthsSaved / payoffBaselineSimulation.months)
+      : 0;
   const osInsights = useMemo(
     () => (intelligence?.insights?.items || []).slice(0, 5),
     [intelligence]
@@ -1430,7 +1508,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
       a[0].localeCompare(b[0])
     );
 
-    return sorted.slice(-8);
+    return sorted;
   }, [data]);
 
   const recent = useMemo(() => {
@@ -1771,11 +1849,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   }, [monthTxns, monthSpendRows, cashMonthTxns, cashAccounts, cashTotals.totalCash, cashLoading, cashErr, financialOsCashTotal, settings]);
 
   const stageUi = useMemo(() => stageBadge(monthMetrics.stage), [monthMetrics.stage]);
-  const topFocusAction = shortDashboardCopy(
-    decisionPlan?.headline || decisionPlanHeadline,
-    "Review plan",
-    80
-  );
   const spendAllowanceStatus =
     nextBestDollarLoadingState
       ? "Loading"
@@ -1786,7 +1859,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
       : "Available";
   const spendAllowanceMicrocopy =
     spendAllowanceStatus === "Paused"
-      ? "Spending paused"
+      ? "Pause spending"
       : spendAllowanceStatus === "Available"
       ? "Available"
       : spendAllowanceStatus;
@@ -1829,26 +1902,50 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     fiProgressPercent != null
       ? `${Number(fiProgressPercent).toFixed(Number.isInteger(Number(fiProgressPercent)) ? 0 : 1)}%`
       : "Loading";
-  const heroTrendValues = trend.length
-    ? trend.map(([, value]) => Math.max(0, Number(value) || 0))
-    : [38, 44, 41, 52, 49, 61, 58, 70];
-  const heroTrendMax = Math.max(1, ...heroTrendValues);
-  const heroTrendLabel = trend.length ? `Balance trend • ${trend.length} periods` : "Trend preview";
-  const runwayTargetCovered =
-    runwayReserveCurrent != null && runwayReserveTarget != null && runwayReserveTarget > 0
-      ? runwayReserveCurrent >= runwayReserveTarget
-      : runwayMonths != null && runwayTargetMonths != null
-      ? runwayMonths >= runwayTargetMonths
-      : false;
-  const momentumItems = [
-    monthMetrics.alerts.some((alert) => alert.title.toLowerCase().includes("spend cap"))
-      ? "Spending over cap"
-      : null,
-    Number((safeToSpendToday ?? weeklySafeToSpend) || 0) <= 0 ? "Spending paused" : null,
-    Number(payoffRecurringExtra || 0) > 0 ? "Debt payoff active" : null,
-    runwayTargetCovered ? "Runway protected" : null,
-    Number(protectedObligationsTotal || 0) > 0 || upcomingItemsList.length > 0 ? "Bills protected" : null,
-  ].filter(Boolean) as string[];
+  const currentMonthIndex = cy * 12 + cm0;
+  const trendRangeOptions: Array<{ value: TrendRange; label: string }> = [
+    { value: "all", label: "All" },
+    { value: "year", label: "Year" },
+    { value: "3m", label: "3 months" },
+    { value: "1m", label: "1 month" },
+  ];
+  const monthlyTrendRows =
+    trendRange === "1m"
+      ? []
+      : trend.filter(([key]) => {
+          const idx = monthIndexFromBucketKey(key);
+          if (idx == null) return trendRange === "all";
+          if (trendRange === "year") return idx >= currentMonthIndex - 11 && idx <= currentMonthIndex;
+          if (trendRange === "3m") return idx >= currentMonthIndex - 2 && idx <= currentMonthIndex;
+          return true;
+        });
+  const currentMonthTrendRows = weekly.buckets.map((value, index) => ({
+    label: `W${index + 1}`,
+    value: Math.max(0, Number(value) || 0),
+  }));
+  const monthlyTrendBars = monthlyTrendRows.map(([key, value]) => ({
+    label: labelFromBucketKey(key),
+    value: Math.max(0, Number(value) || 0),
+  }));
+  const dashboardTrendBars =
+    trendRange === "1m"
+      ? currentMonthTrendRows
+      : monthlyTrendBars.length
+      ? monthlyTrendBars
+      : currentMonthTrendRows;
+  const fallbackTrendBars = [38, 44, 41, 52, 49, 61, 58, 70].map((value, index) => ({
+    label: `P${index + 1}`,
+    value,
+  }));
+  const visibleHeroTrendBars = dashboardTrendBars.some((bar) => bar.value > 0)
+    ? dashboardTrendBars
+    : fallbackTrendBars;
+  const heroTrendMax = Math.max(1, ...visibleHeroTrendBars.map((bar) => bar.value));
+  const dashboardTrendLabel = trendRange === "1m" ? "Current month spend" : "Spending trend";
+  const heroTrendPeriodLabel =
+    trendRange === "all"
+      ? `${monthlyTrendBars.length || trend.length || visibleHeroTrendBars.length} periods`
+      : trendRangeOptions.find((option) => option.value === trendRange)?.label || "Trend";
   const advisorSummaryBullets = (
     advisorSummary?.reasoning?.length
       ? advisorSummary.reasoning
@@ -1871,15 +1968,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             data-os-state-status={osStateUnavailable ? "unavailable" : "ready"}
             data-next-best-dollar-status={nextBestDollarUnavailable ? "unavailable" : "ready"}
           />
-        ) : null}
-        {settings.show_financial_os_panels ? (
-          <div className="sticky top-0 z-30 -mx-1 rounded-xl border border-white/10 bg-[#0B0F14]/95 px-4 py-2 text-sm font-medium text-zinc-100 shadow-lg shadow-black/20 backdrop-blur print:static print:shadow-none print:backdrop-blur-none">
-            <div className="truncate">
-              {stageUi.label} <span className="text-zinc-500">•</span>{" "}
-              {stabilityMeter?.label || "Stability loading"}{" "}
-              <span className="text-zinc-500">•</span> {topFocusAction}
-            </div>
-          </div>
         ) : null}
         {/* Money Clarity Hero */}
         <section className="overflow-hidden rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(34,197,94,0.16),transparent_34%),radial-gradient(circle_at_bottom_right,rgba(56,189,248,0.12),transparent_32%),#0E141C] p-5 shadow-[0_24px_70px_rgba(0,0,0,0.28)] sm:p-6">
@@ -1954,34 +2042,49 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
           </div>
 
           <div className="mt-5 rounded-xl border border-white/10 bg-[#0B0F14]/70 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-xs font-medium text-zinc-300">{heroTrendLabel}</div>
-              <div className="text-[11px] text-zinc-500">{fmtMonthLabel(cy, cm0)}</div>
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-xs font-medium text-zinc-300">{dashboardTrendLabel}</div>
+                <div className="mt-1 text-[11px] text-zinc-500">{heroTrendPeriodLabel}</div>
+              </div>
+              <div className="flex flex-wrap gap-1 rounded-full border border-white/10 bg-white/5 p-1">
+                {trendRangeOptions.map((option) => {
+                  const active = trendRange === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setTrendRange(option.value)}
+                      className={[
+                        "rounded-full px-3 py-1 text-[11px] font-medium transition-colors",
+                        active
+                          ? "bg-sky-400/20 text-sky-100"
+                          : "text-zinc-400 hover:bg-white/5 hover:text-zinc-100",
+                      ].join(" ")}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div className="mt-4 flex h-20 items-end gap-2">
-              {heroTrendValues.map((value, index) => (
+              {visibleHeroTrendBars.map((bar, index) => (
                 <div
-                  key={`${value}-${index}`}
-                  className="flex-1 rounded-t-md border border-white/10 bg-white/10"
-                  style={{ height: `${Math.max(14, (value / heroTrendMax) * 100)}%` }}
-                />
+                  key={`${bar.label}-${index}`}
+                  className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1"
+                  title={`${bar.label}: ${fmtMoney(bar.value)}`}
+                >
+                  <div
+                    className="w-full rounded-t-md border border-white/10 bg-white/10"
+                    style={{ height: `${Math.max(14, (bar.value / heroTrendMax) * 100)}%` }}
+                  />
+                  <div className="w-full truncate text-center text-[9px] text-zinc-500">{bar.label}</div>
+                </div>
               ))}
             </div>
           </div>
         </section>
-
-        {/* Momentum Strip */}
-        {settings.show_financial_os_panels && (
-          <div className="rounded-2xl border border-white/10 bg-[#0B0F14] px-4 py-3">
-            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-zinc-200">
-              {(momentumItems.length ? momentumItems : ["FI tracking"]).map((item) => (
-                <span key={item} className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                  {item}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
 
         {settings.show_financial_os_panels && (
           <div className="grid gap-3 xl:grid-cols-[0.92fr,1.08fr]">
@@ -2210,17 +2313,98 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                       {fmtMonthsCompact(debtCountdown?.estimated_months_remaining)}
                     </div>
                   </div>
-                  <span className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-emerald-200">
-                    Debt payoff active
-                  </span>
+                  <div className="flex shrink-0 flex-col items-end gap-2">
+                    <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-emerald-200">
+                      Debt payoff active
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowPayoffSimulator((open) => !open)}
+                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-zinc-100 transition-colors hover:bg-white/10"
+                    >
+                      {showPayoffSimulator ? "Hide simulator" : "Simulate"}
+                    </button>
+                  </div>
                 </div>
-                <div className="mt-3 truncate text-xs leading-5 text-zinc-400">{debtPriorityLabel}</div>
+                <div className="mt-3 space-y-1 text-xs leading-5 text-zinc-400">
+                  <div className="truncate">{debtPriorityLabel}</div>
+                  <div className="truncate">{payoffWithExtraLabel}</div>
+                </div>
                 <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
                   <div
                     className="h-full rounded-full bg-emerald-200"
                     style={{ width: `${Number(payoffRecurringExtra || 0) > 0 ? 100 : 10}%` }}
                   />
                 </div>
+                {showPayoffSimulator ? (
+                  <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14]/80 p-3">
+                    <label className="text-[11px] font-medium uppercase tracking-[0.16em] text-zinc-500">
+                      Extra monthly amount
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="25"
+                      value={payoffSimulationExtra}
+                      onChange={(event) => setPayoffSimulationExtra(event.target.value)}
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-[#080C11] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-400/60"
+                    />
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {[100, 200, 500].map((amount) => (
+                        <button
+                          key={amount}
+                          type="button"
+                          onClick={() => setPayoffSimulationExtra(String(amount))}
+                          className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 transition-colors hover:bg-white/10"
+                        >
+                          ${amount}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="mt-3 grid gap-2 text-xs text-zinc-400">
+                      <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <span>Balance</span>
+                        <span className="font-mono text-zinc-100">{fmtMoney(payoffSimulationBalance)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <span>Avg APR</span>
+                        <span className="font-mono text-zinc-100">
+                          {payoffWeightedApr > 0 ? `${payoffWeightedApr.toFixed(1)}%` : "Needs APR"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="flex items-center justify-between gap-3 text-xs text-zinc-400">
+                        <span>Potential speed-up</span>
+                        <span className="text-zinc-200">
+                          {simulatedMonthsSaved != null ? `${formatMonths(simulatedMonthsSaved)} faster` : "Needs payment data"}
+                        </span>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/10">
+                        <div
+                          className="h-full rounded-full bg-emerald-200"
+                          style={{ width: `${Math.max(6, payoffSimulatorProgress * 100)}%` }}
+                        />
+                      </div>
+                      <div className="mt-3 space-y-1 text-xs text-zinc-400">
+                        <div>
+                          Interest saved:{" "}
+                          <span className="font-mono text-zinc-100">
+                            {simulatedInterestSaved != null ? fmtMoney(simulatedInterestSaved) : "Needs APR"}
+                          </span>
+                        </div>
+                        <div>
+                          Simulated payoff:{" "}
+                          <span className="font-mono text-zinc-100">
+                            {payoffExtraSimulation.months != null ? formatMonths(payoffExtraSimulation.months) : "Needs data"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
@@ -2262,32 +2446,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div
                     className="h-full rounded-full bg-zinc-200"
                     style={{ width: `${clamp01(Number(healthScore || 0) / 100) * 100}%` }}
-                  />
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)] sm:col-span-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-xs text-zinc-400">Debt payoff projection</div>
-                    <div className="mt-2 text-2xl font-semibold text-zinc-100">
-                      {formatDashboardMoney(payoffRecurringExtra, {
-                        loading: nextBestDollarLoadingState && !debtPayoffProjection,
-                      })}
-                    </div>
-                  </div>
-                  <span className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-emerald-200">
-                    Debt payoff active
-                  </span>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs leading-5 text-zinc-400">
-                  <span>{payoffWithExtraLabel}</span>
-                  <span>{projectedPayoffDebt?.name || nextDollarImpact?.target_debt?.name || "Target debt loading"}</span>
-                </div>
-                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
-                  <div
-                    className="h-full rounded-full bg-emerald-200"
-                    style={{ width: `${Number(payoffRecurringExtra || 0) > 0 ? 100 : 10}%` }}
                   />
                 </div>
               </div>
