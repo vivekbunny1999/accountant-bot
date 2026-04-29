@@ -1,6 +1,17 @@
 // src/lib/api.tsx
 
-const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+function apiBase() {
+  const configured = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/+$/, "");
+  if (configured) return configured;
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host !== "localhost" && host !== "127.0.0.1") {
+      return "";
+    }
+  }
+  return "http://127.0.0.1:8000";
+}
+
 const SESSION_TOKEN_KEY = "accountantbot_session_token_v1";
 const SESSION_EXPIRES_AT_KEY = "accountantbot_session_expires_at_v1";
 const SESSION_EVENT = "accountantbot:session-changed";
@@ -94,8 +105,9 @@ function authHeaders(headers?: HeadersInit): Headers {
 }
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const base = apiBase();
   try {
-    const res = await fetch(`${BASE}${path}`, {
+    const res = await fetch(`${base}${path}`, {
       cache: "no-store",
       credentials: "include",
       ...init,
@@ -111,7 +123,7 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
         ? error.message
         : "Network request failed.";
     throw new Error(
-      `Network error contacting ${BASE}. This usually means the API URL is unreachable or CORS is blocking this Vercel origin. Original error: ${message}`
+      `Network error contacting ${base || "this site"}. This usually means the API URL is unreachable or CORS is blocking this origin. Original error: ${message}`
     );
   }
 }
@@ -284,6 +296,7 @@ export async function signup(body: {
   email: string;
   password: string;
   display_name?: string;
+  username?: string;
 }): Promise<AuthResponse> {
   return apiPost<AuthResponse>("/auth/signup", body);
 }
@@ -342,6 +355,20 @@ export async function changePassword(body: {
   new_password: string;
 }): Promise<AuthResponse> {
   return apiPost<AuthResponse>("/auth/password/change", body);
+}
+
+export async function requestEmailVerification(): Promise<{
+  ok: boolean;
+  message: string;
+}> {
+  return apiPost("/auth/email-verification/request", {});
+}
+
+export async function confirmEmailVerification(body: { code: string }): Promise<{
+  ok: boolean;
+  user: AuthUser;
+}> {
+  return apiPost("/auth/email-verification/confirm", body);
 }
 
 export async function requestPasswordReset(body: { email: string }): Promise<{
@@ -841,6 +868,15 @@ export async function syncPlaidData(body: {
   end_date?: string;
 }): Promise<PlaidSyncResponse> {
   return apiPost<PlaidSyncResponse>("/plaid/sync", body);
+}
+
+export async function unlinkPlaidItem(item_id: string, params: { user_id: string }): Promise<{
+  ok: boolean;
+  item_id: string;
+  message: string;
+}> {
+  const q = new URLSearchParams({ user_id: params.user_id }).toString();
+  return apiDelete(`/plaid/items/${encodeURIComponent(item_id)}?${q}`);
 }
 
 export type FinancialOsUpcomingItem = {

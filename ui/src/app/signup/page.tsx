@@ -11,9 +11,10 @@ import { FALLBACK_PASSWORD_POLICY, validatePasswordAgainstPolicy } from "@/lib/p
 export default function SignupPage() {
   const router = useRouter();
   const { signup } = useAuth();
-  const [displayName, setDisplayName] = useState("");
+  const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [policy, setPolicy] = useState<PasswordPolicy>(FALLBACK_PASSWORD_POLICY);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,6 +29,11 @@ export default function SignupPage() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    const trimmedUsername = username.trim().toLowerCase();
+    if (!/^[a-z0-9](?:[a-z0-9._-]{2,30}[a-z0-9])?$/.test(trimmedUsername)) {
+      setError("Username must be 4-32 characters and use only letters, numbers, dots, dashes, or underscores.");
+      return;
+    }
     const passwordError = validatePasswordAgainstPolicy(password, policy);
     if (passwordError) {
       setError(passwordError);
@@ -36,7 +42,7 @@ export default function SignupPage() {
     setBusy(true);
     setError(null);
     try {
-      await signup({ display_name: displayName, email, password });
+      await signup({ display_name: trimmedUsername, username: trimmedUsername, email, password });
       router.replace("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Signup failed.");
@@ -57,9 +63,14 @@ export default function SignupPage() {
         <div className="space-y-4">
           <input
             className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
-            placeholder="Display name"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Username"
+            value={username}
+            onChange={(e) => {
+              setError(null);
+              setUsername(e.target.value.toLowerCase());
+            }}
+            minLength={4}
+            required
           />
           <input
             className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
@@ -69,15 +80,24 @@ export default function SignupPage() {
             onChange={(e) => setEmail(e.target.value)}
             required
           />
-          <input
-            className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 outline-none"
-            placeholder={`Password (${policy.min_length}+ characters)`}
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            minLength={policy.min_length}
-          />
+          <div className="relative">
+            <input
+              className="w-full rounded-2xl border border-white/10 bg-black/20 py-3 pl-4 pr-24 outline-none"
+              placeholder={`Password (${policy.min_length}+ characters)`}
+              type={showPassword ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={policy.min_length}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((value) => !value)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-100 hover:bg-white/10"
+            >
+              {showPassword ? "Hide" : "View"}
+            </button>
+          </div>
         </div>
 
         <PasswordGuidance password={password} policy={policy} className="mt-4" />

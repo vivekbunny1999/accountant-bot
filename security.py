@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "30") or "30")
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_TTL_MINUTES", "30") or "30")
 PASSWORD_MIN_LENGTH = int(os.getenv("AUTH_PASSWORD_MIN_LENGTH", "8") or "8")
-USERNAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$")
+USERNAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{2,30}[a-z0-9])?$")
 PLAID_KEY_PLACEHOLDERS = {
     "",
     "replace_with_a_long_random_secret_or_fernet_key",

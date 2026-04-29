@@ -51,6 +51,8 @@ class User(Base):
     display_name = Column(String, nullable=True)
     auth_enabled = Column(Boolean, default=False, nullable=False)
     email_verified_at = Column(DateTime, nullable=True)
+    email_verification_code_hash = Column(String, nullable=True)
+    email_verification_code_expires_at = Column(DateTime, nullable=True)
     beta_access_approved = Column(Boolean, default=False, nullable=False)
     session_version = Column(Integer, default=1, nullable=False)
     password_changed_at = Column(DateTime, nullable=True)
