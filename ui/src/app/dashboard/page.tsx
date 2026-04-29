@@ -1126,14 +1126,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
         .slice(0, 3),
     [decisionPlan?.actions]
   );
-  const decisionPlanImportant = useMemo(
-    () =>
-      (decisionPlan?.avoid ?? [])
-        .map((item) => String(item.label || item.reason || "").trim())
-        .filter(Boolean)
-        .slice(0, 2),
-    [decisionPlan]
-  );
   const decisionPlanHeadline = decisionHeadlineFromActions(
     decisionPlanActions,
     decisionPlan?.headline
@@ -1818,6 +1810,53 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     payoffMonthsWithExtra != null
       ? `${formatMonths(payoffMonthsWithExtra)} with extra`
       : "Payoff with extra loading";
+  const totalPosition = firstDashboardMoneyValue(
+    (financialOsV2 as (FinancialOsV2 & { net_worth?: unknown }) | null)?.net_worth,
+    (osState as (OsStateResponse & { net_worth?: unknown }) | null)?.net_worth,
+    netWorthV1,
+    financialOsCashTotal
+  );
+  const protectedFallback =
+    protectedObligationsTotal != null || runwayReserveCurrent != null
+      ? Number(protectedObligationsTotal || 0) + Number(runwayReserveCurrent || 0)
+      : null;
+  const protectedMoney = firstDashboardMoneyValue(
+    financialOsV2?.protected_cash,
+    protectedFallback,
+    protectedObligationsTotal
+  );
+  const heroFiProgressLabel =
+    fiProgressPercent != null
+      ? `${Number(fiProgressPercent).toFixed(Number.isInteger(Number(fiProgressPercent)) ? 0 : 1)}%`
+      : "Loading";
+  const heroTrendValues = trend.length
+    ? trend.map(([, value]) => Math.max(0, Number(value) || 0))
+    : [38, 44, 41, 52, 49, 61, 58, 70];
+  const heroTrendMax = Math.max(1, ...heroTrendValues);
+  const heroTrendLabel = trend.length ? `Balance trend • ${trend.length} periods` : "Trend preview";
+  const runwayTargetCovered =
+    runwayReserveCurrent != null && runwayReserveTarget != null && runwayReserveTarget > 0
+      ? runwayReserveCurrent >= runwayReserveTarget
+      : runwayMonths != null && runwayTargetMonths != null
+      ? runwayMonths >= runwayTargetMonths
+      : false;
+  const momentumItems = [
+    monthMetrics.alerts.some((alert) => alert.title.toLowerCase().includes("spend cap"))
+      ? "Spending over cap"
+      : null,
+    Number((safeToSpendToday ?? weeklySafeToSpend) || 0) <= 0 ? "Spending paused" : null,
+    Number(payoffRecurringExtra || 0) > 0 ? "Debt payoff active" : null,
+    runwayTargetCovered ? "Runway protected" : null,
+    Number(protectedObligationsTotal || 0) > 0 || upcomingItemsList.length > 0 ? "Bills protected" : null,
+  ].filter(Boolean) as string[];
+  const advisorSummaryBullets = (
+    advisorSummary?.reasoning?.length
+      ? advisorSummary.reasoning
+      : [advisorSummary?.one_liner || advisorSummary?.headline].filter(Boolean)
+  )
+    .map((item) => shortDashboardCopy(item, "", 120))
+    .filter(Boolean)
+    .slice(0, 3);
 
   return (
     <AppShell>
@@ -1842,21 +1881,23 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             </div>
           </div>
         ) : null}
-        {/* Header */}
-        <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-          <div className="flex items-start justify-between gap-3">
+        {/* Money Clarity Hero */}
+        <section className="overflow-hidden rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(34,197,94,0.16),transparent_34%),radial-gradient(circle_at_bottom_right,rgba(56,189,248,0.12),transparent_32%),#0E141C] p-5 shadow-[0_24px_70px_rgba(0,0,0,0.28)] sm:p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <div className="text-lg font-semibold">Dashboard</div>
-              <div className="mt-1 text-sm text-zinc-400">
-                Quick overview across your cards •{" "}
-                <span className="text-zinc-200">{fmtMonthLabel(cy, cm0)}</span>
+              <div className="text-xs font-medium uppercase text-zinc-500">Financial OS</div>
+              <div className="mt-2 text-2xl font-semibold tracking-normal text-zinc-100 sm:text-3xl">
+                Money clarity
+              </div>
+              <div className="mt-2 max-w-2xl text-sm leading-6 text-zinc-300">
+                Total position is not fully spendable. Your OS separates protected money from spending money.
               </div>
             </div>
 
             {settings.show_financial_os_panels && (
               <div
                 className={[
-                  "inline-flex items-center rounded-full border px-3 py-1 text-xs",
+                  "inline-flex w-fit items-center rounded-full border px-3 py-1 text-xs",
                   stageUi.cls,
                 ].join(" ")}
                 title="Your current Financial OS stage (V1 estimate)"
@@ -1865,163 +1906,118 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               </div>
             )}
           </div>
-        </div>
 
-        <div className="flex justify-end">
-          <button
-            type="button"
-            onClick={() => setShowDetails((value) => !value)}
-            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
-          >
-            {showDetails ? "Hide details" : "Show details"}
-          </button>
-        </div>
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-xl border border-white/10 bg-[#0B0F14]/80 p-4">
+              <div className="text-xs text-zinc-400">Total position</div>
+              <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                {formatDashboardMoney(totalPosition, {
+                  loading: osStateLoading,
+                  unavailable: osStateUnavailable,
+                })}
+              </div>
+              <div className="mt-2 text-[11px] text-zinc-500">Net worth when available</div>
+            </div>
 
-        {/* ===== Financial OS alerts ===== */}
-        {showDetails && settings.show_financial_os_panels && monthMetrics.alerts.length > 0 && (
-          <div className="space-y-3">
-            {monthMetrics.alerts.map((a, i) => (
-              <div
-                key={i}
-                className={[
-                  "rounded-2xl border p-4",
-                  a.kind === "danger"
-                    ? "border-red-500/20 bg-red-500/10"
-                    : "border-amber-500/20 bg-amber-500/10",
-                ].join(" ")}
-              >
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4">
+              <div className="text-xs text-emerald-100/80">Spendable today</div>
+              <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                {formatDashboardMoney(safeToSpendToday, {
+                  loading: nextBestDollarLoadingState,
+                  unavailable: nextBestDollarUnavailable,
+                })}
+              </div>
+              <div className="mt-2 text-[11px] text-emerald-100/70">{spendAllowanceMicrocopy}</div>
+            </div>
+
+            <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 p-4">
+              <div className="text-xs text-sky-100/80">Protected</div>
+              <div className="mt-2 text-2xl font-semibold text-zinc-100">
+                {formatDashboardMoney(protectedMoney, {
+                  loading: osStateLoading,
+                  unavailable: osStateUnavailable,
+                })}
+              </div>
+              <div className="mt-2 text-[11px] text-sky-100/70">Bills, runway, reserves</div>
+            </div>
+
+            <div className="rounded-xl border border-violet-500/20 bg-violet-500/10 p-4">
+              <div className="text-xs text-violet-100/80">FI progress</div>
+              <div className="mt-2 text-2xl font-semibold text-zinc-100">{heroFiProgressLabel}</div>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10">
                 <div
-                  className={[
-                    "text-sm font-semibold",
-                    a.kind === "danger" ? "text-red-200" : "text-amber-200",
-                  ].join(" ")}
-                >
-                  {a.title}
-                </div>
-                <div className="mt-1 text-sm text-zinc-200/90">{a.body}</div>
+                  className="h-full rounded-full bg-violet-200"
+                  style={{ width: `${clamp01(Number(fiProgressPercent || 0) / 100) * 100}%` }}
+                />
               </div>
-            ))}
+            </div>
           </div>
-        )}
 
-        {showDetails && settings.show_financial_os_panels && (
-          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div className="text-sm font-semibold text-zinc-100">Financial OS Setup</div>
-                <div className="mt-1 text-xs text-zinc-400">
-                  These inputs decide whether your recommendations are trusted or estimated.
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2 text-xs">
-                <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase tracking-[0.18em] ${trustLevelTone(setupStatus?.trust_level)}`}>
-                  Trust level: {setupStatus?.trust_level || (osStateLoading ? "Loading" : "Unknown")}
-                </span>
-                <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-200">
-                  Completed: {setupCompletedCount} / {setupTotalCount || 7}
-                </span>
-              </div>
+          <div className="mt-5 rounded-xl border border-white/10 bg-[#0B0F14]/70 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs font-medium text-zinc-300">{heroTrendLabel}</div>
+              <div className="text-[11px] text-zinc-500">{fmtMonthLabel(cy, cm0)}</div>
             </div>
-
-            <div
-              className={[
-                "mt-4 rounded-xl border p-4 text-sm",
-                (setupStatus?.trust_level || "").toLowerCase() === "high"
-                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100"
-                  : (setupStatus?.trust_level || "").toLowerCase() === "medium"
-                  ? "border-amber-500/20 bg-amber-500/10 text-amber-100"
-                  : "border-red-500/20 bg-red-500/10 text-red-100",
-              ].join(" ")}
-            >
-              {setupTrustCopy(setupStatus)}
+            <div className="mt-4 flex h-20 items-end gap-2">
+              {heroTrendValues.map((value, index) => (
+                <div
+                  key={`${value}-${index}`}
+                  className="flex-1 rounded-t-md border border-white/10 bg-white/10"
+                  style={{ height: `${Math.max(14, (value / heroTrendMax) * 100)}%` }}
+                />
+              ))}
             </div>
+          </div>
+        </section>
 
-            <div className="mt-4 space-y-3">
-              {setupItems.length ? (
-                setupItems.map((item) => {
-                  const formattedValue = formatSetupItemValue(item);
-                  return (
-                    <div
-                      key={item.key || item.label}
-                      className="rounded-xl border border-white/10 bg-[#0B0F14] p-4"
-                    >
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-sm font-medium text-zinc-100">{item.label}</div>
-                            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${setupStatusTone(item.status)}`}>
-                              {setupStatusLabel(item.status)}
-                            </span>
-                            {item.required ? (
-                              <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-zinc-400">
-                                Required
-                              </span>
-                            ) : null}
-                          </div>
-                          {formattedValue ? (
-                            <div className="mt-2 text-sm font-medium text-zinc-200">{formattedValue}</div>
-                          ) : null}
-                          <div className="mt-2 text-sm leading-6 text-zinc-400">{item.reason}</div>
-                        </div>
-
-                        {item.href ? (
-                          <Link
-                            href={item.href}
-                            className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
-                          >
-                            {standardCtaLabel(item.action)}
-                          </Link>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
-                  {osStateLoading ? "Setup checklist is loading." : "Setup checklist is not available yet."}
-                </div>
-              )}
+        {/* Momentum Strip */}
+        {settings.show_financial_os_panels && (
+          <div className="rounded-2xl border border-white/10 bg-[#0B0F14] px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-zinc-200">
+              {(momentumItems.length ? momentumItems : ["FI tracking"]).map((item) => (
+                <span key={item} className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                  {item}
+                </span>
+              ))}
             </div>
           </div>
         )}
 
         {settings.show_financial_os_panels && (
-          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div className="text-sm font-semibold text-zinc-100">Advisor Summary</div>
-                <div className="mt-1 text-xs text-zinc-400">
-                  Plain-English readout from your Financial OS.
+          <div className="grid gap-3 xl:grid-cols-[0.92fr,1.08fr]">
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Advisor Summary</div>
+                  <div className="mt-1 text-xs text-zinc-400">Explains the OS readout.</div>
                 </div>
-              </div>
 
-              <div className="flex flex-wrap gap-2 text-xs">
-                <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase tracking-[0.18em] ${advisorConfidenceTone(advisorSummary?.confidence)}`}>
+                <span className={`inline-flex w-fit items-center rounded-full border px-3 py-1 text-xs font-medium uppercase ${advisorConfidenceTone(advisorSummary?.confidence)}`}>
                   {advisorConfidenceLabel(advisorSummary?.confidence)}
                 </span>
               </div>
+
+              {advisorSummary ? (
+                <div className={`mt-4 rounded-xl border p-5 ${advisorSummaryTone(advisorSummary.tone)}`}>
+                  <div className="text-xl font-semibold leading-tight text-zinc-100">
+                    {shortDashboardCopy(advisorSummary.headline, "Financial OS summary", 82)}
+                  </div>
+                  <ul className="mt-4 space-y-3 text-sm leading-6 text-zinc-300">
+                    {advisorSummaryBullets.map((item, index) => (
+                      <li key={`${item}-${index}`} className="flex gap-3">
+                        <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-300" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                  {osStateLoading ? "Advisor summary is loading." : "Advisor summary is not available yet."}
+                </div>
+              )}
             </div>
 
-            {advisorSummary ? (
-              <div className={`mt-4 rounded-xl border p-5 ${advisorSummaryTone(advisorSummary.tone)}`}>
-                <div className="text-xl font-semibold leading-tight text-zinc-100 sm:text-2xl">
-                  {shortDashboardCopy(advisorSummary.headline, "Financial OS summary", 96)}
-                </div>
-                <div className="mt-3 max-w-4xl text-sm leading-6 text-zinc-300">
-                  {shortDashboardCopy(advisorSummary.one_liner, "Plan status is loading.", 150)}
-                </div>
-              </div>
-            ) : (
-              <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
-                {osStateLoading ? "Advisor summary is loading." : "Advisor summary is not available yet."}
-              </div>
-            )}
-          </div>
-        )}
-
-        {settings.show_financial_os_panels && (
-          <div className={showDetails ? "grid gap-3 xl:grid-cols-[1.35fr,1fr]" : "grid gap-3"}>
             <div className="rounded-2xl border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.18),transparent_35%),#0E141C] p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_60px_rgba(8,15,25,0.35)]">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -2104,19 +2100,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     )}
                   </div>
 
-                  {decisionPlanImportant.length ? (
-                    <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Important</div>
-                      <ul className="mt-3 space-y-2 text-sm text-zinc-300">
-                        {decisionPlanImportant.map((item, index) => (
-                          <li key={`${item}-${index}`} className="flex gap-2">
-                            <span className="text-zinc-500">-</span>
-                            <span>{item}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
                 </>
               ) : (
                 <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
@@ -2124,42 +2107,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 </div>
               )}
             </div>
-
-            {showDetails ? (
-            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-zinc-100">Top Insights</div>
-                  <div className="mt-1 text-xs text-zinc-400">
-                    Low-noise coaching and alerts from your Financial OS.
-                  </div>
-                </div>
-                <div className="text-xs text-zinc-500">{osInsights.length} items</div>
-              </div>
-
-              <div className="mt-4 space-y-3">
-                {secondaryInsights.length ? (
-                  secondaryInsights.map((insight) => (
-                    <div key={insight.key} className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="text-sm font-medium leading-5 text-zinc-100">{insight.title}</div>
-                        <div className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${insightTone(insight.severity)}`}>
-                          {insight.severity}
-                        </div>
-                      </div>
-                      <div className="mt-2 text-xs leading-5 text-zinc-400">
-                        {shortDashboardCopy(insight.explanation, "", 120)}
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-sm text-zinc-400">
-                    Additional insights are loading.
-                  </div>
-                )}
-              </div>
-            </div>
-            ) : null}
           </div>
         )}
 
@@ -2179,7 +2126,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-xs text-zinc-400">Spend allowance / STS</div>
+                    <div className="text-xs text-zinc-400">STS / Spend allowance</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
                       {formatDashboardMoney(safeToSpendToday ?? weeklySafeToSpend, {
                         loading: nextBestDollarLoadingState,
@@ -2195,12 +2142,18 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   {spendAllowanceMicrocopy}
                   {weeklySafeToSpend != null ? ` • Weekly ${fmtMoney(Number(weeklySafeToSpend || 0))}` : ""}
                 </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className={`h-full rounded-full ${Number((safeToSpendToday ?? weeklySafeToSpend) || 0) > 0 ? "bg-emerald-200" : "bg-red-200"}`}
+                    style={{ width: `${Number((safeToSpendToday ?? weeklySafeToSpend) || 0) > 0 ? 100 : 8}%` }}
+                  />
+                </div>
               </div>
 
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-xs text-zinc-400">Stability Meter</div>
+                    <div className="text-xs text-zinc-400">Stability</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
                       {stabilityMeter?.value != null ? `${stabilityMeter.value}/100` : "Loading"}
                     </div>
@@ -2220,7 +2173,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-xs text-zinc-400">Runway Reserve</div>
+                    <div className="text-xs text-zinc-400">Runway</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
                       {runwayMonths != null ? formatMonths(runwayMonths) : "Loading"}
                     </div>
@@ -2232,6 +2185,20 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 <div className="mt-3 text-xs leading-5 text-zinc-400">
                   {runwayReserveLabel}
                   {runwayTargetMonths != null ? ` • Target ${formatMonths(runwayTargetMonths)}` : ""}
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className="h-full rounded-full bg-sky-200"
+                    style={{
+                      width: `${clamp01(
+                        runwayReserveCurrent != null && runwayReserveTarget != null && runwayReserveTarget > 0
+                          ? Number(runwayReserveCurrent || 0) / Number(runwayReserveTarget || 1)
+                          : runwayMonths != null && runwayTargetMonths != null && runwayTargetMonths > 0
+                          ? Number(runwayMonths || 0) / Number(runwayTargetMonths || 1)
+                          : 0
+                      ) * 100}%`,
+                    }}
+                  />
                 </div>
               </div>
 
@@ -2248,12 +2215,18 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   </span>
                 </div>
                 <div className="mt-3 truncate text-xs leading-5 text-zinc-400">{debtPriorityLabel}</div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className="h-full rounded-full bg-emerald-200"
+                    style={{ width: `${Number(payoffRecurringExtra || 0) > 0 ? 100 : 10}%` }}
+                  />
+                </div>
               </div>
 
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-xs text-zinc-400">FI Progress</div>
+                    <div className="text-xs text-zinc-400">FI progress</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
                       {fiProgressPercent != null ? `${fiProgressPercent}%` : "Loading"}
                     </div>
@@ -2265,12 +2238,18 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 <div className="mt-3 text-xs leading-5 text-zinc-400">
                   {fiTargetAmount != null ? `Target ${fmtMoney(Number(fiTargetAmount || 0))}` : "Target loading"}
                 </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className="h-full rounded-full bg-violet-200"
+                    style={{ width: `${clamp01(Number(fiProgressPercent || 0) / 100) * 100}%` }}
+                  />
+                </div>
               </div>
 
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-xs text-zinc-400">Financial Health Score</div>
+                    <div className="text-xs text-zinc-400">Health score</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
                       {healthScore != null ? `${healthScore}/100` : "Loading"}
                     </div>
@@ -2290,7 +2269,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)] sm:col-span-2">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-xs text-zinc-400">Debt Payoff Projection</div>
+                    <div className="text-xs text-zinc-400">Debt payoff projection</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
                       {formatDashboardMoney(payoffRecurringExtra, {
                         loading: nextBestDollarLoadingState && !debtPayoffProjection,
@@ -2304,6 +2283,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs leading-5 text-zinc-400">
                   <span>{payoffWithExtraLabel}</span>
                   <span>{projectedPayoffDebt?.name || nextDollarImpact?.target_debt?.name || "Target debt loading"}</span>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
+                  <div
+                    className="h-full rounded-full bg-emerald-200"
+                    style={{ width: `${Number(payoffRecurringExtra || 0) > 0 ? 100 : 10}%` }}
+                  />
                 </div>
               </div>
             </div>
@@ -2380,6 +2365,158 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 </table>
               </div>
             )}
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => setShowDetails((value) => !value)}
+            className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+          >
+            {showDetails ? "Hide details" : "Show details"}
+          </button>
+        </div>
+
+        {/* ===== Collapsed details ===== */}
+        {showDetails && settings.show_financial_os_panels && monthMetrics.alerts.length > 0 && (
+          <div className="space-y-3">
+            {monthMetrics.alerts.map((a, i) => (
+              <div
+                key={i}
+                className={[
+                  "rounded-2xl border p-4",
+                  a.kind === "danger"
+                    ? "border-red-500/20 bg-red-500/10"
+                    : "border-amber-500/20 bg-amber-500/10",
+                ].join(" ")}
+              >
+                <div
+                  className={[
+                    "text-sm font-semibold",
+                    a.kind === "danger" ? "text-red-200" : "text-amber-200",
+                  ].join(" ")}
+                >
+                  {a.title}
+                </div>
+                <div className="mt-1 text-sm text-zinc-200/90">{a.body}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {showDetails && settings.show_financial_os_panels && (
+          <div className="grid gap-3 xl:grid-cols-[1fr,0.85fr]">
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Financial OS Setup</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Inputs behind trust and estimates.
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className={`inline-flex items-center rounded-full border px-3 py-1 font-medium uppercase ${trustLevelTone(setupStatus?.trust_level)}`}>
+                    Trust: {setupStatus?.trust_level || (osStateLoading ? "Loading" : "Unknown")}
+                  </span>
+                  <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-zinc-200">
+                    {setupCompletedCount} / {setupTotalCount || 7}
+                  </span>
+                </div>
+              </div>
+
+              <div
+                className={[
+                  "mt-4 rounded-xl border p-4 text-sm",
+                  (setupStatus?.trust_level || "").toLowerCase() === "high"
+                    ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100"
+                    : (setupStatus?.trust_level || "").toLowerCase() === "medium"
+                    ? "border-amber-500/20 bg-amber-500/10 text-amber-100"
+                    : "border-red-500/20 bg-red-500/10 text-red-100",
+                ].join(" ")}
+              >
+                {setupTrustCopy(setupStatus)}
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {setupItems.length ? (
+                  setupItems.map((item) => {
+                    const formattedValue = formatSetupItemValue(item);
+                    return (
+                      <div key={item.key || item.label} className="rounded-xl border border-white/10 bg-[#0B0F14] p-4">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div className="text-sm font-medium text-zinc-100">{item.label}</div>
+                              <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase ${setupStatusTone(item.status)}`}>
+                                {setupStatusLabel(item.status)}
+                              </span>
+                              {item.required ? (
+                                <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] uppercase text-zinc-400">
+                                  Required
+                                </span>
+                              ) : null}
+                            </div>
+                            {formattedValue ? (
+                              <div className="mt-2 text-sm font-medium text-zinc-200">{formattedValue}</div>
+                            ) : null}
+                            <div className="mt-2 text-sm leading-6 text-zinc-400">{item.reason}</div>
+                          </div>
+
+                          {item.href ? (
+                            <Link
+                              href={item.href}
+                              className="inline-flex shrink-0 items-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+                            >
+                              {standardCtaLabel(item.action)}
+                            </Link>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-4 text-sm text-zinc-400">
+                    {osStateLoading ? "Setup checklist is loading." : "Setup checklist is not available yet."}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-100">Top Insights</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Low-noise OS signals.
+                  </div>
+                </div>
+                <div className="text-xs text-zinc-500">{osInsights.length} items</div>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {secondaryInsights.length ? (
+                  secondaryInsights.map((insight) => (
+                    <div key={insight.key} className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="text-sm font-medium leading-5 text-zinc-100">{insight.title}</div>
+                        <div className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase ${insightTone(insight.severity)}`}>
+                          {insight.severity}
+                        </div>
+                      </div>
+                      <div className="mt-2 text-xs leading-5 text-zinc-400">
+                        {shortDashboardCopy(insight.explanation, "", 120)}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-sm text-zinc-400">
+                    Additional insights are loading.
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
