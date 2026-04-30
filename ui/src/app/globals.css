@@ -24,3 +24,35 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+button:not(:disabled):not([aria-disabled="true"]) {
+  --button-float-y: 0px;
+  --button-press-scale: 1;
+  scale: var(--button-press-scale);
+  translate: var(--tw-translate-x, 0px) calc(var(--tw-translate-y, 0px) + var(--button-float-y))
+    var(--tw-translate-z, 0px);
+  transition-duration: 160ms;
+  transition-property: scale, translate, filter, box-shadow;
+  transition-timing-function: ease-out;
+  will-change: scale, translate;
+}
+
+button:not(:disabled):not([aria-disabled="true"]):hover,
+button:not(:disabled):not([aria-disabled="true"]):focus-visible {
+  --button-float-y: -2px;
+  --button-press-scale: 1.01;
+}
+
+button:not(:disabled):not([aria-disabled="true"]):active {
+  --button-float-y: 1px;
+  --button-press-scale: 0.985;
+  transition-duration: 90ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button:not(:disabled):not([aria-disabled="true"]) {
+    scale: 1;
+    transition: none;
+    translate: var(--tw-translate-x, 0px) var(--tw-translate-y, 0px) var(--tw-translate-z, 0px);
+  }
+}

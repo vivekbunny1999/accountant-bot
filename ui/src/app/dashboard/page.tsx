@@ -12,6 +12,8 @@ import {
   getCashAccountTransactions,
   getFinancialOsIntelligence,
   listManualTransactions,
+  listDebts,
+  Debt,
   getNextBestDollar,
   getOsState,
   getPlaidAccounts,
@@ -395,33 +397,121 @@ function monthIndexFromBucketKey(key: string) {
   return Number(m[1]) * 12 + Number(m[2]) - 1;
 }
 
-function simulateDebtPayoff(balance: number, aprPct: number, monthlyPayment: number) {
-  const startingBalance = Math.max(0, Number(balance) || 0);
-  const payment = Math.max(0, Number(monthlyPayment) || 0);
-  const monthlyRate = Math.max(0, Number(aprPct) || 0) / 100 / 12;
+type PayoffDebtInput = {
+  id?: string | number | null;
+  name: string;
+  lender?: string | null;
+  last4?: string | null;
+  balance: number;
+  apr: number | null;
+  minimumDue: number | null;
+  creditLimit: number | null;
+  source: "registry" | "financial_os" | "projection" | "plaid";
+};
 
-  if (startingBalance <= 0) {
-    return { months: 0, interest: 0, workable: true };
+function recordValue(source: unknown, key: string) {
+  if (!source || typeof source !== "object") return undefined;
+  return (source as Record<string, unknown>)[key];
+}
+
+function cleanDebtName(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "Debt";
+}
+
+function cleanLast4(value: unknown) {
+  if (value == null) return null;
+  const digits = String(value).replace(/\D/g, "");
+  return digits ? digits.slice(-4) : null;
+}
+
+function payoffDebtMergeKey(debt: PayoffDebtInput) {
+  if (debt.id != null) return `id:${debt.id}`;
+  if (debt.last4) return `last4:${debt.last4}`;
+  return `name:${debt.name.toLowerCase()}`;
+}
+
+function addPayoffDebtInput(map: Map<string, PayoffDebtInput>, debt: PayoffDebtInput) {
+  if (debt.balance <= 0) return;
+  const key = payoffDebtMergeKey(debt);
+  const existing = map.get(key);
+  if (!existing) {
+    map.set(key, debt);
+    return;
   }
 
-  if (payment <= 0 || (monthlyRate > 0 && payment <= startingBalance * monthlyRate)) {
-    return { months: null, interest: null, workable: false };
-  }
+  map.set(key, {
+    ...existing,
+    name: existing.name || debt.name,
+    lender: existing.lender ?? debt.lender,
+    last4: existing.last4 ?? debt.last4,
+    balance: existing.balance > 0 ? existing.balance : debt.balance,
+    apr: existing.apr ?? debt.apr,
+    minimumDue: existing.minimumDue ?? debt.minimumDue,
+    creditLimit: existing.creditLimit ?? debt.creditLimit,
+  });
+}
 
-  let remaining = startingBalance;
-  let interest = 0;
+function estimatedMinimumDue(balance: number) {
+  if (balance <= 0) return 0;
+  return Math.max(25, balance * 0.02);
+}
+
+function simulateDebtPortfolio(debts: PayoffDebtInput[], extraMonthly: number) {
+  const modeled = debts
+    .filter((debt) => debt.balance > 0)
+    .map((debt) => ({
+      name: debt.name,
+      balance: debt.balance,
+      apr: Math.max(0, debt.apr ?? 0),
+      minimumDue: Math.max(0, debt.minimumDue ?? estimatedMinimumDue(debt.balance)),
+    }))
+    .filter((debt) => debt.minimumDue > 0);
+
+  if (!modeled.length) return { months: null, interest: null, workable: false };
+
   let months = 0;
+  let interest = 0;
+  const extraPayment = Math.max(0, Number(extraMonthly) || 0);
 
-  while (remaining > 0.01 && months < 600) {
-    const monthlyInterest = remaining * monthlyRate;
-    const principal = Math.min(remaining, payment - monthlyInterest);
-    if (principal <= 0) return { months: null, interest: null, workable: false };
-    interest += monthlyInterest;
-    remaining -= principal;
+  while (months < 600) {
+    const remainingBefore = modeled.reduce((sum, debt) => sum + Math.max(0, debt.balance), 0);
+    if (remainingBefore <= 0.01) return { months, interest, workable: true };
+
+    for (const debt of modeled) {
+      if (debt.balance <= 0.01) continue;
+      const monthlyInterest = debt.balance * (debt.apr / 100 / 12);
+      debt.balance += monthlyInterest;
+      interest += monthlyInterest;
+    }
+
+    for (const debt of modeled) {
+      if (debt.balance <= 0.01) continue;
+      const payment = Math.min(debt.minimumDue, debt.balance);
+      debt.balance -= payment;
+    }
+
+    let extraLeft = extraPayment;
+    while (extraLeft > 0.01) {
+      const target = modeled
+        .filter((debt) => debt.balance > 0.01)
+        .sort((left, right) => right.apr - left.apr || right.balance - left.balance)[0];
+      if (!target) break;
+      const payment = Math.min(extraLeft, target.balance);
+      target.balance -= payment;
+      extraLeft -= payment;
+    }
+
+    const remainingAfter = modeled.reduce((sum, debt) => sum + Math.max(0, debt.balance), 0);
     months += 1;
+    if (remainingAfter >= remainingBefore - 0.01) {
+      return { months: null, interest: null, workable: false };
+    }
   }
 
-  return { months, interest, workable: months < 600 };
+  return { months: null, interest: null, workable: false };
 }
 
 /** =========================
@@ -510,6 +600,7 @@ function weekRangeLabel(y: number, m0: number, idx: number) {
  * Settings (Financial OS)
  * ========================= */
 const SETTINGS_KEY = "accountantbot_settings_v1";
+const RUNWAY_MANUAL_CASH_KEY = "accountantbot_runway_manual_cash_v1";
 
 type DebtStrategy = "Avalanche" | "Snowball";
 type Stage =
@@ -638,6 +729,15 @@ function stageBadge(stage: Stage) {
       return { cls: "text-violet-300 bg-violet-500/10 border-violet-500/20", label: "Build Wealth" };
     default:
       return { cls: "text-zinc-300 bg-white/5 border-white/10", label: stage };
+  }
+}
+
+function loadManualRunwayCashInput() {
+  if (typeof window === "undefined") return "0";
+  try {
+    return localStorage.getItem(RUNWAY_MANUAL_CASH_KEY) || "0";
+  } catch {
+    return "0";
   }
 }
 
@@ -777,6 +877,30 @@ function cashEndBalance(a: any) {
   return (Number.isFinite(checking) ? checking : 0) + (Number.isFinite(savings) ? savings : 0);
 }
 
+function cashSavingsBalance(a: any) {
+  const savings = Number(a?.savings_end_balance ?? 0);
+  return Number.isFinite(savings) ? Math.max(0, savings) : 0;
+}
+
+function isPlaidRunwaySavingsAccount(account: PlaidAccountSummary) {
+  const type = String(account.type || "").toLowerCase();
+  const subtype = String(account.subtype || "").toLowerCase();
+  const searchable = [account.name, account.official_name, account.institution_name, subtype]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (account.is_liability || type === "credit" || type === "loan") return false;
+  return (
+    (account.is_cash_like === true || type === "depository") &&
+    (subtype === "savings" ||
+      subtype === "money market" ||
+      subtype === "cd" ||
+      searchable.includes("savings") ||
+      searchable.includes("money market"))
+  );
+}
+
 type MonthSpendRow = {
   key: string;
   source: "Statement" | "Imported Cash" | "Plaid" | "Manual";
@@ -805,10 +929,13 @@ export default function DashboardPage() {
 
   useEffect(() => {
     setSettings(resolveSettings(loadSettings()));
+    setManualRunwayCashInput(loadManualRunwayCashInput());
 
     const onStorage = (e: StorageEvent) => {
       if (e.key === SETTINGS_KEY) {
         setSettings(resolveSettings(loadSettings()));
+      } else if (e.key === RUNWAY_MANUAL_CASH_KEY) {
+        setManualRunwayCashInput(loadManualRunwayCashInput());
       }
     };
     window.addEventListener("storage", onStorage);
@@ -821,6 +948,15 @@ export default function DashboardPage() {
       window.removeEventListener("accountantbot:settings", onCustom as any);
     };
   }, []);
+
+  function updateManualRunwayCashInput(value: string) {
+    setManualRunwayCashInput(value);
+    try {
+      localStorage.setItem(RUNWAY_MANUAL_CASH_KEY, value);
+    } catch {
+      // Local storage can be unavailable in private browser contexts.
+    }
+  }
 
 
 // ===== Bills (Upcoming window) =====
@@ -845,6 +981,7 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
   const [cashMonthTxns, setCashMonthTxns] = useState<CashTxn[]>([]);
   const [manualTransactions, setManualTransactions] = useState<ManualTransaction[]>([]);
+  const [debtRegistry, setDebtRegistry] = useState<Debt[]>([]);
   const [cashLoading, setCashLoading] = useState(false);
   const [cashErr, setCashErr] = useState<string | null>(null);
   const [txLoading, setTxLoading] = useState(false);
@@ -857,6 +994,8 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [trendRange, setTrendRange] = useState<TrendRange>("1m");
   const [showPayoffSimulator, setShowPayoffSimulator] = useState(false);
+  const [showRunwayDetails, setShowRunwayDetails] = useState(false);
+  const [manualRunwayCashInput, setManualRunwayCashInput] = useState("0");
   const [payoffSimulationExtra, setPayoffSimulationExtra] = useState("100");
 
   useEffect(() => {
@@ -985,6 +1124,24 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
   useEffect(() => {
     if (!hasAuthenticatedUser) return;
     let cancelled = false;
+
+    (async () => {
+      try {
+        const rows = await listDebts({ user_id: userId });
+        if (!cancelled) setDebtRegistry(rows || []);
+      } catch {
+        if (!cancelled) setDebtRegistry([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasAuthenticatedUser, userId]);
+
+  useEffect(() => {
+    if (!hasAuthenticatedUser) return;
+    let cancelled = false;
     const bufferAmount = settings.buffer_enabled ? settings.buffer_amount : 0;
 
     (async () => {
@@ -1109,6 +1266,35 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
       label: endDate,
     };
   }, [cashAccounts]);
+
+  const importedRunwaySavings = useMemo(() => {
+    const list = (cashAccounts || []) as CashAccount[];
+    const latestByAccount = new Map<string, CashAccount>();
+
+    for (const account of list) {
+      const keyParts = [
+        account.institution,
+        account.account_label,
+        account.account_name,
+        account.account_last4,
+      ].filter(Boolean);
+      const key = keyParts.length ? keyParts.join(":").toLowerCase() : "__latest_cash_snapshot";
+      const current = latestByAccount.get(key);
+      if (!current || getCashImportEndTime(account) > getCashImportEndTime(current)) {
+        latestByAccount.set(key, account);
+      }
+    }
+
+    return Array.from(latestByAccount.values()).reduce((sum, account) => sum + cashSavingsBalance(account), 0);
+  }, [cashAccounts]);
+
+  const plaidRunwaySavings = useMemo(
+    () =>
+      (plaidAccounts || [])
+        .filter(isPlaidRunwaySavingsAccount)
+        .reduce((sum, account) => sum + Math.max(0, firstDashboardMoneyValue(account.current_balance) ?? 0), 0),
+    [plaidAccounts]
+  );
 
   const trackedDebtItems = useMemo<Array<{ balance?: unknown }>>(
     () => (Array.isArray(osState?.debt_utilization?.items) ? osState.debt_utilization.items : []),
@@ -1378,7 +1564,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     () => (fiProgress?.components || []).slice(0, 3),
     [fiProgress]
   );
-  const nextDollarImpact = intelligence?.next_best_dollar_impact ?? null;
   const debtPayoffProjection = financialOsV2?.debt_payoff_projection ?? null;
   const projectedPayoffDebt = useMemo(() => {
     const debts = debtPayoffProjection?.debts || [];
@@ -1389,80 +1574,107 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     }
     return debts.find((item) => Number(item.recommended_extra_payment || 0) > 0) || debts[0] || null;
   }, [debtPayoffProjection]);
-  const payoffRecurringExtra = firstDashboardMoneyValue(
-    projectedPayoffDebt?.recommended_extra_payment,
-    debtPayoffProjection?.recurring_extra_payment,
-    nextDollarImpact?.recommended_extra_payment
-  );
-  const payoffMonthsSaved = firstDashboardMoneyValue(
-    projectedPayoffDebt?.months_saved,
-    nextDollarImpact?.estimated_months_faster
-  );
-  const payoffInterestSaved = firstDashboardMoneyValue(
-    projectedPayoffDebt?.interest_saved,
-    nextDollarImpact?.estimated_interest_saved
-  );
-  const payoffMonthsWithExtra = firstDashboardMoneyValue(
-    projectedPayoffDebt?.with_extra_months,
-    debtPayoffProjection?.portfolio_months_with_extra,
-    nextDollarImpact?.estimated_payoff_months_with_extra
-  );
-  const availableStsForDebt = firstDashboardMoneyValue(
-    financialOsV2?.discretionary_spending_allowance,
-    financialOsV2?.current_period_safe_to_spend,
-    nextDollarImpact?.available_sts,
-    intelligenceContext?.available_sts,
-    nextBestDollar?.available_sts
-  );
-  const payoffExplanation = debtPayoffProjection
-    ? projectedPayoffDebt?.payoff_warning === "missing_minimum_due"
-      ? "Projection is limited until the target debt has a minimum due amount."
-      : projectedPayoffDebt?.name
-        ? `Projection uses Financial OS V2 for ${projectedPayoffDebt.name}. Extra payments only start after due-soon obligations, runway reserves, and FI cash protections are covered.`
-        : "Projection uses the Financial OS V2 avalanche payoff model across active debts."
-    : (nextDollarImpact?.explanation || "Loading impact estimate.");
-  const healthTone = scoreTone(healthScore);
-  const fiTargetExplanation = hasFinancialOsV2
-    ? fiTargetDetails?.source === "user_set_goal"
-      ? `Using your user-set FI target of ${formatDashboardMoney(fiTargetDetails?.configured_value ?? fiTargetAmount)}.`
-      : fiTargetDetails?.annual_required_spend != null
-        ? `Derived FI target = annual required spend ${fmtMoney(Number(fiTargetDetails.annual_required_spend || 0))} x 25.`
-        : (financialOsV2?.formula_notes?.fi_target || "FI target details are loading.")
-    : (intelligenceContext?.fi_cash_target_label || "Loading FI target.");
-  const stabilityToneClass = stabilityTone(stabilityMeter?.label);
-  const payoffAllocationNote =
-    availableStsForDebt != null && Number(payoffRecurringExtra || 0) > 0 && Number(availableStsForDebt || 0) <= 0
-      ? "Discretionary spend allowance is $0, but the extra payoff allocation above comes from planned monthly surplus after bills, minimums, runway, and savings protections."
-      : availableStsForDebt != null
-      ? `Discretionary spend allowance is ${fmtMoney(Number(availableStsForDebt || 0))}, and the payoff model still only uses the repeatable protected extra above rather than the full allowance.`
-      : "The payoff view uses the smaller repeatable extra payment, not the full discretionary spending allowance.";
-  const payoffSimulationBalance = latestPerCard.reduce((sum, statement) => {
-    const balance = Math.max(0, Number((statement as any).new_balance || 0));
-    return sum + balance;
-  }, 0);
-  const payoffWeightedApr =
-    payoffSimulationBalance > 0
-      ? latestPerCard.reduce((sum, statement) => {
-          const balance = Math.max(0, Number((statement as any).new_balance || 0));
-          const apr = Math.max(0, Number((statement as any).apr || 0));
-          return sum + balance * apr;
-        }, 0) / payoffSimulationBalance
-      : 0;
-  const payoffBaselinePayment =
-    payoffSimulationBalance > 0
-      ? Math.max(25, Number(payoffRecurringExtra || 0), payoffSimulationBalance * 0.02)
-      : 0;
+  const payoffDebts = useMemo(() => {
+    const map = new Map<string, PayoffDebtInput>();
+
+    for (const debt of debtRegistry) {
+      if (debt.active === false) continue;
+      addPayoffDebtInput(map, {
+        id: debt.id,
+        name: cleanDebtName(debt.name, debt.lender),
+        lender: debt.lender ?? null,
+        last4: cleanLast4(debt.last4),
+        balance: Math.max(0, firstDashboardMoneyValue(debt.balance) ?? 0),
+        apr: firstDashboardMoneyValue(debt.apr),
+        minimumDue: firstDashboardMoneyValue(debt.minimum_due),
+        creditLimit: firstDashboardMoneyValue(debt.credit_limit),
+        source: "registry",
+      });
+    }
+
+    for (const item of trackedDebtItems) {
+      addPayoffDebtInput(map, {
+        id: recordValue(item, "id") as string | number | null,
+        name: cleanDebtName(recordValue(item, "name"), recordValue(item, "lender")),
+        lender: typeof recordValue(item, "lender") === "string" ? String(recordValue(item, "lender")) : null,
+        last4: cleanLast4(recordValue(item, "last4")),
+        balance: Math.max(0, firstDashboardMoneyValue(recordValue(item, "balance")) ?? 0),
+        apr: firstDashboardMoneyValue(recordValue(item, "apr")),
+        minimumDue: firstDashboardMoneyValue(recordValue(item, "minimum_due")),
+        creditLimit: firstDashboardMoneyValue(recordValue(item, "credit_limit")),
+        source: "financial_os",
+      });
+    }
+
+    for (const item of debtPayoffProjection?.debts || []) {
+      addPayoffDebtInput(map, {
+        id: recordValue(item, "debt_id") as string | number | null,
+        name: cleanDebtName(recordValue(item, "name")),
+        lender: null,
+        last4: cleanLast4(recordValue(item, "last4")),
+        balance: Math.max(0, firstDashboardMoneyValue(recordValue(item, "balance")) ?? 0),
+        apr: firstDashboardMoneyValue(recordValue(item, "apr")),
+        minimumDue: firstDashboardMoneyValue(recordValue(item, "minimum_due")),
+        creditLimit: firstDashboardMoneyValue(recordValue(item, "credit_limit")),
+        source: "projection",
+      });
+    }
+
+    for (const account of plaidAccounts) {
+      const type = String(account.type || "").toLowerCase();
+      const subtype = String(account.subtype || "").toLowerCase();
+      const isLiability =
+        account.is_liability === true ||
+        type === "credit" ||
+        type === "loan" ||
+        ["credit card", "student", "mortgage", "auto", "personal"].includes(subtype);
+      if (!isLiability) continue;
+
+      const balance = Math.max(0, firstDashboardMoneyValue(account.current_balance) ?? 0);
+      const available = firstDashboardMoneyValue(account.available_balance);
+      const creditLimit =
+        type === "credit" && available != null && balance > 0
+          ? Math.max(0, balance + Math.max(0, available))
+          : null;
+
+      addPayoffDebtInput(map, {
+        id: account.account_id,
+        name: cleanDebtName(account.name, account.official_name, account.institution_name),
+        lender: account.institution_name ?? null,
+        last4: cleanLast4(account.mask),
+        balance,
+        apr: null,
+        minimumDue: null,
+        creditLimit,
+        source: "plaid",
+      });
+    }
+
+    return Array.from(map.values()).sort((left, right) => (right.apr ?? 0) - (left.apr ?? 0) || right.balance - left.balance);
+  }, [debtRegistry, debtPayoffProjection, plaidAccounts, trackedDebtItems]);
+
   const payoffSimulationExtraAmount = Math.max(0, Number(payoffSimulationExtra) || 0);
-  const payoffBaselineSimulation = simulateDebtPayoff(
-    payoffSimulationBalance,
-    payoffWeightedApr,
-    payoffBaselinePayment
+  const payoffSimulationBalance = payoffDebts.reduce((sum, debt) => sum + debt.balance, 0);
+  const payoffTotalLimit = payoffDebts.reduce((sum, debt) => sum + Math.max(0, debt.creditLimit ?? 0), 0);
+  const payoffTotalMinimums = payoffDebts.reduce(
+    (sum, debt) => sum + Math.max(0, debt.minimumDue ?? estimatedMinimumDue(debt.balance)),
+    0
   );
-  const payoffExtraSimulation = simulateDebtPayoff(
-    payoffSimulationBalance,
-    payoffWeightedApr,
-    payoffBaselinePayment + payoffSimulationExtraAmount
-  );
+  const hasEstimatedMinimums = payoffDebts.some((debt) => debt.balance > 0 && (debt.minimumDue == null || debt.minimumDue <= 0));
+  const payoffWeightedApr = (() => {
+    const weighted = payoffDebts.reduce((sum, debt) => {
+      if (debt.apr == null || debt.apr <= 0) return sum;
+      return sum + debt.balance * debt.apr;
+    }, 0);
+    const balanceWithApr = payoffDebts.reduce((sum, debt) => {
+      if (debt.apr == null || debt.apr <= 0) return sum;
+      return sum + debt.balance;
+    }, 0);
+    return balanceWithApr > 0 ? weighted / balanceWithApr : 0;
+  })();
+  const payoffAprIsPartial = payoffDebts.some((debt) => debt.balance > 0 && (debt.apr == null || debt.apr <= 0));
+  const payoffBaselineSimulation = simulateDebtPortfolio(payoffDebts, 0);
+  const payoffExtraSimulation = simulateDebtPortfolio(payoffDebts, payoffSimulationExtraAmount);
   const simulatedMonthsSaved =
     payoffBaselineSimulation.months != null && payoffExtraSimulation.months != null
       ? Math.max(0, payoffBaselineSimulation.months - payoffExtraSimulation.months)
@@ -1475,6 +1687,16 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     payoffBaselineSimulation.months && simulatedMonthsSaved != null
       ? clamp01(simulatedMonthsSaved / payoffBaselineSimulation.months)
       : 0;
+  const payoffPriorityDebt = payoffDebts[0] ?? null;
+  const healthTone = scoreTone(healthScore);
+  const fiTargetExplanation = hasFinancialOsV2
+    ? fiTargetDetails?.source === "user_set_goal"
+      ? `Using your user-set FI target of ${formatDashboardMoney(fiTargetDetails?.configured_value ?? fiTargetAmount)}.`
+      : fiTargetDetails?.annual_required_spend != null
+        ? `Derived FI target = annual required spend ${fmtMoney(Number(fiTargetDetails.annual_required_spend || 0))} x 25.`
+        : (financialOsV2?.formula_notes?.fi_target || "FI target details are loading.")
+    : (intelligenceContext?.fi_cash_target_label || "Loading FI target.");
+  const stabilityToneClass = stabilityTone(stabilityMeter?.label);
   const osInsights = useMemo(
     () => (intelligence?.insights?.items || []).slice(0, 5),
     [intelligence]
@@ -1848,6 +2070,106 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
     };
   }, [monthTxns, monthSpendRows, cashMonthTxns, cashAccounts, cashTotals.totalCash, cashLoading, cashErr, financialOsCashTotal, settings]);
 
+  const settingsFinancialOs = recordValue(settings, "financialOS");
+  const settingsPaycheck = recordValue(settingsFinancialOs, "paycheck");
+  const settingsMonthlyIncome = firstDashboardMoneyValue(
+    recordValue(settingsPaycheck, "monthlyIncome"),
+    recordValue(settingsPaycheck, "monthly_income")
+  );
+  const setupMonthlyIncome = firstDashboardMoneyValue(
+    setupItems.find((item) => item.key === "monthly_income")?.value
+  );
+  const debtMinimumIncomeBase = firstDashboardMoneyValue(
+    settingsMonthlyIncome,
+    setupMonthlyIncome,
+    discretionaryExplanation?.monthly_income_baseline,
+    financialOsV2?.monthly_income_baseline,
+    monthMetrics.monthIncome
+  );
+  const debtMinimumIncomePct =
+    debtMinimumIncomeBase != null && debtMinimumIncomeBase > 0
+      ? (payoffTotalMinimums / debtMinimumIncomeBase) * 100
+      : null;
+  const debtMinimumPaycheckLabel =
+    debtMinimumIncomePct != null
+      ? `${debtMinimumIncomePct.toFixed(debtMinimumIncomePct >= 10 ? 0 : 1)}% of paycheck`
+      : null;
+  const debtMinimumBurdenLabel =
+    debtMinimumPaycheckLabel || "Set income to show debt %";
+  const runwayFixedBillsMonthly = firstDashboardMoneyValue(
+    financialOsV2?.bills_manual_obligations_total,
+    (firstDashboardMoneyValue(osState?.upcoming_summary?.bill_total) ?? 0) +
+      (firstDashboardMoneyValue(osState?.upcoming_summary?.manual_bill_total) ?? 0)
+  );
+  const runwayDebtMinimumsMonthly = firstDashboardMoneyValue(
+    financialOsV2?.debt_minimums_cash,
+    financialOsV2?.debt_minimums,
+    nextBestDollar?.breakdown?.debt_minimums_total,
+    payoffTotalMinimums
+  );
+  const runwayMonthlyEssentials = firstDashboardMoneyValue(
+    monthlyEssentials,
+    intelligenceContext?.monthly_essentials_total,
+    runwayFixedBillsMonthly
+  );
+  const runwayOneMonthNeed =
+    Math.max(0, runwayMonthlyEssentials ?? 0, runwayFixedBillsMonthly ?? 0) +
+    Math.max(0, runwayDebtMinimumsMonthly ?? 0);
+  const runwayTargetMonthCount = Math.max(0, runwayTargetMonths ?? settings.target_runway_months ?? 3);
+  const runwayCalculatedTarget =
+    runwayOneMonthNeed > 0
+      ? runwayOneMonthNeed * runwayTargetMonthCount
+      : firstDashboardMoneyValue(runwayReserveTarget) ?? 0;
+  const manualRunwayCash = Math.max(0, firstDashboardMoneyValue(manualRunwayCashInput) ?? 0);
+  const detectedRunwaySavings = Math.max(0, importedRunwaySavings) + Math.max(0, plaidRunwaySavings);
+  const runwayBackendProtected = firstDashboardMoneyValue(runwayReserveCurrent) ?? 0;
+  const runwayCashAfterObligations =
+    financialOsCashTotal != null
+      ? Math.max(0, Number(financialOsCashTotal || 0) - Number(protectedObligationsTotal || 0))
+      : 0;
+  const runwayAutoProtected = Math.max(
+    0,
+    runwayBackendProtected,
+    detectedRunwaySavings,
+    runwayCashAfterObligations
+  );
+  const runwayCurrentProtected = runwayAutoProtected + manualRunwayCash;
+  const runwayCalculatedMonths =
+    runwayOneMonthNeed > 0 ? Math.round((runwayCurrentProtected / runwayOneMonthNeed) * 10) / 10 : runwayMonths;
+  const runwayGap = Math.max(0, runwayCalculatedTarget - runwayCurrentProtected);
+  const runwayIncomeBase = debtMinimumIncomeBase;
+  const runwayDiscretionaryProtection = firstDashboardMoneyValue(
+    financialOsV2?.monthly_discretionary_cap,
+    discretionaryExplanation?.discretionary_cap_amount,
+    0
+  );
+  const runwayRepeatableSurplus =
+    runwayIncomeBase != null && runwayIncomeBase > 0
+      ? Math.max(0, runwayIncomeBase - runwayOneMonthNeed - Number(runwayDiscretionaryProtection || 0))
+      : null;
+  const runwaySuggestedMonthly =
+    runwayGap <= 0 ? 0 : Math.min(runwayGap, Math.max(0, runwayRepeatableSurplus ?? 0));
+  const runwayContributionPct =
+    runwayIncomeBase != null && runwayIncomeBase > 0
+      ? (runwaySuggestedMonthly / runwayIncomeBase) * 100
+      : null;
+  const runwayContributionLabel =
+    runwayContributionPct != null
+      ? `${runwayContributionPct.toFixed(runwayContributionPct >= 10 ? 0 : 1)}% of paycheck`
+      : "Set income to show runway %";
+  const runwayMonthsToTarget =
+    runwayGap <= 0
+      ? 0
+      : runwaySuggestedMonthly > 0
+      ? Math.ceil(runwayGap / runwaySuggestedMonthly)
+      : null;
+  const runwayForecastLabel =
+    runwayGap <= 0
+      ? "Target funded"
+      : runwayMonthsToTarget != null
+      ? `${formatMonths(runwayMonthsToTarget)} to target`
+      : "Needs income surplus";
+
   const stageUi = useMemo(() => stageBadge(monthMetrics.stage), [monthMetrics.stage]);
   const spendAllowanceStatus =
     nextBestDollarLoadingState
@@ -1869,20 +2191,20 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
       : spendAllowanceStatus === "Paused"
       ? "border-red-500/20 bg-red-500/10 text-red-200"
       : "border-white/10 bg-white/5 text-zinc-300";
-  const runwayReserveLabel =
-    runwayReserveCurrent != null
-      ? `${fmtMoney(Number(runwayReserveCurrent || 0))} protected`
-      : "Protected amount loading";
   const debtPriorityLabel =
-    debtCountdown?.priority_debt?.name
+    payoffPriorityDebt?.name
+      ? `Priority: ${payoffPriorityDebt.name}`
+      : debtCountdown?.priority_debt?.name
       ? `Priority: ${debtCountdown.priority_debt.name}`
       : projectedPayoffDebt?.name
       ? `Priority: ${projectedPayoffDebt.name}`
       : "Priority debt loading";
   const payoffWithExtraLabel =
-    payoffMonthsWithExtra != null
-      ? `${formatMonths(payoffMonthsWithExtra)} with extra`
-      : "Payoff with extra loading";
+    payoffExtraSimulation.months != null
+      ? `${formatMonths(payoffExtraSimulation.months)} with extra`
+      : payoffSimulationBalance > 0
+      ? "Needs payment data"
+      : "Add balances to simulate";
   const totalPosition = firstDashboardMoneyValue(
     (financialOsV2 as (FinancialOsV2 & { net_worth?: unknown }) | null)?.net_worth,
     (osState as (OsStateResponse & { net_worth?: unknown }) | null)?.net_worth,
@@ -2301,31 +2623,117 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div>
                     <div className="text-xs text-zinc-400">Runway</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
-                      {runwayMonths != null ? formatMonths(runwayMonths) : "Loading"}
+                      {runwayCalculatedMonths != null ? formatMonths(runwayCalculatedMonths) : "Loading"}
                     </div>
                   </div>
-                  <span className="shrink-0 rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-sky-200">
-                    Runway protected
-                  </span>
+                  <div className="flex shrink-0 flex-col items-end gap-2">
+                    <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-sky-200">
+                      Runway protected
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowRunwayDetails((open) => !open)}
+                      className={
+                        runwayContributionPct != null
+                          ? "rounded-full border border-sky-400/20 bg-sky-400/10 px-2.5 py-1 text-[11px] font-medium text-sky-100 hover:bg-sky-400/15"
+                          : "rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-white/10"
+                      }
+                    >
+                      {runwayContributionLabel}
+                    </button>
+                  </div>
                 </div>
-                <div className="mt-3 text-xs leading-5 text-zinc-400">
-                  {runwayReserveLabel}
-                  {runwayTargetMonths != null ? ` • Target ${formatMonths(runwayTargetMonths)}` : ""}
+                <div className="mt-3 space-y-1 text-xs leading-5 text-zinc-400">
+                  <div>
+                    {fmtMoney(runwayCurrentProtected)} protected - Target {fmtMoney(runwayCalculatedTarget)}
+                  </div>
+                  <div>
+                    1 month need {fmtMoney(runwayOneMonthNeed)} - Target {formatMonths(runwayTargetMonthCount)}
+                  </div>
+                  <div>
+                    Suggested {fmtMoney(runwaySuggestedMonthly)}/mo - {runwayForecastLabel}
+                  </div>
                 </div>
                 <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
                   <div
                     className="h-full rounded-full bg-sky-200"
                     style={{
                       width: `${clamp01(
-                        runwayReserveCurrent != null && runwayReserveTarget != null && runwayReserveTarget > 0
-                          ? Number(runwayReserveCurrent || 0) / Number(runwayReserveTarget || 1)
-                          : runwayMonths != null && runwayTargetMonths != null && runwayTargetMonths > 0
-                          ? Number(runwayMonths || 0) / Number(runwayTargetMonths || 1)
+                        runwayCalculatedTarget > 0
+                          ? runwayCurrentProtected / runwayCalculatedTarget
+                          : runwayCalculatedMonths != null && runwayTargetMonthCount > 0
+                          ? Number(runwayCalculatedMonths || 0) / Number(runwayTargetMonthCount || 1)
                           : 0
                       ) * 100}%`,
                     }}
                   />
                 </div>
+                {showRunwayDetails ? (
+                  <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14]/80 p-3 text-xs text-zinc-400">
+                    <div className="font-medium text-zinc-100">Runway calculation</div>
+                    <div className="mt-3 grid gap-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Essentials / fixed bills</span>
+                        <span className="font-mono text-zinc-100">{fmtMoney(Math.max(runwayMonthlyEssentials ?? 0, runwayFixedBillsMonthly ?? 0))}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Debt minimums</span>
+                        <span className="font-mono text-zinc-100">{fmtMoney(runwayDebtMinimumsMonthly ?? 0)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>One month survival need</span>
+                        <span className="font-mono text-zinc-100">{fmtMoney(runwayOneMonthNeed)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Target cash</span>
+                        <span className="font-mono text-zinc-100">
+                          {fmtMoney(runwayOneMonthNeed)} x {formatMonths(runwayTargetMonthCount)} = {fmtMoney(runwayCalculatedTarget)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Detected savings</span>
+                        <span className="text-right font-mono text-zinc-100">
+                          {fmtMoney(detectedRunwaySavings)}
+                          <span className="block font-sans text-[10px] text-zinc-500">
+                            Cash {fmtMoney(importedRunwaySavings)} - Plaid {fmtMoney(plaidRunwaySavings)}
+                          </span>
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Manual runway cash</span>
+                        <input
+                          value={manualRunwayCashInput}
+                          onChange={(event) => updateManualRunwayCashInput(event.target.value)}
+                          inputMode="decimal"
+                          className="w-28 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-right font-mono text-zinc-100 outline-none focus:border-sky-400/40"
+                          placeholder="0"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Auto protected base</span>
+                        <span className="font-mono text-zinc-100">{fmtMoney(runwayAutoProtected)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Current protected runway</span>
+                        <span className="font-mono text-zinc-100">{fmtMoney(runwayCurrentProtected)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Gap left</span>
+                        <span className="font-mono text-zinc-100">{fmtMoney(runwayGap)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Repeatable monthly surplus</span>
+                        <span className="font-mono text-zinc-100">
+                          {runwayRepeatableSurplus != null ? fmtMoney(runwayRepeatableSurplus) : "Needs income"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="mt-3 leading-5 text-zinc-500">
+                      Current protected runway uses detected savings from imported cash statements and Plaid savings accounts,
+                      plus any manual runway cash entered here. Suggested monthly runway is the smaller of the remaining gap and repeatable surplus.
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className="rounded-xl border border-white/10 bg-[#0E141C] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.18)]">
@@ -2333,7 +2741,9 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                   <div>
                     <div className="text-xs text-zinc-400">Debt-free Countdown</div>
                     <div className="mt-2 text-2xl font-semibold text-zinc-100">
-                      {fmtMonthsCompact(debtCountdown?.estimated_months_remaining)}
+                      {payoffExtraSimulation.months != null
+                        ? formatMonths(payoffExtraSimulation.months)
+                        : fmtMonthsCompact(debtCountdown?.estimated_months_remaining)}
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-2">
@@ -2347,17 +2757,39 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                     >
                       {showPayoffSimulator ? "Hide simulator" : "Simulate"}
                     </button>
+                    <div
+                      className={
+                        debtMinimumPaycheckLabel
+                          ? "rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-100"
+                          : "rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-zinc-400"
+                      }
+                    >
+                      {debtMinimumBurdenLabel}
+                    </div>
                   </div>
                 </div>
                 <div className="mt-3 space-y-1 text-xs leading-5 text-zinc-400">
                   <div className="truncate">{debtPriorityLabel}</div>
                   <div className="truncate">{payoffWithExtraLabel}</div>
+                  <div className="truncate">
+                    Minimums: {fmtMoney(payoffTotalMinimums)}
+                    {hasEstimatedMinimums ? " - some estimated" : ""}
+                  </div>
                 </div>
                 <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/5">
                   <div
                     className="h-full rounded-full bg-emerald-200"
-                    style={{ width: `${Number(payoffRecurringExtra || 0) > 0 ? 100 : 10}%` }}
+                    style={{
+                      width: `${Math.max(
+                        payoffSimulationBalance > 0 ? 6 : 0,
+                        clamp01(payoffTotalLimit > 0 ? payoffSimulationBalance / payoffTotalLimit : 0) * 100
+                      )}%`,
+                    }}
                   />
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-zinc-500">
+                  <span>Balance {fmtMoney(payoffSimulationBalance)}</span>
+                  <span>{payoffTotalLimit > 0 ? `Limit ${fmtMoney(payoffTotalLimit)}` : "Limit not set"}</span>
                 </div>
                 {showPayoffSimulator ? (
                   <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14]/80 p-3">
@@ -2391,9 +2823,22 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                         <span className="font-mono text-zinc-100">{fmtMoney(payoffSimulationBalance)}</span>
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <span>Total limit</span>
+                        <span className="font-mono text-zinc-100">
+                          {payoffTotalLimit > 0 ? fmtMoney(payoffTotalLimit) : "Not set"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
                         <span>Avg APR</span>
                         <span className="font-mono text-zinc-100">
-                          {payoffWeightedApr > 0 ? `${payoffWeightedApr.toFixed(1)}%` : "Needs APR"}
+                          {payoffWeightedApr > 0 ? `${payoffWeightedApr.toFixed(1)}%${payoffAprIsPartial ? " partial" : ""}` : "Needs APR"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <span>Minimums</span>
+                        <span className="font-mono text-zinc-100">
+                          {fmtMoney(payoffTotalMinimums)}
+                          {debtMinimumPaycheckLabel ? ` - ${debtMinimumPaycheckLabel}` : ""}
                         </span>
                       </div>
                     </div>
@@ -2416,6 +2861,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                           Interest saved:{" "}
                           <span className="font-mono text-zinc-100">
                             {simulatedInterestSaved != null ? fmtMoney(simulatedInterestSaved) : "Needs APR"}
+                          </span>
+                        </div>
+                        <div>
+                          Minimum-only payoff:{" "}
+                          <span className="font-mono text-zinc-100">
+                            {payoffBaselineSimulation.months != null ? formatMonths(payoffBaselineSimulation.months) : "Needs data"}
                           </span>
                         </div>
                         <div>
@@ -2827,42 +3278,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-sm font-semibold text-zinc-100">Debt-free Countdown</div>
-                  <div className="mt-1 text-xs text-zinc-400">
-                    Estimated from current balances, minimums, and the current extra-payment suggestion.
-                  </div>
-                </div>
-                {debtCountdown?.is_partial ? (
-                  <div className="inline-flex items-center rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs text-amber-300">
-                    Partial
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="mt-4 text-3xl font-semibold text-zinc-100">
-                {fmtMonthsCompact(debtCountdown?.estimated_months_remaining)}
-              </div>
-
-              <div className="mt-2 text-sm text-zinc-300">
-                {debtCountdown?.priority_debt?.name
-                  ? `Priority debt: ${debtCountdown.priority_debt.name}`
-                  : "No priority debt available"}
-              </div>
-
-              <div className="mt-4 text-sm leading-6 text-zinc-400">
-                {debtCountdown?.explanation || "Loading payoff projection."}
-              </div>
-
-              {Number(debtCountdown?.excluded_debts?.length || 0) > 0 ? (
-                <div className="mt-4 rounded-xl border border-white/10 bg-[#0B0F14] p-3 text-xs text-zinc-400">
-                  Excluded debts: {(debtCountdown?.excluded_debts || []).map((item) => item.name).filter(Boolean).join(", ")}
-                </div>
-              ) : null}
-            </div>
-
-            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
                   <div className="text-sm font-semibold text-zinc-100">FI Progress</div>
                   <div className="mt-1 text-xs text-zinc-400">
                     V2 progress tracks the protected path toward your FI cash target.
@@ -2937,64 +3352,6 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
               </div>
             </div>
 
-            <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-zinc-100">Debt Payoff Projection</div>
-                  <div className="mt-1 text-xs text-zinc-400">
-                    Uses the Financial OS V2 payoff model when available.
-                  </div>
-                </div>
-                <div className="text-xs text-zinc-400">
-                  {projectedPayoffDebt?.name || nextDollarImpact?.target_debt?.name || nextBestDollar?.recommendation?.name || "No target"}
-                </div>
-              </div>
-
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Extra payoff allocation</div>
-                  <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {formatDashboardMoney(payoffRecurringExtra)}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Months faster</div>
-                  <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {payoffMonthsSaved != null
-                      ? formatMonths(payoffMonthsSaved)
-                      : "--"}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Interest saved</div>
-                  <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {formatDashboardMoney(payoffInterestSaved)}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-[#0B0F14] p-3">
-                  <div className="text-xs text-zinc-400">Payoff with extra</div>
-                  <div className="mt-1 text-lg font-semibold text-zinc-100">
-                    {payoffMonthsWithExtra != null
-                      ? formatMonths(payoffMonthsWithExtra)
-                      : "--"}
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-4 text-sm leading-6 text-zinc-400">
-                {payoffExplanation}
-              </div>
-
-              <div className="mt-3 text-xs text-zinc-500">
-                {payoffAllocationNote}
-              </div>
-
-              <div className="mt-3 text-xs text-zinc-500">
-                {payoffMonthsWithExtra != null && projectedPayoffDebt?.minimum_only_months != null
-                  ? `Minimum-only payoff is about ${formatMonths(projectedPayoffDebt.minimum_only_months)} before extra payments.`
-                  : "Approximation assumes this extra amount can be repeated monthly and debt APRs stay flat."}
-              </div>
-            </div>
           </div>
         )}
 
