@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { useAuth } from "@/components/auth/AuthProvider";
@@ -365,21 +364,6 @@ export default function DebtsPage() {
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={startCreateDebt}
-                className="rounded-xl border border-white/10 bg-white/10 px-3 py-2 text-xs text-zinc-100 hover:bg-white/15"
-              >
-                Add debt
-              </button>
-              <Link
-                href="/settings"
-                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
-              >
-                Settings
-              </Link>
-            </div>
           </div>
         </div>
 
@@ -418,35 +402,6 @@ export default function DebtsPage() {
           </div>
         ) : null}
 
-        {showCreate ? (
-          <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-5">
-            <div className="text-sm font-semibold text-zinc-100">Add debt</div>
-            <div className="mt-1 text-xs text-zinc-400">
-              This writes directly to the existing backend debt registry.
-            </div>
-            <div className="mt-4">
-              <DebtFormFields form={newDebtForm} onChange={setNewDebtForm} />
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={handleCreateDebt}
-                disabled={saving}
-                className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
-              >
-                {saving ? "Saving..." : "Save debt"}
-              </button>
-              <button
-                type="button"
-                onClick={cancelEditor}
-                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : null}
-
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -455,14 +410,52 @@ export default function DebtsPage() {
                 Name, balance, APR, minimum due, due timing, and type all live here now.
               </div>
             </div>
-            <button
-              type="button"
-              onClick={fetchDebtRegistry}
-              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
-            >
-              Refresh
-            </button>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={startCreateDebt}
+                className="rounded-xl border border-white/10 bg-white/10 px-3 py-2 text-xs text-zinc-100 transition-transform duration-150 hover:-translate-y-0.5 hover:bg-white/15 active:translate-y-0.5 active:scale-95"
+              >
+                Add debt
+              </button>
+              <button
+                type="button"
+                onClick={fetchDebtRegistry}
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+              >
+                Refresh
+              </button>
+            </div>
           </div>
+
+          {showCreate ? (
+            <div className="mt-4 rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4">
+              <div className="text-sm font-semibold text-zinc-100">Add debt</div>
+              <div className="mt-1 text-xs text-zinc-400">
+                This writes directly to the existing backend debt registry.
+              </div>
+              <div className="mt-4">
+                <DebtFormFields form={newDebtForm} onChange={setNewDebtForm} />
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleCreateDebt}
+                  disabled={saving}
+                  className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                >
+                  {saving ? "Saving..." : "Save debt"}
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelEditor}
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-100 hover:bg-white/10"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="mt-4 space-y-3">
             {loading ? (
