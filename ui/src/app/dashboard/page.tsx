@@ -1933,17 +1933,20 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
       : monthlyTrendBars.length
       ? monthlyTrendBars
       : currentMonthTrendRows;
-  const fallbackTrendBars = [38, 44, 41, 52, 49, 61, 58, 70].map((value, index) => ({
-    label: `P${index + 1}`,
+  const hasRealHeroTrendData = dashboardTrendBars.some((bar) => bar.value > 0);
+  const demoTrendBars = [420, 680, 520, 790, 610, 930, 740, 1040].map((value, index) => ({
+    label: trendRange === "1m" ? `W${(index % 4) + 1}` : `M${index + 1}`,
     value,
   }));
-  const visibleHeroTrendBars = dashboardTrendBars.some((bar) => bar.value > 0)
+  const visibleHeroTrendBars = hasRealHeroTrendData
     ? dashboardTrendBars
-    : fallbackTrendBars;
+    : demoTrendBars;
   const heroTrendMax = Math.max(1, ...visibleHeroTrendBars.map((bar) => bar.value));
   const dashboardTrendLabel = trendRange === "1m" ? "Current month spend" : "Spending trend";
   const heroTrendPeriodLabel =
-    trendRange === "all"
+    !hasRealHeroTrendData
+      ? "Demo preview until real data is added"
+      : trendRange === "all"
       ? `${monthlyTrendBars.length || trend.length || visibleHeroTrendBars.length} periods`
       : trendRangeOptions.find((option) => option.value === trendRange)?.label || "Trend";
   const advisorSummaryBullets = (
@@ -2041,7 +2044,12 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
             </div>
           </div>
 
-          <div className="mt-5 rounded-xl border border-white/10 bg-[#0B0F14]/70 p-4">
+          <div className="relative mt-5 overflow-hidden rounded-xl border border-white/10 bg-[#0B0F14]/70 p-4">
+            {!hasRealHeroTrendData ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-6xl font-semibold tracking-[0.22em] text-white/[0.035] sm:text-7xl">
+                DEMO
+              </div>
+            ) : null}
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <div className="text-xs font-medium text-zinc-300">{dashboardTrendLabel}</div>
@@ -2068,21 +2076,36 @@ const [upcomingTotal, setUpcomingTotal] = useState<number | null>(null);
                 })}
               </div>
             </div>
-            <div className="mt-4 flex h-20 items-end gap-2">
+            <div className="relative mt-5 flex h-32 items-end gap-2 border-b border-white/10 pt-5">
               {visibleHeroTrendBars.map((bar, index) => (
                 <div
                   key={`${bar.label}-${index}`}
-                  className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1"
+                  className="flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1"
                   title={`${bar.label}: ${fmtMoney(bar.value)}`}
                 >
-                  <div
-                    className="w-full rounded-t-md border border-white/10 bg-white/10"
-                    style={{ height: `${Math.max(14, (bar.value / heroTrendMax) * 100)}%` }}
-                  />
+                  <div className="text-[10px] font-medium text-zinc-300">
+                    {fmtMoney(bar.value)}
+                  </div>
+                  <div className="flex w-full flex-1 items-end">
+                    <div
+                      className={[
+                        "w-full rounded-t-md border",
+                        hasRealHeroTrendData
+                          ? "border-sky-300/20 bg-sky-300/20"
+                          : "border-emerald-200/20 bg-gradient-to-t from-emerald-300/20 to-sky-300/25",
+                      ].join(" ")}
+                      style={{ height: `${Math.max(14, (bar.value / heroTrendMax) * 100)}%` }}
+                    />
+                  </div>
                   <div className="w-full truncate text-center text-[9px] text-zinc-500">{bar.label}</div>
                 </div>
               ))}
             </div>
+            {!hasRealHeroTrendData ? (
+              <div className="relative mt-3 text-[11px] text-zinc-500">
+                Demo numbers show how the graph will look. Real activity replaces this after accounts, bills, debts, or activity data is added.
+              </div>
+            ) : null}
           </div>
         </section>
 

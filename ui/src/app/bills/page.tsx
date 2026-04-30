@@ -230,13 +230,6 @@ export default function BillsPage() {
                 Add recurring obligations here so upcoming obligations and STS can protect them.
               </div>
             </div>
-
-            <button
-              onClick={openCreateForm}
-              className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-100 hover:bg-white/10"
-            >
-              Add Bill
-            </button>
           </div>
         </div>
 
@@ -279,102 +272,6 @@ export default function BillsPage() {
           </div>
         </div>
 
-        {formOpen && (
-          <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
-            <div className="text-sm font-semibold text-zinc-100">
-              {editingId ? "Edit Bill" : "New Bill"}
-            </div>
-            <div className="mt-1 text-xs text-zinc-500">
-              Use due day for monthly bills or due date when you want a specific anchor date.
-            </div>
-
-            <form onSubmit={handleSubmit} className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
-              <div className="xl:col-span-2">
-                <div className="text-xs text-zinc-400">Name</div>
-                <input
-                  value={form.name}
-                  onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                  placeholder="Rent"
-                />
-              </div>
-
-              <div>
-                <div className="text-xs text-zinc-400">Amount</div>
-                <input
-                  value={form.amount}
-                  onChange={(e) => setForm((prev) => ({ ...prev, amount: e.target.value }))}
-                  inputMode="decimal"
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                  placeholder="1200"
-                />
-              </div>
-
-              <div>
-                <div className="text-xs text-zinc-400">Frequency</div>
-                <select
-                  value={form.frequency}
-                  onChange={(e) => setForm((prev) => ({ ...prev, frequency: e.target.value as "monthly" | "weekly" }))}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                >
-                  <option value="monthly">Monthly</option>
-                  <option value="weekly">Weekly</option>
-                </select>
-              </div>
-
-              <div>
-                <div className="text-xs text-zinc-400">Due Day</div>
-                <input
-                  value={form.due_day}
-                  onChange={(e) => setForm((prev) => ({ ...prev, due_day: e.target.value }))}
-                  inputMode="numeric"
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                  placeholder="1-31"
-                />
-              </div>
-
-              <div>
-                <div className="text-xs text-zinc-400">Due Date</div>
-                <input
-                  type="date"
-                  value={form.due_date}
-                  onChange={(e) => setForm((prev) => ({ ...prev, due_date: e.target.value }))}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                />
-              </div>
-
-              <div>
-                <div className="text-xs text-zinc-400">Category</div>
-                <select
-                  value={form.category}
-                  onChange={(e) => setForm((prev) => ({ ...prev, category: e.target.value as "essential" | "discretionary" }))}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                >
-                  <option value="essential">Essential</option>
-                  <option value="discretionary">Discretionary</option>
-                </select>
-              </div>
-
-              <div className="md:col-span-2 xl:col-span-6 flex flex-wrap gap-2 pt-1">
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm text-zinc-100 hover:bg-white/15 disabled:opacity-60"
-                >
-                  {saving ? "Saving..." : editingId ? "Save Changes" : "Create Bill"}
-                </button>
-                <button
-                  type="button"
-                  onClick={closeForm}
-                  className="rounded-xl border border-white/10 bg-[#0B0F14] px-4 py-2 text-sm text-zinc-300 hover:bg-white/5"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
         {error && (
           <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
             {error}
@@ -383,9 +280,114 @@ export default function BillsPage() {
 
         <div className="rounded-2xl border border-white/10 bg-[#0E141C] p-5">
           <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-zinc-100">All Bills</div>
-            <div className="text-xs text-zinc-500">{bills.length} total</div>
+            <div>
+              <div className="text-sm font-semibold text-zinc-100">All Bills</div>
+              <div className="mt-1 text-xs text-zinc-500">{bills.length} total</div>
+            </div>
+            <button
+              type="button"
+              onClick={openCreateForm}
+              className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-white/10"
+            >
+              Add Bill
+            </button>
           </div>
+
+          {formOpen && (
+            <div className="mt-4 rounded-2xl border border-white/10 bg-[#0B0F14] p-4">
+              <div className="text-sm font-semibold text-zinc-100">
+                {editingId ? "Edit Bill" : "New Bill"}
+              </div>
+              <div className="mt-1 text-xs text-zinc-500">
+                Use due day for monthly bills or due date when you want a specific anchor date.
+              </div>
+
+              <form onSubmit={handleSubmit} className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                <div className="xl:col-span-2">
+                  <div className="text-xs text-zinc-400">Name</div>
+                  <input
+                    value={form.name}
+                    onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                    placeholder="Rent"
+                  />
+                </div>
+
+                <div>
+                  <div className="text-xs text-zinc-400">Amount</div>
+                  <input
+                    value={form.amount}
+                    onChange={(e) => setForm((prev) => ({ ...prev, amount: e.target.value }))}
+                    inputMode="decimal"
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                    placeholder="1200"
+                  />
+                </div>
+
+                <div>
+                  <div className="text-xs text-zinc-400">Frequency</div>
+                  <select
+                    value={form.frequency}
+                    onChange={(e) => setForm((prev) => ({ ...prev, frequency: e.target.value as "monthly" | "weekly" }))}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                  >
+                    <option value="monthly">Monthly</option>
+                    <option value="weekly">Weekly</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div className="text-xs text-zinc-400">Due Day</div>
+                  <input
+                    value={form.due_day}
+                    onChange={(e) => setForm((prev) => ({ ...prev, due_day: e.target.value }))}
+                    inputMode="numeric"
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                    placeholder="1-31"
+                  />
+                </div>
+
+                <div>
+                  <div className="text-xs text-zinc-400">Due Date</div>
+                  <input
+                    type="date"
+                    value={form.due_date}
+                    onChange={(e) => setForm((prev) => ({ ...prev, due_date: e.target.value }))}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                  />
+                </div>
+
+                <div>
+                  <div className="text-xs text-zinc-400">Category</div>
+                  <select
+                    value={form.category}
+                    onChange={(e) => setForm((prev) => ({ ...prev, category: e.target.value as "essential" | "discretionary" }))}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-[#0B0F14] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
+                  >
+                    <option value="essential">Essential</option>
+                    <option value="discretionary">Discretionary</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1 md:col-span-2 xl:col-span-6">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm text-zinc-100 hover:bg-white/15 disabled:opacity-60"
+                  >
+                    {saving ? "Saving..." : editingId ? "Save Changes" : "Create Bill"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeForm}
+                    className="rounded-xl border border-white/10 bg-[#0B0F14] px-4 py-2 text-sm text-zinc-300 hover:bg-white/5"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
 
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-left text-sm">
